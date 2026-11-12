@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate Kamerplanter secrets on first boot
+ConditionPathExists=!/etc/kamerplanter/secrets.env
+Before=arangodb.service valkey.service backend.service celery-worker.service celery-beat.service frontend.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/kamerplanter/firstboot
+
+[Install]
+WantedBy=multi-user.target

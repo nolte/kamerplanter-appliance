@@ -1,0 +1,41 @@
+version: "3"
+
+vars:
+  TOOLS_IMAGE: kamerplanter-appliance-tools:poc
+  IMAGE_REF: localhost/kamerplanter-appliance:poc
+
+env:
+  TOOLS_IMAGE: "{{.TOOLS_IMAGE}}"
+
+tasks:
+  default:
+    desc: List the available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  tools:build:
+    desc: Build the tool container (podman, image-builder, QEMU)
+    cmds:
+      - docker build -t {{.TOOLS_IMAGE}} -f build/tools.Containerfile build
+
+  image:build:
+    desc: Build the system image of the appliance
+    cmds:
+      - build/in-tools.sh podman build -t {{.IMAGE_REF}} image
+
+  disk:build:
+    desc: Build the raw disk image from the system image
+    cmds:
+      - build/in-tools.sh build/disk.sh {{.IMAGE_REF}}
+
+  test:boot:
+    desc: Boot the disk image in QEMU under the firmware and device matrix
+    cmds:
+      - build/in-tools.sh tests/boot/run.sh {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove build output and the tool container's volumes
+    cmds:
+      - build/in-tools.sh rm -rf .build
+      - docker volume rm -f kamerplanter-appliance-containers kamerplanter-appliance-osbuild

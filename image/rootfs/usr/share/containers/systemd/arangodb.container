@@ -1,0 +1,28 @@
+[Unit]
+Description=Kamerplanter ArangoDB
+Requires=kamerplanter-firstboot.service
+After=kamerplanter-firstboot.service
+
+[Container]
+ContainerName=arangodb
+Image=docker.io/library/arangodb:3.12@sha256:e48adfc58986a10e0316aa23ccae95ca580d880a41c76a8f0df68f9c29b470f2
+Network=kamerplanter.network
+Volume=arangodb.volume:/var/lib/arangodb3
+EnvironmentFile=/usr/share/kamerplanter/kamerplanter.env
+EnvironmentFile=/etc/kamerplanter/secrets.env
+# Any HTTP answer counts: the endpoint requires authentication.
+HealthCmd=curl -s -o /dev/null http://localhost:8529/_api/version
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+HealthStartPeriod=60s
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+Restart=always
+# The first start pulls the image from the registry.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
