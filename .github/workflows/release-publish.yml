@@ -41,17 +41,24 @@ on:
 # events cascade to release-cd-refresh-master.yml and
 # release-cd-deliver-docs.yml; GITHUB_TOKEN-authored ones do not.
 
-# Read-only floor; jobs declare what they need. Deliberately no workflow-level
-# concurrency: a release run must never be cancelled in flight, and the
-# reusable carries its own group.
+# Read-only floor; jobs declare what they need.
 permissions:
   contents: read
+
+# One release run per tag at a time, never cancelled in flight. The group name
+# differs from the reusable's own group, so the two cannot block each other.
+concurrency:
+  group: release-publish-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
     name: Check the draft
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Draft releases are only visible to a token with write access.
+    permissions:
+      contents: write
     outputs:
       commit: ${{ steps.check.outputs.commit }}
       build: ${{ steps.check.outputs.build }}
@@ -80,13 +87,23 @@ jobs:
               --jq '.[] | select(.isDraft) | "  - " + .tagName' || true
             exit 1
           fi
+          # The source-commit file is uploaded last, so its presence means the
+          # uploads before it completed; every file SHA256SUMS lists must be
+          # attached as well.
           source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
           assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          complete() {
+            grep -Fqx "$source_asset" <<<"$assets" && grep -Fqx SHA256SUMS <<<"$assets" || return 1
+            [ "$(gh release download "$TAG" --pattern "$source_asset" --output -)" = "$COMMIT" ] || return 1
+            local name
+            for name in $(gh release download "$TAG" --pattern SHA256SUMS --output - | awk '{print $2}'); do
+              grep -Fqx "$name" <<<"$assets" || return 1
+            done
+          }
           if [ -z "$assets" ]; then
             build=true
-          elif grep -Fqx "$source_asset" <<<"$assets" &&
-            [ "$(gh release download "$TAG" --pattern "$source_asset" --output -)" = "$COMMIT" ]; then
-            echo "The draft already carries the image of $COMMIT; reusing it."
+          elif complete; then
+            echo "The draft already carries the complete image of $COMMIT; reusing it."
             build=false
           else
             echo "::error::the draft carries assets that were not built from $COMMIT; delete them from the draft and dispatch again"
@@ -131,11 +148,14 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum --check SHA256SUMS
-          printf '%s\n' "$COMMIT" >"kamerplanter-appliance-$TAG-source-commit.txt"
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          printf '%s\n' "$COMMIT" >"$source_asset"
+          sha256sum -- "$source_asset" >>SHA256SUMS
           ls -l
 
       # A dry run builds and checks the image but changes no release. prepare
-      # has made sure the draft carries no assets, so nothing is replaced.
+      # has made sure the draft carries no assets, and the workflow-level
+      # group keeps a second run of the same tag out, so nothing is replaced.
       - name: Attach to the draft release
         if: ${{ !inputs.dry_run }}
         working-directory: dist
@@ -145,7 +165,12 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" -- *
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          # The image first, the checksums next, the source-commit file last:
+          # prepare treats that file as the sign of a complete upload.
+          for file in *.raw.xz SHA256SUMS "$source_asset"; do
+            gh release upload "$TAG" -- "$file"
+          done
           attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
           for file in *; do
             grep -Fqx "$file" <<<"$attached" || { echo "::error::$file is missing on $TAG"; exit 1; }
@@ -156,8 +181,10 @@ jobs:
   current:
     name: Check develop has not moved
     needs: [prepare, assets]
-    # Also when the image was reused and the assets job was skipped.
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.assets.result == 'success' || needs.assets.result == 'skipped') }}
+    # Either the image was attached in this run, or prepare found it complete
+    # on the draft and skipped the build on purpose. A failed build also
+    # leaves assets skipped, so that case is told apart by prepare's output.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.assets.result == 'success' || (needs.assets.result == 'skipped' && needs.prepare.outputs.build == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -173,9 +200,15 @@ jobs:
             echo "::error::develop moved from $COMMIT to $head while the image was built; delete the assets from the draft and dispatch again"
             exit 1
           fi
+          # A merge between this check and the reusable creating the tag on
+          # develop is not caught; the window is the start-up time of the
+          # publish job.
 
   publish:
     needs: current
+    # Skipped jobs earlier in the chain (the reuse path) would otherwise skip
+    # this job as well.
+    if: ${{ !cancelled() && needs.current.result == 'success' }}
     uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@9048eafc8665611b8109e8c5a519b78e0fceffa6 # v2.2.1
     with:
       tag: ${{ inputs.tag }}

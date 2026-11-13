@@ -55,7 +55,8 @@ permissions:
 # ref. A run called by the release workflow carries the caller's event name
 # (workflow_dispatch) and its version in the group, so it never shares a group
 # with a push, a pull request or a release of another tag, and it is never
-# cancelled in flight.
+# cancelled in flight. (GitHub still drops a pending run when a third one
+# queues into the same group; release-publish.yml allows one run per tag.)
 concurrency:
   group: disk-image-${{ github.event_name }}-${{ github.ref }}-${{ inputs.version || 'snapshot' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
