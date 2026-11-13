@@ -116,6 +116,8 @@ There is no separate patching of the distribution. Whether the operating system 
 - [`spec/distribution-requirements`](spec/distribution-requirements/en.md) — what the base distribution has to provide
 - [`spec/release-distribution`](spec/release-distribution/en.md) — how the artifacts are built in CI, published as release assets, signed, and verified by the user
 
+The audiences these documents serve are listed in [`AUDIENCES.md`](AUDIENCES.md).
+
 ## Related repositories
 
 - [`nolte/kamerplanter`](https://github.com/nolte/kamerplanter) — the application, its container images, Compose files, and Helm chart

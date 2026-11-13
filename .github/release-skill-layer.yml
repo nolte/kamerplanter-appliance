@@ -1,0 +1,5 @@
+# Project type for the release-notes-curate skill (nolte-shared,
+# spec/project/release-skill-layer/). Its autodetection has no signal for a
+# bootable appliance: the repository ships a system image built from a bootc
+# base, not a package, so the type is declared here.
+project_type: bootable-appliance
