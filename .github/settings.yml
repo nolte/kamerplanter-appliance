@@ -37,7 +37,9 @@ branches:
       restrictions: null
 
   # main is the presentation branch that release-cd-refresh-master.yml
-  # fast-forwards on release.
+  # fast-forwards on release. It was created from develop on 2026-11-13,
+  # before the first release: while main did not exist, the Settings app
+  # applied the repository block of this file but no branch protection.
   - name: main
     protection:
       required_pull_request_reviews: null
