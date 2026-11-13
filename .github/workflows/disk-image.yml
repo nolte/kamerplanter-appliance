@@ -19,6 +19,11 @@ on:
         required: false
         type: string
         default: ''
+      ref:
+        description: "Commit to build; defaults to the commit that triggered the run."
+        required: false
+        type: string
+        default: ''
     outputs:
       artifact-name:
         description: "Name of the uploaded workflow artifact."
@@ -46,9 +51,15 @@ on:
 permissions:
   contents: read
 
+# A newer push or pull-request update supersedes an older build of the same
+# ref. A run called by the release workflow carries the caller's event name
+# (workflow_dispatch) and its version in the group, so it never shares a group
+# with a push, a pull request or a release of another tag, and it is never
+# cancelled in flight. (GitHub still drops a pending run when a third one
+# queues into the same group; release-publish.yml allows one run per tag.)
 concurrency:
-  group: disk-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: disk-image-${{ github.event_name }}-${{ github.ref }}-${{ inputs.version || 'snapshot' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   disk:
@@ -59,6 +70,8 @@ jobs:
       artifact-name: ${{ steps.meta.outputs.artifact }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Determine version and artifact name
         id: meta
@@ -66,9 +79,14 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           # On a pull request GITHUB_SHA is a temporary merge commit; name the
           # artifact after the commit the pull request actually holds.
-          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMIT: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
         run: |
           version=${INPUT_VERSION:-${COMMIT::12}}
+          # The version becomes part of file and artifact names.
+          if [[ ! $version =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::version '$version' may only contain letters, digits, '.', '_' and '-'"
+            exit 1
+          fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "artifact=kamerplanter-appliance-$version" >>"$GITHUB_OUTPUT"
 

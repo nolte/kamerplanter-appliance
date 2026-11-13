@@ -13,13 +13,27 @@ on:
         type: boolean
         default: false
 
-# Thin caller for the canonical reusable in nolte/gh-plumbing. The reusable
-# resolves the draft, verifies version-bearing-file alignment and the
-# `chore(release): <tag>` commit, then flips draft -> published. See
-# spec/project/release-automation/ and spec/project/release-skill-layer/.
+# Builds the disk image, attaches it to the draft release, then calls the
+# canonical reusable in nolte/gh-plumbing, which resolves the draft, verifies
+# version-bearing-file alignment and the `chore(release): <tag>` commit, and
+# flips draft -> published. See spec/release-distribution/ in this repository
+# and spec/project/release-automation/ in nolte/claude-shared.
 #
-# No `asset-filename` yet: building, signing and attaching the ISO and the
-# disk image is still to come, per spec/release-distribution/.
+# Order of the jobs:
+#   prepare  cheap checks first: dispatched on develop, the tag is an open
+#            draft, and either the draft has no assets yet or they were built
+#            from the commit develop is at now
+#   disk     builds the disk image from exactly that commit (skipped when the
+#            draft already carries it, because a rebuild is not bit-identical)
+#   assets   attaches the image, SHA256SUMS and the source commit to the
+#            still-draft release; publishing makes the release immutable
+#            (enabled for this repository) and cascades at once to
+#            release-cd-refresh-master.yml and release-cd-deliver-docs.yml
+#   current  confirms develop has not moved while the image was built, so the
+#            tag the reusable creates on develop matches the attached image
+#   publish  the reusable
+#
+# Signing the assets is still to come.
 #
 # When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
 # GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
@@ -27,8 +41,174 @@ on:
 # events cascade to release-cd-refresh-master.yml and
 # release-cd-deliver-docs.yml; GITHUB_TOKEN-authored ones do not.
 
+# Read-only floor; jobs declare what they need.
+permissions:
+  contents: read
+
+# One release run per tag at a time, never cancelled in flight. The group name
+# differs from the reusable's own group, so the two cannot block each other.
+concurrency:
+  group: release-publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: Check the draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Draft releases are only visible to a token with write access.
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.check.outputs.commit }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Check ref, draft and attached assets
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != refs/heads/develop ]; then
+            echo "::error::dispatch this workflow on develop, not on $REF"
+            exit 1
+          fi
+          if [[ ! $TAG =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::tag '$TAG' may only contain letters, digits, '.', '_' and '-'"
+            exit 1
+          fi
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)" != true ]; then
+            echo "::error::'$TAG' is not an open draft. Open drafts:"
+            gh release list --limit 50 --json tagName,isDraft \
+              --jq '.[] | select(.isDraft) | "  - " + .tagName' || true
+            exit 1
+          fi
+          # The source-commit file is uploaded last, so its presence means the
+          # uploads before it completed; every file SHA256SUMS lists must be
+          # attached as well.
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          complete() {
+            grep -Fqx "$source_asset" <<<"$assets" && grep -Fqx SHA256SUMS <<<"$assets" || return 1
+            [ "$(gh release download "$TAG" --pattern "$source_asset" --output -)" = "$COMMIT" ] || return 1
+            local name
+            for name in $(gh release download "$TAG" --pattern SHA256SUMS --output - | awk '{print $2}'); do
+              grep -Fqx "$name" <<<"$assets" || return 1
+            done
+          }
+          if [ -z "$assets" ]; then
+            build=true
+          elif complete; then
+            echo "The draft already carries the complete image of $COMMIT; reusing it."
+            build=false
+          else
+            echo "::error::the draft carries assets that were not built from $COMMIT; delete them from the draft and dispatch again"
+            exit 1
+          fi
+          echo "commit=$COMMIT" >>"$GITHUB_OUTPUT"
+          echo "build=$build" >>"$GITHUB_OUTPUT"
+
+  disk:
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
+    uses: ./.github/workflows/disk-image.yml
+    with:
+      version: ${{ inputs.tag }}
+      ref: ${{ needs.prepare.outputs.commit }}
+    permissions:
+      contents: read
+
+  assets:
+    name: Attach disk image
+    needs: [prepare, disk]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    # Serialises two dispatches of the same tag without touching the
+    # reusable's own group; an upload in flight is never cut off.
+    concurrency:
+      group: release-publish-assets-${{ inputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.disk.outputs.artifact-name }}
+          path: dist
+
+      - name: Check the downloaded files and record their source
+        working-directory: dist
+        env:
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          printf '%s\n' "$COMMIT" >"$source_asset"
+          sha256sum -- "$source_asset" >>SHA256SUMS
+          ls -l
+
+      # A dry run builds and checks the image but changes no release. prepare
+      # has made sure the draft carries no assets, and the workflow-level
+      # group keeps a second run of the same tag out, so nothing is replaced.
+      - name: Attach to the draft release
+        if: ${{ !inputs.dry_run }}
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          # The image first, the checksums next, the source-commit file last:
+          # prepare treats that file as the sign of a complete upload.
+          for file in *.raw.xz SHA256SUMS "$source_asset"; do
+            gh release upload "$TAG" -- "$file"
+          done
+          attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for file in *; do
+            grep -Fqx "$file" <<<"$attached" || { echo "::error::$file is missing on $TAG"; exit 1; }
+          done
+          echo "$TAG carries:"
+          echo "$attached"
+
+  current:
+    name: Check develop has not moved
+    needs: [prepare, assets]
+    # Either the image was attached in this run, or prepare found it complete
+    # on the draft and skipped the build on purpose. A failed build also
+    # leaves assets skipped, so that case is told apart by prepare's output.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.assets.result == 'success' || (needs.assets.result == 'skipped' && needs.prepare.outputs.build == 'false')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compare develop with the built commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$GH_REPO/git/ref/heads/develop" -q .object.sha)
+          if [ "$head" != "$COMMIT" ]; then
+            echo "::error::develop moved from $COMMIT to $head while the image was built; delete the assets from the draft and dispatch again"
+            exit 1
+          fi
+          # A merge between this check and the reusable creating the tag on
+          # develop is not caught; the window is the start-up time of the
+          # publish job.
+
   publish:
+    needs: current
+    # Skipped jobs earlier in the chain (the reuse path) would otherwise skip
+    # this job as well.
+    if: ${{ !cancelled() && needs.current.result == 'success' }}
     uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@9048eafc8665611b8109e8c5a519b78e0fceffa6 # v2.2.1
     with:
       tag: ${{ inputs.tag }}
