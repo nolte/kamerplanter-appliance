@@ -69,13 +69,10 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "artifact=kamerplanter-appliance-$version" >>"$GITHUB_OUTPUT"
 
-      # The system image, its layers in container storage, the 10 GiB sparse
-      # disk and its compressed copy together need more than a fresh runner
-      # leaves free.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
+      # The first run needed about 5 GB of the 106 GB a runner leaves free,
+      # so no cleanup step is needed.
+      - name: Disk before the run
+        run: df -h /
 
       - name: Build the system image
         run: sudo podman build -t localhost/kamerplanter-appliance:ci image

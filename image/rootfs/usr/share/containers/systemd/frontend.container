@@ -1,5 +1,4 @@
 [Unit]
-PartOf=kamerplanter.target
 Description=Kamerplanter web UI
 Requires=backend.service
 After=backend.service
@@ -18,9 +17,5 @@ HealthStartPeriod=30s
 HealthOnFailure=kill
 
 [Service]
-Restart=always
 # The first start pulls the image from the registry.
 TimeoutStartSec=900
-
-[Install]
-WantedBy=kamerplanter.target

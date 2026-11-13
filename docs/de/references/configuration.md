@@ -22,9 +22,18 @@ Jede Zeile ist `KEY=VALUE` und wird wörtlich übernommen: Anführungszeichen we
 systemctl restart kamerplanter.target
 ```
 
+## Die Appliance über ihre Adresse erreichen
+
+Die Standardwerte erwarten die Web-UI unter `http://localhost:8080`. Rufst du sie über die Adresse der Appliance oder einen Hostnamen auf, trage diese Herkunft in deine Datei ein, zum Beispiel:
+
+```ini
+CORS_ORIGINS=["http://kamerplanter.local:8080"]
+FRONTEND_URL=http://kamerplanter.local:8080
+```
+
 ## Erzeugte Secrets
 
-Bei jedem Boot erzeugt die Appliance jedes verlangte Secret, das noch fehlt, außer einem der Werte unten, mit dem ein Dienst bereits gestartet ist: `ARANGO_ROOT_PASSWORD` und `ARANGODB_PASSWORD` (ein gemeinsamer Wert), `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT` und `LOG_PSEUDONYM_SALT`. Ein Secret, das ein späteres Release neu verlangt, entsteht beim ersten Boot dieses Releases.
+Bei jedem Boot erzeugt die Appliance jedes verlangte Secret, das noch fehlt, außer einem der Werte unten, mit dem ein Dienst bereits gestartet ist: `ARANGODB_PASSWORD`, `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT` und `LOG_PSEUDONYM_SALT`. Ein Secret, das ein späteres Release neu verlangt, entsteht beim ersten Boot dieses Releases.
 
 Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerplanter.env` ein, am besten vor dem ersten Start.
 
@@ -35,7 +44,8 @@ Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplante
 - `FERNET_KEY` kein gültiger Fernet-Schlüssel ist (44 Zeichen, URL-sicheres Base64)
 - `ERASURE_TOMBSTONE_SALT`, `LOG_PSEUDONYM_SALT` oder ein gesetztes `TENANT_EXPORT_SIGNING_SECRET` kürzer als 32 Zeichen ist
 - `JWT_SECRET_KEY` oder das Datenbankpasswort leer oder ein bekannter Standardwert ist
-- `ARANGO_ROOT_PASSWORD` und `ARANGODB_PASSWORD` sich unterscheiden, während der Datenbanknutzer `root` ist
+- `ARANGODB_USERNAME` einen anderen Wert als `root` hat: Das Datenbank-Image legt nur seinen Root-Nutzer an, und `ARANGO_ROOT_PASSWORD` wird immer aus `ARANGODB_PASSWORD` übernommen
+- eine Zeile in einer der Dateien nicht `KEY=VALUE` ist
 - sich einer der Werte unten geändert hat oder fehlt, nachdem ein Dienst damit gestartet ist
 
 ## Werte, die sich nicht ändern dürfen
@@ -46,7 +56,7 @@ Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplante
 | `FERNET_KEY` | Gespeicherte Zugangsdaten sind damit verschlüsselt und würden unlesbar |
 | `ARANGODB_PASSWORD` | Die Datenbank behält das Passwort, mit dem sie angelegt wurde |
 
-Sobald ein Dienst mit einem davon gestartet ist, wird ein Hash unter `/var/lib/kamerplanter/pinned/` festgehalten: das Datenbankpasswort, wenn ArangoDB läuft, die anderen beiden, wenn die API läuft. Fehlt ein solcher Wert danach in `secrets.env`, wird er nicht neu erzeugt; stelle ihn aus deinem Backup wieder her. Um einen bewusst zu ändern, erledige zuerst, was sein Grund verlangt, beim Datenbankpasswort: in der Datenbank ändern, dann beide Passwort-Schlüssel in deiner Datei setzen, dann `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` löschen und neu starten.
+Sobald ein Dienst mit einem davon gestartet ist, wird ein Hash unter `/var/lib/kamerplanter/pinned/` festgehalten: das Datenbankpasswort, wenn ArangoDB läuft, die anderen beiden, wenn die API läuft. Fehlt ein solcher Wert danach in `secrets.env`, wird er nicht neu erzeugt; stelle ihn aus deinem Backup wieder her. Um einen bewusst zu ändern, erledige zuerst, was sein Grund verlangt, beim Datenbankpasswort: in der Datenbank ändern, dann `ARANGODB_PASSWORD` in deiner Datei setzen, dann `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` löschen und neu starten.
 
 !!! warning "Backups"
     Sichere `/etc/kamerplanter/secrets.env` zusammen mit deinen Daten. Ohne den passenden `FERNET_KEY` und `ERASURE_TOMBSTONE_SALT` verlieren wiederhergestellte Daten ihre verschlüsselten Felder und Löschnachweise.

@@ -1,7 +1,4 @@
 [Unit]
-PartOf=kamerplanter.target
-Requires=kamerplanter-config.service
-After=kamerplanter-config.service
 Description=Kamerplanter API
 Requires=arangodb.service valkey.service
 After=arangodb.service valkey.service
@@ -25,13 +22,9 @@ HealthOnFailure=kill
 Notify=healthy
 
 [Service]
-Restart=always
 # Covers the image pull and the health start period above. A timeout during
 # the first-start migrations would orphan their lock just like a health kill,
 # so it is generous on purpose.
 TimeoutStartSec=3600
 # From here on data may be encrypted and deletion records keyed with these.
 ExecStartPost=/usr/libexec/kamerplanter/configure pin FERNET_KEY ERASURE_TOMBSTONE_SALT
-
-[Install]
-WantedBy=kamerplanter.target

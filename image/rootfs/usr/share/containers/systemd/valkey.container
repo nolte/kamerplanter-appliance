@@ -1,8 +1,5 @@
 [Unit]
-PartOf=kamerplanter.target
 Description=Kamerplanter Valkey
-Requires=kamerplanter-config.service
-After=kamerplanter-config.service
 
 [Container]
 ContainerName=valkey
@@ -17,9 +14,5 @@ HealthOnFailure=kill
 Notify=healthy
 
 [Service]
-Restart=always
 # The first start pulls the image from the registry.
 TimeoutStartSec=900
-
-[Install]
-WantedBy=kamerplanter.target

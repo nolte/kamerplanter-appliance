@@ -1,10 +1,10 @@
 [Unit]
-PartOf=kamerplanter.target
-Requires=kamerplanter-config.service
-After=kamerplanter-config.service
 Description=Kamerplanter task scheduler
-Requires=arangodb.service valkey.service
-After=arangodb.service valkey.service
+# After the API: it applies the migrations and pins the values the workers
+# encrypt and key data with, so no task runs against an unmigrated schema
+# or with values that are not yet protected.
+Requires=backend.service
+After=backend.service
 
 [Container]
 ContainerName=celery-beat
@@ -14,9 +14,5 @@ EnvironmentFile=/run/kamerplanter/app.env
 Exec=celery -A app.tasks beat --loglevel=info
 
 [Service]
-Restart=always
 # The first start pulls the image from the registry.
 TimeoutStartSec=900
-
-[Install]
-WantedBy=kamerplanter.target

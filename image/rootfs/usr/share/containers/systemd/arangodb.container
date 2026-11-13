@@ -1,8 +1,5 @@
 [Unit]
-PartOf=kamerplanter.target
 Description=Kamerplanter ArangoDB
-Requires=kamerplanter-config.service
-After=kamerplanter-config.service
 
 [Container]
 ContainerName=arangodb
@@ -21,11 +18,7 @@ HealthOnFailure=kill
 Notify=healthy
 
 [Service]
-Restart=always
-# From here on the database exists with this password.
-ExecStartPost=/usr/libexec/kamerplanter/configure pin ARANGODB_PASSWORD
 # The first start pulls the image from the registry.
 TimeoutStartSec=900
-
-[Install]
-WantedBy=kamerplanter.target
+# From here on the database exists with this password.
+ExecStartPost=/usr/libexec/kamerplanter/configure pin ARANGODB_PASSWORD

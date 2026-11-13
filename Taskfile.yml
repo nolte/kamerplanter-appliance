@@ -94,6 +94,7 @@ tasks:
 
   clean:
     desc: Remove build output and the tool container's volumes
+    deps: [tools:build]
     cmds:
       - build/in-tools.sh rm -rf .build
       - docker volume rm -f kamerplanter-appliance-containers

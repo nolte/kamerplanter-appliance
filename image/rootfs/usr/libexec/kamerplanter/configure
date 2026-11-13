@@ -4,7 +4,7 @@
 #   configure           run by kamerplanter-config.service on every boot and on
 #                       `systemctl restart kamerplanter.target`
 #   configure pin KEY…  run by a service once it has started healthy, to record
-#                       values that must not change from then on
+#                       the values it started with, which must not change
 #
 # Layers, later wins:
 #   /usr/share/kamerplanter/kamerplanter.env  defaults, part of the image
@@ -36,19 +36,30 @@ hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 # A Fernet key is 32 random bytes in URL-safe base64.
 fernet() { head -c 32 /dev/urandom | base64 | tr '+/' '-_'; }
 
-# KEY=VALUE per line, value taken literally; leading whitespace, empty lines
-# and comments are skipped, later files win.
+errors=()
+fail() { errors+=("$1"); }
+
+# KEY=VALUE per line, the value taken literally. Leading whitespace, empty
+# lines and comments are skipped; any other line that is not KEY=VALUE is
+# reported when $report is set. Later files win.
 declare -A cfg
+report=1
 load() {
     cfg=()
-    local file line
-    for file in "$defaults" "$secrets" "$user"; do
+    local file line number key
+    for file in "$@"; do
         [ -e "$file" ] || continue
+        number=0
         while IFS= read -r line || [ -n "$line" ]; do
+            number=$((number + 1))
             line=${line#"${line%%[![:space:]]*}"}
             case $line in '' | '#'*) continue ;; esac
-            [[ $line == *=* ]] || continue
-            cfg[${line%%=*}]=${line#*=}
+            key=${line%%=*}
+            if [[ $line != *=* || ! $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                [ "$report" = 1 ] && fail "line $number of $file is not KEY=VALUE"
+                continue
+            fi
+            cfg[$key]=${line#*=}
         done <"$file"
     done
 }
@@ -56,11 +67,16 @@ get() { printf '%s' "${cfg[$1]-}"; }
 digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
 
 if [ "${1-}" = pin ]; then
+    # Pin what the services were started with, not what the files say now.
     shift
     install -d -m 0700 "$pins"
-    load
+    load "$out/app.env"
     for key in "$@"; do
-        [ -e "$pins/$key" ] || digest "$key" >"$pins/$key"
+        [ -e "$pins/$key" ] && continue
+        tmp=$(mktemp "$pins/.$key.XXXXXX")
+        digest "$key" >"$tmp"
+        sync "$tmp"
+        mv "$tmp" "$pins/$key"
     done
     exit 0
 fi
@@ -70,13 +86,11 @@ install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
 rm -f "$out"/*.env
 
-errors=()
-fail() { errors+=("$1"); }
-
 # A missing value is generated, except one that is already pinned: a new
 # FERNET_KEY or salt would not match the stored data, so it has to come back
 # from a backup instead.
-load
+report=0
+load "$defaults" "$secrets" "$user"
 missing() {
     [ -z "${cfg[$1]+set}" ] || return 1
     if [ -n "${pinned[$1]+set}" ] && [ -e "$pins/$1" ]; then
@@ -84,15 +98,20 @@ missing() {
         return 1
     fi
 }
-if missing ARANGODB_PASSWORD; then
-    password=$(hex 24)
-    printf 'ARANGO_ROOT_PASSWORD=%s\nARANGODB_PASSWORD=%s\n' "$password" "$password" >>"$secrets"
-fi
+missing ARANGODB_PASSWORD && printf 'ARANGODB_PASSWORD=%s\n' "$(hex 24)" >>"$secrets"
 missing JWT_SECRET_KEY && printf 'JWT_SECRET_KEY=%s\n' "$(hex 32)" >>"$secrets"
 missing FERNET_KEY && printf 'FERNET_KEY=%s\n' "$(fernet)" >>"$secrets"
 missing ERASURE_TOMBSTONE_SALT && printf 'ERASURE_TOMBSTONE_SALT=%s\n' "$(hex 32)" >>"$secrets"
 missing LOG_PSEUDONYM_SALT && printf 'LOG_PSEUDONYM_SALT=%s\n' "$(hex 32)" >>"$secrets"
-load
+report=1
+load "$defaults" "$secrets" "$user"
+
+# The ArangoDB image creates only its root user, with ARANGO_ROOT_PASSWORD.
+# The application logs in as that user, so one password serves both.
+if [ "$(get ARANGODB_USERNAME)" != root ]; then
+    fail "ARANGODB_USERNAME must be root: the appliance creates no other database user"
+fi
+cfg[ARANGO_ROOT_PASSWORD]=$(get ARANGODB_PASSWORD)
 
 [ "$(get JWT_SECRET_KEY)" != change-me-in-production-use-openssl-rand-hex-32 ] && [ -n "$(get JWT_SECRET_KEY)" ] ||
     fail "JWT_SECRET_KEY is empty or the upstream placeholder"
@@ -107,13 +126,10 @@ if [ -n "$value" ] && [ "${#value}" -lt 32 ]; then
     fail "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
 fi
 case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
-if [ "$(get ARANGODB_USERNAME)" = root ] && [ "$(get ARANGO_ROOT_PASSWORD)" != "$(get ARANGODB_PASSWORD)" ]; then
-    fail "ARANGO_ROOT_PASSWORD and ARANGODB_PASSWORD differ while ARANGODB_USERNAME is root"
-fi
 
 for key in "${!pinned[@]}"; do
     [ -e "$pins/$key" ] || continue
-    [ -z "${cfg[$key]+set}" ] && continue # reported above
+    [ -n "${cfg[$key]+set}" ] || continue
     [ "$(cat "$pins/$key")" = "$(digest "$key")" ] ||
         fail "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
 done
@@ -127,7 +143,7 @@ fi
 
 # The application containers get the whole configuration; ArangoDB only the
 # value it needs to create its database.
-for key in $(printf '%s\n' "${!cfg[@]}" | sort); do
+printf '%s\n' "${!cfg[@]}" | sort | while IFS= read -r key; do
     printf '%s=%s\n' "$key" "${cfg[$key]}"
 done >"$out/app.env"
 printf 'ARANGO_ROOT_PASSWORD=%s\n' "$(get ARANGO_ROOT_PASSWORD)" >"$out/arangodb.env"
