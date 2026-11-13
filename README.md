@@ -85,7 +85,7 @@ flowchart TD
 | Hetzner Cloud | Raw disk image | Import the image into your own project, then create servers from the resulting snapshot |
 | OVHcloud | Raw disk image | Upload it as a Public Cloud image, or use Bring Your Own Image on a dedicated server |
 
-The artifacts are built by GitHub Actions and published as assets of a GitHub release of this repository. Each one is signed, so that a download can be checked for authenticity before it is written or booted.
+The artifacts are built by GitHub Actions and published as assets of a GitHub release of this repository. Each one is signed keylessly by the release workflow, so that a download can be checked for authenticity before it is written or booted; see [Verifying a download](docs/en/references/verify.md).
 
 Afterwards the web UI answers on port 8080.
 

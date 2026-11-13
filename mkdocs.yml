@@ -74,6 +74,7 @@ plugins:
             Getting Started: Erste Schritte
             References: Referenzen
             Configuration: Konfiguration
+            Verifying a download: Einen Download prüfen
 
   # Lets a page quote a canonical source instead of a frozen copy. Include
   # paths resolve relative to docs_dir, not relative to the including page.
@@ -131,3 +132,4 @@ nav:
   - References:
       - en/references/index.md
       - Configuration: en/references/configuration.md
+      - Verifying a download: en/references/verify.md
