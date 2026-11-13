@@ -1,0 +1,102 @@
+name: disk-image
+
+# Builds the raw disk image of the appliance and keeps it as a workflow
+# artifact. It is the build half of the release process in
+# spec/release-distribution/: a release workflow calls it, then signs the
+# result and attaches it to the release. Until that exists it runs on its own,
+# so a change to the image is proven to produce a bootable artifact before it
+# lands on develop.
+#
+# The steps are the same scripts `task disk:build` and `task disk:package`
+# run locally, minus the tool container: the runner already has podman, and
+# the disk build needs root for its loop devices.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version for the artifact names; defaults to the short commit SHA."
+        required: false
+        type: string
+        default: ''
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded workflow artifact."
+        value: ${{ jobs.disk.outputs.artifact-name }}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for the artifact names; defaults to the short commit SHA."
+        required: false
+        type: string
+        default: ''
+  push:
+    branches: [develop]
+    paths:
+      - 'image/**'
+      - 'build/**'
+      - '.github/workflows/disk-image.yml'
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'image/**'
+      - 'build/**'
+      - '.github/workflows/disk-image.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disk-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disk:
+    name: disk-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      artifact-name: ${{ steps.meta.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Determine version and artifact name
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version=${INPUT_VERSION:-${GITHUB_SHA::12}}
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "artifact=kamerplanter-appliance-$version" >>"$GITHUB_OUTPUT"
+
+      # The system image, its layers in container storage, the 10 GiB sparse
+      # disk and its compressed copy together need more than a fresh runner
+      # leaves free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build the system image
+        run: sudo podman build -t localhost/kamerplanter-appliance:ci image
+
+      - name: Build the raw disk image
+        run: sudo build/disk.sh localhost/kamerplanter-appliance:ci
+
+      - name: Package the disk image
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: sudo build/package.sh "$VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: .build/dist/
+          if-no-files-found: error
+          # Already xz-compressed; a second pass only costs time.
+          compression-level: 0
+          retention-days: 14
+
+      - name: Disk after the run
+        if: always()
+        run: df -h /

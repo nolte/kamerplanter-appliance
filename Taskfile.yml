@@ -53,7 +53,7 @@ tasks:
       - "{{.VENV}}/bin/mkdocs serve -a localhost:8001"
 
   check:
-    desc: The aggregate quality gate — what CI runs on every pull request
+    desc: The quality gate CI runs on every pull request; the image builds in the tool container here
     cmds:
       - task: lint
       - task: docs
@@ -63,19 +63,32 @@ tasks:
     desc: Build the tool container (podman, image-builder, QEMU)
     cmds:
       - docker build -t {{.TOOLS_IMAGE}} -f build/tools.Containerfile build
+    sources:
+      - build/tools.Containerfile
+    status:
+      - docker image inspect {{.TOOLS_IMAGE}} >/dev/null 2>&1
 
   image:build:
     desc: Build the system image of the appliance
+    deps: [tools:build]
     cmds:
       - build/in-tools.sh podman build -t {{.IMAGE_REF}} image
 
   disk:build:
     desc: Build the raw disk image from the system image
+    deps: [tools:build]
     cmds:
       - build/in-tools.sh build/disk.sh {{.IMAGE_REF}}
 
+  disk:package:
+    desc: Compress the disk image and write checksums to .build/dist (VERSION=… to name it)
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh build/package.sh {{.VERSION | default "local"}}
+
   test:boot:
     desc: Boot the disk image in QEMU under the firmware and device matrix
+    deps: [tools:build]
     cmds:
       - build/in-tools.sh tests/boot/run.sh {{.CLI_ARGS}}
 

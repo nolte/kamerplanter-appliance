@@ -26,6 +26,7 @@ task tools:build   # Werkzeug-Container: podman, image-builder, QEMU
 task image:build   # System-Image der Appliance
 task disk:build    # Raw-Disk-Image aus dem System-Image
 task test:boot     # das Disk-Image unter verschiedener Firmware und Hardware booten
+task disk:package  # komprimiertes Disk-Image und Prüfsummen in .build/dist/
 ```
 
 `task test:boot` gibt je Lauf eine Zeile aus und legt die serielle Konsole und eine Diagnose jedes gescheiterten Laufs unter `.build/boot/` ab. Der erste Start jedes Laufs lädt die Container-Images aus ihren Registries und dauert mehrere Minuten.
