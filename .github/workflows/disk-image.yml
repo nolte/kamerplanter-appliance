@@ -46,9 +46,12 @@ on:
 permissions:
   contents: read
 
+# A newer push or pull-request update supersedes an older build of the same
+# ref, but a run called by the release workflow is never cancelled: the event
+# name keeps it in its own group, and only pull-request runs cancel in flight.
 concurrency:
-  group: disk-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: disk-image-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   disk:
@@ -69,6 +72,11 @@ jobs:
           COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           version=${INPUT_VERSION:-${COMMIT::12}}
+          # The version becomes part of file and artifact names.
+          if [[ ! $version =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::version '$version' may only contain letters, digits, '.', '_' and '-'"
+            exit 1
+          fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "artifact=kamerplanter-appliance-$version" >>"$GITHUB_OUTPUT"
 

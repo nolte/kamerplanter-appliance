@@ -13,13 +13,16 @@ on:
         type: boolean
         default: false
 
-# Thin caller for the canonical reusable in nolte/gh-plumbing. The reusable
-# resolves the draft, verifies version-bearing-file alignment and the
-# `chore(release): <tag>` commit, then flips draft -> published. See
-# spec/project/release-automation/ and spec/project/release-skill-layer/.
+# Builds the disk image, attaches it to the draft release, then calls the
+# canonical reusable in nolte/gh-plumbing, which resolves the draft, verifies
+# version-bearing-file alignment and the `chore(release): <tag>` commit, and
+# flips draft -> published. See spec/release-distribution/ in this repository
+# and spec/project/release-automation/ in nolte/claude-shared.
 #
-# No `asset-filename` yet: building, signing and attaching the ISO and the
-# disk image is still to come, per spec/release-distribution/.
+# The assets land on the still-draft release, because publishing makes the
+# release immutable (immutable releases are enabled for this repository) and
+# immediately cascades to release-cd-refresh-master.yml and
+# release-cd-deliver-docs.yml. Signing the assets is still to come.
 #
 # When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
 # GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
@@ -27,8 +30,96 @@ on:
 # events cascade to release-cd-refresh-master.yml and
 # release-cd-deliver-docs.yml; GITHUB_TOKEN-authored ones do not.
 
+# Read-only floor; jobs declare what they need. Deliberately no workflow-level
+# concurrency: a release run must never be cancelled in flight, and the
+# reusable carries its own group.
+permissions:
+  contents: read
+
 jobs:
+  disk:
+    # Built from the ref the workflow is dispatched on, which the
+    # release-publish-trigger skill always sets to develop, the branch the
+    # draft targets.
+    uses: ./.github/workflows/disk-image.yml
+    with:
+      version: ${{ inputs.tag }}
+    permissions:
+      contents: read
+
+  assets:
+    name: Attach disk image
+    needs: disk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # Serialises two dispatches of the same tag without touching the
+    # reusable's own group; an upload in flight is never cut off.
+    concurrency:
+      group: release-publish-assets-${{ inputs.tag }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.disk.outputs.artifact-name }}
+          path: dist
+
+      - name: Check the downloaded files
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -l
+          sha256sum --check SHA256SUMS
+
+      # A dry run builds and checks the image but changes no release.
+      - name: Attach to the draft release
+        if: ${{ !inputs.dry_run }}
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != true ]; then
+            echo "::error::release '$TAG' is not an open draft; assets are attached before publishing only"
+            exit 1
+          fi
+          # Idempotent without --clobber: an asset that is already attached
+          # must be the same file, otherwise the run stops instead of
+          # replacing it.
+          existing=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for file in *; do
+            if grep -qx "$file" <<<"$existing"; then
+              gh release download "$TAG" --pattern "$file" --dir ../attached --clobber
+              if ! cmp -s "$file" "../attached/$file"; then
+                echo "::error::$file is already attached to $TAG with different content"
+                exit 1
+              fi
+              echo "$file already attached, unchanged"
+            else
+              gh release upload "$TAG" "$file"
+            fi
+          done
+
+      - name: Verify the draft carries every file
+        if: ${{ !inputs.dry_run }}
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          for file in *; do
+            grep -qx "$file" <<<"$attached" || { echo "::error::$file is missing on $TAG"; exit 1; }
+          done
+          echo "$TAG carries:"
+          echo "$attached"
+
   publish:
+    needs: assets
     uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@9048eafc8665611b8109e8c5a519b78e0fceffa6 # v2.2.1
     with:
       tag: ${{ inputs.tag }}
