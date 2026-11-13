@@ -103,7 +103,7 @@ Leser: Maintainer, die die Basis-Distribution auswählen und die Appliance bauen
 - **D9 MUSS [MUST]** jedes Secret, das die Kamerplanter-Dienste verlangen, je Installation einzeln erzeugen und über Updates und Rollbacks hinweg behalten.
 - **D10 MUSS [MUST]** ein Secret, das ein späteres Release neu verlangt, beim ersten Boot dieses Releases ohne Nutzereingriff erzeugen.
 - **D11 MUSS [MUST]** dem Nutzer erlauben, jedes erzeugte Secret und jede Einstellung der Dienste vor oder nach dem ersten Start in einer dokumentierten Datei zu überschreiben, die Updates und Rollbacks überdauert.
-- **D12 MUSS [MUST]** die wirksame Konfiguration prüfen, bevor die Dienste starten, und sie mit einer Meldung, die den fehlerhaften Wert nennt, gestoppt lassen, wenn ein Wert ungültig ist oder sich ein Wert geändert hat, der nach dem ersten Start gleich bleiben muss.
+- **D12 MUSS [MUST]** die wirksame Konfiguration prüfen, bevor die Dienste starten, und sie mit einer Meldung, die den fehlerhaften Wert nennt, gestoppt lassen, wenn ein Wert ungültig ist oder ein Wert, der gleich bleiben muss, sobald ein Dienst damit gestartet ist, sich geändert hat oder fehlt.
 
 ### E. Zustand und Daten
 
@@ -199,9 +199,9 @@ Jedes Kriterium wird an einem Prototyp des Kandidaten geprüft. Die Kriterien fa
 - [ ] Der Datenort umfasst nach dem ersten Boot den verfügbaren Platz und bietet nach dem Vergrößern einer virtuellen Festplatte den zusätzlichen Platz ohne Neuinstallation (E3).
 - [ ] Alle Auslieferungsartefakte einer Architektur aus einem CI-Lauf melden dieselbe System-Image-Kennung (H3, H4).
 - [ ] Die persistenten Orte sind aufgelistet, und die Appliance nimmt den Betrieb wieder auf, nachdem alles außerhalb davon verworfen wurde (A4, E2).
-- [ ] Eine frische Installation startet mit jedem Secret, das die Dienste verlangen, und ein aus der erzeugten Menge entferntes Secret wird beim nächsten Boot erneut erzeugt (D9, D10).
+- [ ] Eine frische Installation startet mit jedem Secret, das die Dienste verlangen; ein in der erzeugten Menge fehlendes Secret wird beim nächsten Boot erzeugt, außer einem, das gleich bleiben muss und mit dem ein Dienst bereits gestartet ist – das hält die Dienste gestoppt, bis es wiederhergestellt ist (D9, D10, D12).
 - [ ] Ein in der Nutzerdatei gesetzter Wert erreicht die Dienste nach einem Neustart, gewinnt gegenüber dem erzeugten Wert und gilt nach einem Update und nach einem Rollback weiter (D11).
-- [ ] Ein ungültiger Wert in der Nutzerdatei und ein geänderter Wert einer Einstellung, die gleich bleiben muss, halten die Dienste mit einer Meldung gestoppt, die den Wert nennt (D12).
+- [ ] Ein ungültiger Wert in der Nutzerdatei, auch in einer eingerückten Zeile, und ein geänderter Wert einer Einstellung, die gleich bleiben muss, halten die Dienste mit einer Meldung gestoppt, die den Wert nennt (D12).
 - [ ] Die Backup-Anleitung nennt die erzeugten Secrets, und eine Wiederherstellung mit ihnen bringt verschlüsselte Felder zurück (E5).
 - [ ] Die Komponentenliste des Releases enthält kein grafisches System, keine Desktop-Umgebung und keine Entwicklungs-Toolchain, und es läuft kein Dienst, den die Appliance nicht nutzt (F1, F2, F3, F4, F5).
 - [ ] Speicherverbrauch im Leerlauf, installierte Größe und Bootzeit sind für den Kandidaten dokumentiert (F6).

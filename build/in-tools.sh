@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 exec docker run --rm --privileged \
     --device /dev/kvm \
+    -e DISK_SIZE -e DISK \
     -v /dev:/dev \
     -v kamerplanter-appliance-containers:/var/lib/containers \
     -v "$PWD":/work -w /work \

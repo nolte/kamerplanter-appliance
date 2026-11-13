@@ -10,9 +10,7 @@ After=arangodb.service valkey.service
 ContainerName=celery-beat
 Image=ghcr.io/nolte/kamerplanter-backend:0.4.2@sha256:ba9dd4a150a0ad96e61ac190665285ec4ce9eaf7a745cc18b5a097045577cc4c
 Network=kamerplanter.network
-EnvironmentFile=/usr/share/kamerplanter/kamerplanter.env
-EnvironmentFile=/etc/kamerplanter/secrets.env
-EnvironmentFile=/etc/kamerplanter/kamerplanter.env
+EnvironmentFile=/run/kamerplanter/app.env
 Exec=celery -A app.tasks beat --loglevel=info
 
 [Service]

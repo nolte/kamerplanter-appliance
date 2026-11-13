@@ -103,7 +103,7 @@ Readers: maintainers who select the base distribution and build the appliance, a
 - **D9 MUST** generate every secret that the Kamerplanter services require, individually per installation, and keep it across updates and rollbacks.
 - **D10 MUST** generate a secret that a later release newly requires at the first boot of that release, without user action.
 - **D11 MUST** let the user override every generated secret and every setting of the services, before or after the first start, in one documented file that survives updates and rollbacks.
-- **D12 MUST** check the effective configuration before the services start and keep them stopped with a message that names the faulty value, when a value is invalid or a value that must stay constant after the first start has changed.
+- **D12 MUST** check the effective configuration before the services start and keep them stopped with a message that names the faulty value, when a value is invalid, or when a value that must stay constant once a service has started with it has changed or is missing.
 
 ### E. State and data
 
@@ -199,9 +199,9 @@ Each criterion is checked on a prototype of the candidate. The criteria roll sev
 - [ ] The data location spans the available space after first boot and, after a virtual disk is enlarged, offers the added space without reinstalling (E3).
 - [ ] All delivery artifacts of one architecture from one CI run report the same system image identifier (H3, H4).
 - [ ] The persistent locations are listed, and the appliance returns to service after everything outside them is discarded (A4, E2).
-- [ ] A fresh installation starts with every secret the services require, and a secret removed from the generated set is generated again at the next boot (D9, D10).
+- [ ] A fresh installation starts with every secret the services require; a secret missing from the generated set is generated at the next boot, except one that must stay constant and that a service already started with, which keeps the services stopped until it is restored (D9, D10, D12).
 - [ ] A value set in the user file reaches the services after a restart, wins over the generated value, and is still in effect after an update and after a rollback (D11).
-- [ ] An invalid value in the user file, and a changed value of a setting that must stay constant, keep the services stopped with a message naming the value (D12).
+- [ ] An invalid value in the user file, also on an indented line, and a changed value of a setting that must stay constant, keep the services stopped with a message naming the value (D12).
 - [ ] The backup guidance names the generated secrets, and a restore with them brings back encrypted fields (E5).
 - [ ] The component list of the release contains no graphical system, no desktop environment, and no development toolchain, and no service runs that the appliance does not use (F1, F2, F3, F4, F5).
 - [ ] Idle memory use, installed size, and boot time are recorded for the candidate (F6).

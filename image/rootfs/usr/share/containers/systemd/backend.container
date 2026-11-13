@@ -11,9 +11,7 @@ ContainerName=backend
 Image=ghcr.io/nolte/kamerplanter-backend:0.4.2@sha256:ba9dd4a150a0ad96e61ac190665285ec4ce9eaf7a745cc18b5a097045577cc4c
 Network=kamerplanter.network
 PublishPort=8000:8000
-EnvironmentFile=/usr/share/kamerplanter/kamerplanter.env
-EnvironmentFile=/etc/kamerplanter/secrets.env
-EnvironmentFile=/etc/kamerplanter/kamerplanter.env
+EnvironmentFile=/run/kamerplanter/app.env
 HealthCmd=curl -sf http://localhost:8000/api/v1/health/live
 HealthInterval=10s
 HealthTimeout=5s
@@ -28,8 +26,12 @@ Notify=healthy
 
 [Service]
 Restart=always
-# The first start pulls the image from the registry.
-TimeoutStartSec=900
+# Covers the image pull and the health start period above. A timeout during
+# the first-start migrations would orphan their lock just like a health kill,
+# so it is generous on purpose.
+TimeoutStartSec=3600
+# From here on data may be encrypted and deletion records keyed with these.
+ExecStartPost=/usr/libexec/kamerplanter/configure pin FERNET_KEY ERASURE_TOMBSTONE_SALT
 
 [Install]
 WantedBy=kamerplanter.target

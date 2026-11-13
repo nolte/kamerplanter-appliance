@@ -1,17 +1,19 @@
 #!/usr/bin/bash
-# Prepares the configuration of the Kamerplanter services on every boot and
-# on `systemctl restart kamerplanter.target`.
+# Prepares the configuration of the Kamerplanter services.
 #
-# Layers, later wins (the container units read them in this order):
+#   configure           run by kamerplanter-config.service on every boot and on
+#                       `systemctl restart kamerplanter.target`
+#   configure pin KEY…  run by a service once it has started healthy, to record
+#                       values that must not change from then on
+#
+# Layers, later wins:
 #   /usr/share/kamerplanter/kamerplanter.env  defaults, part of the image
 #   /etc/kamerplanter/secrets.env             generated here, once per key
 #   /etc/kamerplanter/kamerplanter.env        the user's own values
 #
-# Generates every required secret that is still missing, so a release that
-# needs a new one gets it on its first boot, then refuses to continue when
-# the effective configuration is invalid or a value that must stay constant
-# has changed. The container units require this unit, so they do not start
-# with a broken configuration.
+# The merged result is written to /run/kamerplanter/, and the container units
+# read only those files. This script is therefore the single place that parses
+# the layers, so what it checks is exactly what the services receive.
 set -euo pipefail
 umask 077
 
@@ -19,50 +21,89 @@ defaults=/usr/share/kamerplanter/kamerplanter.env
 secrets=/etc/kamerplanter/secrets.env
 user=/etc/kamerplanter/kamerplanter.env
 pins=/var/lib/kamerplanter/pinned
+out=/run/kamerplanter
+
+# Values that must not change once a service has started with them. A change
+# stops the services instead of damaging the data. To change one deliberately,
+# do what its reason says, then delete its file in $pins.
+declare -A pinned=(
+    [ERASURE_TOMBSTONE_SALT]="it keys the records of deleted accounts and must never change"
+    [FERNET_KEY]="stored credentials are encrypted with it and become unreadable"
+    [ARANGODB_PASSWORD]="the database keeps the password it was created with; change it in the database first"
+)
 
 hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 # A Fernet key is 32 random bytes in URL-safe base64.
 fernet() { head -c 32 /dev/urandom | base64 | tr '+/' '-_'; }
 
-install -d -m 0700 /etc/kamerplanter "$pins"
+# KEY=VALUE per line, value taken literally; leading whitespace, empty lines
+# and comments are skipped, later files win.
+declare -A cfg
+load() {
+    cfg=()
+    local file line
+    for file in "$defaults" "$secrets" "$user"; do
+        [ -e "$file" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            line=${line#"${line%%[![:space:]]*}"}
+            case $line in '' | '#'*) continue ;; esac
+            [[ $line == *=* ]] || continue
+            cfg[${line%%=*}]=${line#*=}
+        done <"$file"
+    done
+}
+get() { printf '%s' "${cfg[$1]-}"; }
+digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
+
+if [ "${1-}" = pin ]; then
+    shift
+    install -d -m 0700 "$pins"
+    load
+    for key in "$@"; do
+        [ -e "$pins/$key" ] || digest "$key" >"$pins/$key"
+    done
+    exit 0
+fi
+
+install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$user" ] || install -m 0600 /dev/null "$user"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
-
-has_key() { grep -q "^$1=" "$2"; }
-
-# Values that belong together are generated together.
-if ! has_key ARANGODB_PASSWORD "$secrets"; then
-    password=$(hex 24)
-    printf 'ARANGO_ROOT_PASSWORD=%s\nARANGODB_PASSWORD=%s\n' "$password" "$password" >>"$secrets"
-fi
-has_key JWT_SECRET_KEY "$secrets" || printf 'JWT_SECRET_KEY=%s\n' "$(hex 32)" >>"$secrets"
-has_key FERNET_KEY "$secrets" || printf 'FERNET_KEY=%s\n' "$(fernet)" >>"$secrets"
-has_key ERASURE_TOMBSTONE_SALT "$secrets" || printf 'ERASURE_TOMBSTONE_SALT=%s\n' "$(hex 32)" >>"$secrets"
-has_key LOG_PSEUDONYM_SALT "$secrets" || printf 'LOG_PSEUDONYM_SALT=%s\n' "$(hex 32)" >>"$secrets"
-
-# Effective configuration: literal KEY=VALUE, later files win, as podman
-# reads its --env-file arguments.
-declare -A cfg
-for file in "$defaults" "$secrets" "$user"; do
-    while IFS= read -r line || [ -n "$line" ]; do
-        case $line in '' | '#'*) continue ;; esac
-        [[ $line == *=* ]] || continue
-        cfg[${line%%=*}]=${line#*=}
-    done <"$file"
-done
-get() { printf '%s' "${cfg[$1]-}"; }
+rm -f "$out"/*.env
 
 errors=()
 fail() { errors+=("$1"); }
+
+# A missing value is generated, except one that is already pinned: a new
+# FERNET_KEY or salt would not match the stored data, so it has to come back
+# from a backup instead.
+load
+missing() {
+    [ -z "${cfg[$1]+set}" ] || return 1
+    if [ -n "${pinned[$1]+set}" ] && [ -e "$pins/$1" ]; then
+        fail "$1 is missing from $secrets although Kamerplanter already started with it: ${pinned[$1]}; restore it from your backup"
+        return 1
+    fi
+}
+if missing ARANGODB_PASSWORD; then
+    password=$(hex 24)
+    printf 'ARANGO_ROOT_PASSWORD=%s\nARANGODB_PASSWORD=%s\n' "$password" "$password" >>"$secrets"
+fi
+missing JWT_SECRET_KEY && printf 'JWT_SECRET_KEY=%s\n' "$(hex 32)" >>"$secrets"
+missing FERNET_KEY && printf 'FERNET_KEY=%s\n' "$(fernet)" >>"$secrets"
+missing ERASURE_TOMBSTONE_SALT && printf 'ERASURE_TOMBSTONE_SALT=%s\n' "$(hex 32)" >>"$secrets"
+missing LOG_PSEUDONYM_SALT && printf 'LOG_PSEUDONYM_SALT=%s\n' "$(hex 32)" >>"$secrets"
+load
 
 [ "$(get JWT_SECRET_KEY)" != change-me-in-production-use-openssl-rand-hex-32 ] && [ -n "$(get JWT_SECRET_KEY)" ] ||
     fail "JWT_SECRET_KEY is empty or the upstream placeholder"
 [[ $(get FERNET_KEY) =~ ^[A-Za-z0-9_-]{43}=$ ]] ||
     fail "FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters)"
 for key in ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT; do
-    [ "${#cfg[$key]}" -ge 32 ] 2>/dev/null || fail "$key is shorter than 32 characters"
+    value=$(get "$key")
+    [ "${#value}" -ge 32 ] || fail "$key is shorter than 32 characters"
 done
-if [ -n "$(get TENANT_EXPORT_SIGNING_SECRET)" ] && [ "${#cfg[TENANT_EXPORT_SIGNING_SECRET]}" -lt 32 ]; then
+value=$(get TENANT_EXPORT_SIGNING_SECRET)
+if [ -n "$value" ] && [ "${#value}" -lt 32 ]; then
     fail "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
 fi
 case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
@@ -70,23 +111,11 @@ if [ "$(get ARANGODB_USERNAME)" = root ] && [ "$(get ARANGO_ROOT_PASSWORD)" != "
     fail "ARANGO_ROOT_PASSWORD and ARANGODB_PASSWORD differ while ARANGODB_USERNAME is root"
 fi
 
-# Values that must not change once data exists. The first boot records a
-# digest; a later change stops the services instead of damaging the data.
-# To change one deliberately, do what its reason says, then delete its file
-# in $pins.
-declare -A pinned=(
-    [ERASURE_TOMBSTONE_SALT]="it keys the records of deleted accounts and must never change"
-    [FERNET_KEY]="stored credentials are encrypted with it and become unreadable"
-    [ARANGODB_PASSWORD]="the database keeps the password it was created with; change it in the database first"
-)
 for key in "${!pinned[@]}"; do
-    digest=$(printf '%s' "$(get "$key")" | sha256sum | cut -d' ' -f1)
-    if [ -e "$pins/$key" ]; then
-        [ "$(cat "$pins/$key")" = "$digest" ] ||
-            fail "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
-    elif [ ${#errors[@]} -eq 0 ]; then
-        printf '%s\n' "$digest" >"$pins/$key"
-    fi
+    [ -e "$pins/$key" ] || continue
+    [ -z "${cfg[$key]+set}" ] && continue # reported above
+    [ "$(cat "$pins/$key")" = "$(digest "$key")" ] ||
+        fail "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
 done
 
 if [ ${#errors[@]} -gt 0 ]; then
@@ -95,3 +124,10 @@ if [ ${#errors[@]} -gt 0 ]; then
     printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
     exit 1
 fi
+
+# The application containers get the whole configuration; ArangoDB only the
+# value it needs to create its database.
+for key in $(printf '%s\n' "${!cfg[@]}" | sort); do
+    printf '%s=%s\n' "$key" "${cfg[$key]}"
+done >"$out/app.env"
+printf 'ARANGO_ROOT_PASSWORD=%s\n' "$(get ARANGO_ROOT_PASSWORD)" >"$out/arangodb.env"

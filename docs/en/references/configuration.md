@@ -8,7 +8,7 @@ last_updated: 2026-11-13
 
 # Configuration
 
-The Kamerplanter services read their settings from three files. A value in a later file wins over the same key in an earlier one.
+The Kamerplanter settings come from three files. A value in a later file wins over the same key in an earlier one.
 
 | File | Content | Who writes it |
 |---|---|---|
@@ -16,7 +16,7 @@ The Kamerplanter services read their settings from three files. A value in a lat
 | `/etc/kamerplanter/secrets.env` | Generated secrets | The appliance, once per key |
 | `/etc/kamerplanter/kamerplanter.env` | Your own values | You; kept across updates and rollbacks |
 
-Each line is `KEY=VALUE`, taken literally: quotes are not removed. Apply a change with:
+Each line is `KEY=VALUE`, taken literally: quotes are not removed, leading whitespace and lines starting with `#` are skipped. On every boot the appliance merges and checks the three files and writes the result to `/run/kamerplanter/`; the services read only that result. Apply a change with:
 
 ```bash
 systemctl restart kamerplanter.target
@@ -24,7 +24,7 @@ systemctl restart kamerplanter.target
 
 ## Generated secrets
 
-On every boot the appliance generates each required secret that is still missing: `ARANGO_ROOT_PASSWORD` and `ARANGODB_PASSWORD` (one value), `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`. A secret that a later release newly requires is generated on that release's first boot.
+On every boot the appliance generates each required secret that is still missing, except one of the values below that a service already started with: `ARANGO_ROOT_PASSWORD` and `ARANGODB_PASSWORD` (one value), `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`. A secret that a later release newly requires is generated on that release's first boot.
 
 To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`, ideally before the first start.
 
@@ -36,7 +36,7 @@ The services stay stopped, with a message in `systemctl status kamerplanter-conf
 - `ERASURE_TOMBSTONE_SALT`, `LOG_PSEUDONYM_SALT`, or a set `TENANT_EXPORT_SIGNING_SECRET` is shorter than 32 characters
 - `JWT_SECRET_KEY` or the database password is empty or a known default
 - `ARANGO_ROOT_PASSWORD` and `ARANGODB_PASSWORD` differ while the database user is `root`
-- one of the values below changed after the first start
+- one of the values below changed or went missing after a service started with it
 
 ## Values that must not change
 
@@ -46,7 +46,7 @@ The services stay stopped, with a message in `systemctl status kamerplanter-conf
 | `FERNET_KEY` | Stored credentials are encrypted with it and become unreadable |
 | `ARANGODB_PASSWORD` | The database keeps the password it was created with |
 
-The first start records a digest of each under `/var/lib/kamerplanter/pinned/`. To change one deliberately, first do what its reason requires, for the database password: change it in the database, then set both password keys in your file, then delete `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` and restart.
+Once a service has started with one of them, a digest is recorded under `/var/lib/kamerplanter/pinned/`: the database password when ArangoDB is up, the other two when the API is up. A value missing from `secrets.env` after that is not generated again; restore it from your backup. To change one deliberately, first do what its reason requires, for the database password: change it in the database, then set both password keys in your file, then delete `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` and restart.
 
 !!! warning "Backups"
     Back up `/etc/kamerplanter/secrets.env` together with your data. Data restored without the matching `FERNET_KEY` and `ERASURE_TOMBSTONE_SALT` loses its encrypted fields and deletion records.
