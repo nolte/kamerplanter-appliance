@@ -19,10 +19,21 @@ on:
 # flips draft -> published. See spec/release-distribution/ in this repository
 # and spec/project/release-automation/ in nolte/claude-shared.
 #
-# The assets land on the still-draft release, because publishing makes the
-# release immutable (immutable releases are enabled for this repository) and
-# immediately cascades to release-cd-refresh-master.yml and
-# release-cd-deliver-docs.yml. Signing the assets is still to come.
+# Order of the jobs:
+#   prepare  cheap checks first: dispatched on develop, the tag is an open
+#            draft, and either the draft has no assets yet or they were built
+#            from the commit develop is at now
+#   disk     builds the disk image from exactly that commit (skipped when the
+#            draft already carries it, because a rebuild is not bit-identical)
+#   assets   attaches the image, SHA256SUMS and the source commit to the
+#            still-draft release; publishing makes the release immutable
+#            (enabled for this repository) and cascades at once to
+#            release-cd-refresh-master.yml and release-cd-deliver-docs.yml
+#   current  confirms develop has not moved while the image was built, so the
+#            tag the reusable creates on develop matches the attached image
+#   publish  the reusable
+#
+# Signing the assets is still to come.
 #
 # When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
 # GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
@@ -37,20 +48,68 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Check the draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.check.outputs.commit }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Check ref, draft and attached assets
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != refs/heads/develop ]; then
+            echo "::error::dispatch this workflow on develop, not on $REF"
+            exit 1
+          fi
+          if [[ ! $TAG =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::tag '$TAG' may only contain letters, digits, '.', '_' and '-'"
+            exit 1
+          fi
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null)" != true ]; then
+            echo "::error::'$TAG' is not an open draft. Open drafts:"
+            gh release list --limit 50 --json tagName,isDraft \
+              --jq '.[] | select(.isDraft) | "  - " + .tagName' || true
+            exit 1
+          fi
+          source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
+          assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          if [ -z "$assets" ]; then
+            build=true
+          elif grep -Fqx "$source_asset" <<<"$assets" &&
+            [ "$(gh release download "$TAG" --pattern "$source_asset" --output -)" = "$COMMIT" ]; then
+            echo "The draft already carries the image of $COMMIT; reusing it."
+            build=false
+          else
+            echo "::error::the draft carries assets that were not built from $COMMIT; delete them from the draft and dispatch again"
+            exit 1
+          fi
+          echo "commit=$COMMIT" >>"$GITHUB_OUTPUT"
+          echo "build=$build" >>"$GITHUB_OUTPUT"
+
   disk:
-    # Built from the ref the workflow is dispatched on, which the
-    # release-publish-trigger skill always sets to develop, the branch the
-    # draft targets.
+    needs: prepare
+    if: needs.prepare.outputs.build == 'true'
     uses: ./.github/workflows/disk-image.yml
     with:
       version: ${{ inputs.tag }}
+      ref: ${{ needs.prepare.outputs.commit }}
     permissions:
       contents: read
 
   assets:
     name: Attach disk image
-    needs: disk
+    needs: [prepare, disk]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     # Serialises two dispatches of the same tag without touching the
@@ -64,14 +123,19 @@ jobs:
           name: ${{ needs.disk.outputs.artifact-name }}
           path: dist
 
-      - name: Check the downloaded files
+      - name: Check the downloaded files and record their source
         working-directory: dist
+        env:
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
         run: |
           set -euo pipefail
-          ls -l
           sha256sum --check SHA256SUMS
+          printf '%s\n' "$COMMIT" >"kamerplanter-appliance-$TAG-source-commit.txt"
+          ls -l
 
-      # A dry run builds and checks the image but changes no release.
+      # A dry run builds and checks the image but changes no release. prepare
+      # has made sure the draft carries no assets, so nothing is replaced.
       - name: Attach to the draft release
         if: ${{ !inputs.dry_run }}
         working-directory: dist
@@ -81,45 +145,37 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != true ]; then
-            echo "::error::release '$TAG' is not an open draft; assets are attached before publishing only"
-            exit 1
-          fi
-          # Idempotent without --clobber: an asset that is already attached
-          # must be the same file, otherwise the run stops instead of
-          # replacing it.
-          existing=$(gh release view "$TAG" --json assets -q '.assets[].name')
-          for file in *; do
-            if grep -qx "$file" <<<"$existing"; then
-              gh release download "$TAG" --pattern "$file" --dir ../attached --clobber
-              if ! cmp -s "$file" "../attached/$file"; then
-                echo "::error::$file is already attached to $TAG with different content"
-                exit 1
-              fi
-              echo "$file already attached, unchanged"
-            else
-              gh release upload "$TAG" "$file"
-            fi
-          done
-
-      - name: Verify the draft carries every file
-        if: ${{ !inputs.dry_run }}
-        working-directory: dist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
+          gh release upload "$TAG" -- *
           attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
           for file in *; do
-            grep -qx "$file" <<<"$attached" || { echo "::error::$file is missing on $TAG"; exit 1; }
+            grep -Fqx "$file" <<<"$attached" || { echo "::error::$file is missing on $TAG"; exit 1; }
           done
           echo "$TAG carries:"
           echo "$attached"
 
+  current:
+    name: Check develop has not moved
+    needs: [prepare, assets]
+    # Also when the image was reused and the assets job was skipped.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.assets.result == 'success' || needs.assets.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Compare develop with the built commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+          head=$(gh api "repos/$GH_REPO/git/ref/heads/develop" -q .object.sha)
+          if [ "$head" != "$COMMIT" ]; then
+            echo "::error::develop moved from $COMMIT to $head while the image was built; delete the assets from the draft and dispatch again"
+            exit 1
+          fi
+
   publish:
-    needs: assets
+    needs: current
     uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@9048eafc8665611b8109e8c5a519b78e0fceffa6 # v2.2.1
     with:
       tag: ${{ inputs.tag }}
