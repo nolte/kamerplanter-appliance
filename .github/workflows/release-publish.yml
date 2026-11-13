@@ -110,7 +110,7 @@ jobs:
             echo "The draft already carries the complete image of $COMMIT; reusing it."
             build=false
           else
-            echo "::error::the draft carries assets that were not built from $COMMIT; delete them from the draft and dispatch again"
+            echo "::error::the draft carries assets that are incomplete (for example unsigned) or were not built from $COMMIT; delete them from the draft and dispatch again"
             exit 1
           fi
           echo "commit=$COMMIT" >>"$GITHUB_OUTPUT"
@@ -160,10 +160,28 @@ jobs:
           sha256sum -- "$source_asset" >>SHA256SUMS
           ls -l
 
+      # Installed in a dry run too, so the dry run exercises the installer.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      # Checked again here, before signing: a signature is a permanent entry
+      # in the public transparency log, and an image that current would
+      # reject later must not get one.
+      - name: Check develop has not moved before signing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+          cosign version
+          head=$(gh api "repos/$GH_REPO/git/ref/heads/develop" -q .object.sha)
+          if [ "$head" != "$COMMIT" ]; then
+            echo "::error::develop moved from $COMMIT to $head during the build; dispatch again"
+            exit 1
+          fi
+
       # Signing writes to the public transparency log, so a dry run, which
       # publishes nothing, does not sign.
-      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-        if: ${{ !inputs.dry_run }}
 
       - name: Sign image and checksums
         if: ${{ !inputs.dry_run }}
@@ -198,7 +216,8 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "$file"
             gh attestation verify "$file" --repo "$GH_REPO" \
-              --signer-workflow "$GH_REPO/.github/workflows/release-publish.yml"
+              --signer-workflow "$GH_REPO/.github/workflows/release-publish.yml" \
+              --source-ref refs/heads/develop --deny-self-hosted-runners
           done
 
       # A dry run builds and checks the image but changes no release. prepare
