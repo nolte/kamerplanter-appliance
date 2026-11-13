@@ -25,15 +25,15 @@ on:
 #            from the commit develop is at now
 #   disk     builds the disk image from exactly that commit (skipped when the
 #            draft already carries it, because a rebuild is not bit-identical)
-#   assets   attaches the image, SHA256SUMS and the source commit to the
+#   assets   signs the image and SHA256SUMS keylessly with this workflow's
+#            identity, records build provenance, verifies both, and attaches
+#            image, checksums, signature bundles and the source commit to the
 #            still-draft release; publishing makes the release immutable
 #            (enabled for this repository) and cascades at once to
 #            release-cd-refresh-master.yml and release-cd-deliver-docs.yml
 #   current  confirms develop has not moved while the image was built, so the
 #            tag the reusable creates on develop matches the attached image
 #   publish  the reusable
-#
-# Signing the assets is still to come.
 #
 # When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
 # GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
@@ -95,9 +95,13 @@ jobs:
           complete() {
             grep -Fqx "$source_asset" <<<"$assets" && grep -Fqx SHA256SUMS <<<"$assets" || return 1
             [ "$(gh release download "$TAG" --pattern "$source_asset" --output -)" = "$COMMIT" ] || return 1
+            grep -Fqx SHA256SUMS.sigstore.json <<<"$assets" || return 1
             local name
             for name in $(gh release download "$TAG" --pattern SHA256SUMS --output - | awk '{print $2}'); do
               grep -Fqx "$name" <<<"$assets" || return 1
+              case $name in
+                *.raw.xz) grep -Fqx "$name.sigstore.json" <<<"$assets" || return 1 ;;
+              esac
             done
           }
           if [ -z "$assets" ]; then
@@ -123,12 +127,15 @@ jobs:
       contents: read
 
   assets:
-    name: Attach disk image
+    name: Sign and attach disk image
     needs: [prepare, disk]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # id-token and attestations only here: this is the one job that signs.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     # Serialises two dispatches of the same tag without touching the
     # reusable's own group; an upload in flight is never cut off.
     concurrency:
@@ -153,6 +160,47 @@ jobs:
           sha256sum -- "$source_asset" >>SHA256SUMS
           ls -l
 
+      # Signing writes to the public transparency log, so a dry run, which
+      # publishes nothing, does not sign.
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        if: ${{ !inputs.dry_run }}
+
+      - name: Sign image and checksums
+        if: ${{ !inputs.dry_run }}
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          for file in *.raw.xz SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
+          done
+
+      - name: Record build provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.raw.xz
+            dist/SHA256SUMS
+
+      # The same checks a user runs, before anything is attached.
+      - name: Verify signatures and provenance
+        if: ${{ !inputs.dry_run }}
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-publish.yml@refs/heads/develop
+        run: |
+          set -euo pipefail
+          for file in *.raw.xz SHA256SUMS; do
+            cosign verify-blob --bundle "$file.sigstore.json" \
+              --certificate-identity "$IDENTITY" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$file"
+            gh attestation verify "$file" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-publish.yml"
+          done
+
       # A dry run builds and checks the image but changes no release. prepare
       # has made sure the draft carries no assets, and the workflow-level
       # group keeps a second run of the same tag out, so nothing is replaced.
@@ -166,9 +214,10 @@ jobs:
         run: |
           set -euo pipefail
           source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
-          # The image first, the checksums next, the source-commit file last:
-          # prepare treats that file as the sign of a complete upload.
-          for file in *.raw.xz SHA256SUMS "$source_asset"; do
+          # The image and the checksums with their signature bundles first,
+          # the source-commit file last: prepare treats that file as the sign
+          # of a complete upload.
+          for file in *.raw.xz *.raw.xz.sigstore.json SHA256SUMS SHA256SUMS.sigstore.json "$source_asset"; do
             gh release upload "$TAG" -- "$file"
           done
           attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
