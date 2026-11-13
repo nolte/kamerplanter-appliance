@@ -1,6 +1,11 @@
 on:
   push:
     branches: [develop]
+  # A merge pushed with GITHUB_TOKEN triggers no downstream workflow (GitHub's
+  # loop guard), so the draft is not regenerated after such a bot merge. This
+  # lets an operator run the drafter by hand:
+  #   gh workflow run release-drafter.yml --ref develop
+  workflow_dispatch:
 
 jobs:
   update_release_draft:
