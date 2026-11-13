@@ -1,0 +1,7 @@
+# Development- and tooling-only dependencies, per
+# spec/project/project-structure/ §Python development and §Requirements
+# file format. Installed into the project-local virtual environment by
+# `task setup`.
+#
+# The docs-build toolchain (MkDocs plus plugins) stays in docs/requirements.txt.
+pre-commit>=4.4,<5

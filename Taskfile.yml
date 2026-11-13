@@ -1,0 +1,100 @@
+version: "3"
+
+vars:
+  VENV: .venv
+  PIP: "{{.VENV}}/bin/pip"
+  TOOLS_IMAGE: kamerplanter-appliance-tools:poc
+  IMAGE_REF: localhost/kamerplanter-appliance:poc
+
+env:
+  TOOLS_IMAGE: "{{.TOOLS_IMAGE}}"
+
+tasks:
+  default:
+    desc: List the available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  setup:
+    desc: Create the project-local venv, install the tooling and docs sets, wire the git hooks
+    cmds:
+      - python3 -m venv {{.VENV}}
+      - "{{.PIP}} install --upgrade pip"
+      - "{{.PIP}} install -r requirements-dev.txt"
+      - "{{.PIP}} install -r docs/requirements.txt"
+      - "{{.VENV}}/bin/pre-commit install"
+      - "touch {{.VENV}}/.install-stamp"
+    # Keyed on the manifests, so a Renovate bump is installed locally before
+    # `task docs` runs against it, as CI does with a fresh install.
+    sources:
+      - requirements-dev.txt
+      - docs/requirements.txt
+      - .pre-commit-config.yaml
+    generates:
+      - "{{.VENV}}/.install-stamp"
+
+  lint:
+    desc: Run every pre-commit hook over the whole tree
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/pre-commit run --all-files"
+
+  docs:
+    desc: Build the documentation site the same way CI does
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/mkdocs build --strict"
+
+  docs:serve:
+    desc: Serve the documentation site locally with live reload
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/mkdocs serve -a localhost:8001"
+
+  check:
+    desc: The quality gate CI runs on every pull request; the image builds in the tool container here
+    cmds:
+      - task: lint
+      - task: docs
+      - task: image:build
+
+  tools:build:
+    desc: Build the tool container (podman, image-builder, QEMU)
+    cmds:
+      - docker build -t {{.TOOLS_IMAGE}} -f build/tools.Containerfile build
+    sources:
+      - build/tools.Containerfile
+    status:
+      - docker image inspect {{.TOOLS_IMAGE}} >/dev/null 2>&1
+
+  image:build:
+    desc: Build the system image of the appliance
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh podman build -t {{.IMAGE_REF}} image
+
+  disk:build:
+    desc: Build the raw disk image from the system image
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh build/disk.sh {{.IMAGE_REF}}
+
+  disk:package:
+    desc: Compress the disk image and write checksums to .build/dist (VERSION=… to name it)
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh build/package.sh {{.VERSION | default "local"}}
+
+  test:boot:
+    desc: Boot the disk image in QEMU under the firmware and device matrix
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh tests/boot/run.sh {{.CLI_ARGS}}
+
+  clean:
+    desc: Remove build output and the tool container's volumes
+    cmds:
+      # .build holds files the privileged tool container wrote as root.
+      - docker run --rm -v "$PWD:/work" -w /work docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4 rm -rf .build
+      - docker volume rm -f kamerplanter-appliance-containers

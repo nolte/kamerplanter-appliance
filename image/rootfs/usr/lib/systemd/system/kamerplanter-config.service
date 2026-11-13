@@ -1,0 +1,11 @@
+[Unit]
+Description=Prepare and check the Kamerplanter configuration
+PartOf=kamerplanter.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/kamerplanter/configure
+
+[Install]
+WantedBy=kamerplanter.target

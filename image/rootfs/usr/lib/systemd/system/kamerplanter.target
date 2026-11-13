@@ -1,0 +1,13 @@
+[Unit]
+Description=Kamerplanter
+Wants=kamerplanter-config.service
+# Without default dependencies, multi-user.target does not order itself after
+# this target and so does not wait for image pulls and first-start migrations;
+# the boot completes while the services come up. The shutdown ordering that
+# the defaults would add is kept explicitly.
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Install]
+WantedBy=multi-user.target

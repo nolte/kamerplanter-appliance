@@ -26,6 +26,8 @@ Established on 2026-11-12 by a review of the candidates' own documentation, pack
 | Firewall with default deny (G1) | To be added | To be added | To be added in MicroOS |
 | Support lifecycle (I1) | Fedora about 13 months per release; CentOS Stream 10 until 2030-05-31 | A stable channel without fixed end dates, an LTS channel of 18 months | MicroOS rolling; the status of Leap Micro is unclear |
 
+Established on 2026-11-13 from the upstream documentation (`docs/de/deployment/konfigurationsmatrix.md`, `docs/de/reference/environment-variables.md`, `docs/de/deployment/backup-restore.md` in a working copy of `nolte/kamerplanter`) and from the first prototype runs: with `DEBUG=false` the backend refuses to start without `JWT_SECRET_KEY`, `ARANGODB_PASSWORD`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`, while the upstream `.env.example` names only the database password and the two salts, and the release Compose file passes neither `JWT_SECRET_KEY` nor `FERNET_KEY`. The upstream documentation states that `ERASURE_TOMBSTONE_SALT` must never change and that data encrypted with `FERNET_KEY` and deletion records depend on these values after a restore. A probe with the pinned ArangoDB image showed that it takes `ARANGO_ROOT_PASSWORD` only when the database is first created: after a restart with another value, the old password still logs in and the new one is refused.
+
 Unestablished: everything the acceptance criteria demand of a prototype, in particular boot and rollback under legacy BIOS, the drivers actually present in the initial RAM disk, behaviour on power loss, and the footprint. For openSUSE, the licence, trademark, and lifetime pages could not be fetched, and parts of the MicroOS findings come from a third-party mirror of its image description.
 
 Boundaries: application behaviour belongs to `nolte/kamerplanter`. Where the appliance runs, and what differs between those places, is owned by `spec/deployment-targets/`. The build pipeline, the update channel and release process, and the first-boot setup interface are subjects of their own specs, which do not exist yet. This spec states only what the distribution has to make possible for them.
@@ -98,6 +100,10 @@ Readers: maintainers who select the base distribution and build the appliance, a
 - **D6 MUST NOT** ship preset credentials for any operating-system account or any service.
 - **D7 MUST** configure the network through DHCP by default and allow a static configuration.
 - **D8 MUST** be deliverable as a pre-installed image that boots directly from the medium it was written to, for targets without an installer step.
+- **D9 MUST** generate every secret that the Kamerplanter services require, individually per installation, and keep it across updates and rollbacks.
+- **D10 MUST** generate a secret that a later release newly requires at the first boot of that release, without user action.
+- **D11 MUST** let the user override every generated secret and every setting of the services, before or after the first start, in one documented file that survives updates and rollbacks.
+- **D12 MUST** check the effective configuration before the services start and keep them stopped with a message that names the faulty value, when a value is invalid, or when a value that must stay constant once a service has started with it has changed or is missing.
 
 ### E. State and data
 
@@ -105,6 +111,7 @@ Readers: maintainers who select the base distribution and build the appliance, a
 - **E2 MUST** make the set of persistent locations enumerable, so that everything outside it can be discarded and reproduced.
 - **E3 MUST** let the data location grow to the available space, at first boot and after a virtual disk is enlarged, without reinstalling.
 - **E4 SHOULD** support consistent backups through hypervisor snapshots on virtualised targets, including a filesystem freeze through a guest agent.
+- **E5 MUST** keep the generated secrets in the persistent state and name them in the backup guidance, since data restored without them loses its encrypted fields and deletion records.
 
 ### F. Footprint
 
@@ -192,6 +199,10 @@ Each criterion is checked on a prototype of the candidate. The criteria roll sev
 - [ ] The data location spans the available space after first boot and, after a virtual disk is enlarged, offers the added space without reinstalling (E3).
 - [ ] All delivery artifacts of one architecture from one CI run report the same system image identifier (H3, H4).
 - [ ] The persistent locations are listed, and the appliance returns to service after everything outside them is discarded (A4, E2).
+- [ ] A fresh installation starts with every secret the services require; a secret missing from the generated set is generated at the next boot, except one that must stay constant and that a service already started with, which keeps the services stopped until it is restored (D9, D10, D12).
+- [ ] A value set in the user file reaches the services after a restart, wins over the generated value, and is still in effect after an update and after a rollback (D11).
+- [ ] An invalid value in the user file, also on an indented line, and a changed value of a setting that must stay constant, keep the services stopped with a message naming the value (D12).
+- [ ] The backup guidance names the generated secrets, and a restore with them brings back encrypted fields (E5).
 - [ ] The component list of the release contains no graphical system, no desktop environment, and no development toolchain, and no service runs that the appliance does not use (F1, F2, F3, F4, F5).
 - [ ] Idle memory use, installed size, and boot time are recorded for the candidate (F6).
 - [ ] Support lifecycle, advisory process, and redistribution terms are documented with their sources (G6, I1, I2, I3).
@@ -223,6 +234,8 @@ Each criterion is checked on a prototype of the candidate. The criteria roll sev
 - **Raspberry Pi (deferred).** `spec/deployment-targets/` defers the Raspberry Pi, so H7 leaves aarch64 optional. If the target returns, aarch64 becomes mandatory and the update and rollback behaviour of §B has to hold on a board without UEFI firmware. Which candidates offer that has not been checked; a candidate that cannot would have to be replaced then.
 - **Artifact formats.** `spec/deployment-targets/` §C requires an installer ISO and a pre-installed raw disk image. Further formats follow only if more providers become targets there.
 - **First start without a registry.** C3 lets the first start load the images from a registry, by decision of the project owner on 2026-11-12. How the appliance behaves when the registry cannot be reached at that moment, such as how long it retries and what the user sees, is undecided.
+- **Overrides through provisioning data.** D11 is met in the prototype by a file on the appliance. Setting the same values before the first start through the provisioning data of D4 needs cloud-init or an equivalent in the image, which the prototype does not contain yet.
+- **Changing a value that must stay constant.** D12 stops the services when such a value changes. How a user deliberately changes the database password, which the database keeps from its creation, is today a manual sequence: change it in the database, then in the user file, then release the check. Whether the appliance should offer that as one step is undecided.
 - **Rollback after a data migration.** B3 returns the system to the previous version, while E1 keeps the data untouched. If the newer Kamerplanter release has already migrated the databases, the previous version may not run on them. The distribution cannot solve this; it needs a decision in the update spec.
 - **Health check for B3.** The appliance has to declare what "healthy" means after an update. That definition depends on the upstream health endpoints and is not written yet.
 - **One update or two.** B9 prefers one update for the operating system and the containers; B8 prefers the mechanism of the distribution. Where a distribution updates only itself and leaves containers to a registry, the two pull in different directions: one update needs a build and an update source of this project, two updates need none but allow combinations that were never released together. Which weighs more is undecided and is settled with the choice of distribution.

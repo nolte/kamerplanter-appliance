@@ -1,0 +1,31 @@
+[Unit]
+Description=Kamerplanter API
+Requires=kamerplanter-arangodb.service kamerplanter-valkey.service
+After=kamerplanter-arangodb.service kamerplanter-valkey.service
+
+[Container]
+ContainerName=backend
+Image=ghcr.io/nolte/kamerplanter-backend:0.4.2@sha256:ba9dd4a150a0ad96e61ac190665285ec4ce9eaf7a745cc18b5a097045577cc4c
+Network=kamerplanter.network
+PublishPort=8000:8000
+EnvironmentFile=/run/kamerplanter/app.env
+HealthCmd=curl -sf http://localhost:8000/api/v1/health/live
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+# The first start applies the migrations and seeds master data under a
+# database lock. A kill during that work orphans the lock for five minutes
+# (upstream LOCK_TTL_SECONDS), the next start waits on it and is killed in
+# turn, so failures during the start period must not count.
+HealthStartPeriod=10m
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+# Covers the image pull and the health start period above. A timeout during
+# the first-start migrations would orphan their lock just like a health kill,
+# so it is generous on purpose.
+TimeoutStartSec=3600
+# The first start already migrates and seeds data, which may be encrypted
+# and keyed with these, so they are pinned before the container runs.
+ExecStartPre=/usr/libexec/kamerplanter/configure pin FERNET_KEY ERASURE_TOMBSTONE_SALT

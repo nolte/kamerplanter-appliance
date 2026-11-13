@@ -1,0 +1,90 @@
+{
+  extends: [
+    'github>nolte/gh-plumbing//renovate-configs/common#v2.2.0',
+  ],
+  mode: 'full',
+  separateMajorMinor: true,
+  separateMinorPatch: false,
+  packageRules: [
+    {
+      groupName: 'github-actions',
+      matchManagers: [
+        'github-actions',
+      ],
+      matchUpdateTypes: [
+        'minor',
+        'patch',
+        'digest',
+      ],
+      automerge: true,
+    },
+    {
+      groupName: 'github-actions major',
+      matchManagers: [
+        'github-actions',
+      ],
+      matchUpdateTypes: [
+        'major',
+      ],
+    },
+    {
+      groupName: 'pre-commit hooks',
+      matchManagers: [
+        'pre-commit',
+      ],
+      automerge: true,
+    },
+    {
+      // The docs toolchain is pinned in docs/requirements.txt. Group the
+      // bumps so a MkDocs/Material pair lands in one PR rather than two that
+      // each break `mkdocs build --strict` on their own.
+      groupName: 'mkdocs toolchain',
+      matchFileNames: [
+        'docs/requirements.txt',
+      ],
+      automerge: false,
+    },
+    {
+      // The system image and the tool container both start from Fedora.
+      // A new Fedora major changes the operating system the appliance
+      // ships, so it never merges on its own; digest bumps of the same
+      // major are the regular OS patch stream and land together.
+      groupName: 'fedora base images',
+      matchDatasources: [
+        'docker',
+      ],
+      matchPackageNames: [
+        'quay.io/fedora/fedora-bootc',
+        'quay.io/fedora/fedora',
+      ],
+      automerge: false,
+    },
+    {
+      // Backend and frontend are released together upstream and run as
+      // one stack; one PR keeps their versions in step. The Quadlet
+      // manager reads the `Image=` lines under image/rootfs/.
+      groupName: 'kamerplanter images',
+      matchManagers: [
+        'quadlet',
+      ],
+      matchPackageNames: [
+        'ghcr.io/nolte/kamerplanter-backend',
+        'ghcr.io/nolte/kamerplanter-frontend',
+      ],
+      automerge: false,
+    },
+    {
+      // ArangoDB and Valkey hold the appliance's data. Their updates stay
+      // separate and manual: a database major can change the on-disk
+      // format, which a rollback of the appliance does not undo.
+      matchManagers: [
+        'quadlet',
+      ],
+      matchPackageNames: [
+        'docker.io/library/arangodb',
+        'docker.io/valkey/valkey',
+      ],
+      automerge: false,
+    },
+  ],
+}

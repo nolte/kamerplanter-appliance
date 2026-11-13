@@ -1,0 +1,21 @@
+[Unit]
+Description=Kamerplanter web UI
+Requires=kamerplanter-backend.service
+After=kamerplanter-backend.service
+
+[Container]
+ContainerName=frontend
+Image=ghcr.io/nolte/kamerplanter-frontend:0.4.2@sha256:ac650404305b229314882c501e6081dc19ae6f8e76b24d1a75446d6bf9b04136
+Network=kamerplanter.network
+PublishPort=8080:8080
+Environment=KAMERPLANTER_MODE=light
+HealthCmd=curl -sf http://localhost:8080/
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+HealthStartPeriod=30s
+HealthOnFailure=kill
+
+[Service]
+# The first start pulls the image from the registry.
+TimeoutStartSec=900

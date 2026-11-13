@@ -1,0 +1,17 @@
+# System image of the Kamerplanter appliance (proof of concept, stage 1).
+# Fedora 46 is Rawhide while Fedora 46 is in development. Fedora publishes
+# these images under moving tags only and removes superseded digests within
+# about a day, so this pin breaks once the tag is rebuilt; mirroring the base
+# image into the project's registry is planned to make builds reproducible.
+FROM quay.io/fedora/fedora-bootc:46@sha256:b2df016fdcbcf40fd811aff8f89de1d88fa9f8a4240669daa678d3e15806e9ab
+
+COPY rootfs/ /
+
+RUN chmod 0755 /usr/libexec/kamerplanter/configure \
+    && chmod 0700 /etc/kamerplanter && chmod 0600 /etc/kamerplanter/kamerplanter.env \
+    && systemctl enable kamerplanter.target kamerplanter-config.service
+
+# Fail the build when a container unit does not translate.
+RUN /usr/lib/systemd/system-generators/podman-system-generator --dryrun >/dev/null
+
+RUN bootc container lint

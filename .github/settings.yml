@@ -1,0 +1,47 @@
+# These settings are synced to GitHub by https://probot.github.io/apps/settings/
+# on a push to the default branch that touches this file.
+
+_extends: gh-plumbing:.github/commons-settings.yml
+
+repository:
+  name: kamerplanter-appliance
+  description: Bootable, self-updating appliance for Kamerplanter on Proxmox VE, hosted servers and mini PCs
+  homepage: https://nolte.github.io/kamerplanter-appliance
+  # A COMMA-SEPARATED STRING, not a YAML list: probot/settings calls
+  # `topics.split()`, and a list throws after the repository PATCH, which
+  # silently withholds the whole `branches:` block below. Measured and
+  # documented in nolte/kamerplanter-goose's settings.yml.
+  topics: kamerplanter, appliance, bootc, immutable-os, self-hosted, proxmox, plant-care
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: false
+  delete_branch_on_merge: true
+
+# Context names are the job-level `name:` values from .github/workflows/ci.yml.
+# `restrictions: null` is load-bearing on a personal account: GitHub rejects
+# push restrictions there, and the Settings App then drops the entire update.
+branches:
+  - name: develop
+    protection:
+      required_pull_request_reviews: null
+      required_status_checks:
+        strict: true
+        # disk-image (.github/workflows/disk-image.yml) is left out on
+        # purpose: it runs only on changes under image/ and build/, and until
+        # the base image is mirrored, Fedora removing superseded digests within
+        # about a day would turn it red for every pull request.
+        contexts:
+          - docs-build
+          - pre-commit
+      enforce_admins: true
+      restrictions: null
+
+  # main is the presentation branch that release-cd-refresh-master.yml
+  # fast-forwards on release.
+  - name: main
+    protection:
+      required_pull_request_reviews: null
+      required_status_checks: null
+      enforce_admins: true
+      required_linear_history: true
+      restrictions: null
