@@ -94,7 +94,7 @@ tasks:
 
   clean:
     desc: Remove build output and the tool container's volumes
-    deps: [tools:build]
     cmds:
-      - build/in-tools.sh rm -rf .build
+      # .build holds files the privileged tool container wrote as root.
+      - docker run --rm -v "$PWD:/work" -w /work docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4 rm -rf .build
       - docker volume rm -f kamerplanter-appliance-containers

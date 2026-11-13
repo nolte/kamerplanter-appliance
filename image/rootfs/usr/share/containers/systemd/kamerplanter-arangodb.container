@@ -20,5 +20,6 @@ Notify=healthy
 [Service]
 # The first start pulls the image from the registry.
 TimeoutStartSec=900
-# From here on the database exists with this password.
-ExecStartPost=/usr/libexec/kamerplanter/configure pin ARANGODB_PASSWORD
+# The first start creates the database with this password, also when the
+# start later fails, so it is pinned before the container runs.
+ExecStartPre=/usr/libexec/kamerplanter/configure pin ARANGODB_PASSWORD

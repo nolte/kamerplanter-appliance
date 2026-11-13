@@ -33,7 +33,7 @@ FRONTEND_URL=http://kamerplanter.local:8080
 
 ## Generated secrets
 
-On every boot the appliance generates each required secret that is still missing, except one of the values below that a service already started with: `ARANGODB_PASSWORD`, `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`. A secret that a later release newly requires is generated on that release's first boot.
+On every boot the appliance generates each required secret that is still missing: `ARANGODB_PASSWORD`, `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`. A secret that a later release newly requires is generated on that release's first boot. The exception are the three values under [Values that must not change](#values-that-must-not-change): once a service has started with one of them, it is not generated again but has to come back from a backup. A new `JWT_SECRET_KEY` only ends all sessions, a new `LOG_PSEUDONYM_SALT` only breaks the correlation with older log lines.
 
 To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`, ideally before the first start.
 
@@ -56,7 +56,7 @@ The services stay stopped, with a message in `systemctl status kamerplanter-conf
 | `FERNET_KEY` | Stored credentials are encrypted with it and become unreadable |
 | `ARANGODB_PASSWORD` | The database keeps the password it was created with |
 
-Once a service has started with one of them, a digest is recorded under `/var/lib/kamerplanter/pinned/`: the database password when ArangoDB is up, the other two when the API is up. A value missing from `secrets.env` after that is not generated again; restore it from your backup. To change one deliberately, first do what its reason requires, for the database password: change it in the database, then set `ARANGODB_PASSWORD` in your file, then delete `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` and restart.
+Right before a service starts with one of them for the first time, a digest is recorded under `/var/lib/kamerplanter/pinned/`: the database password before ArangoDB starts, the other two before the API starts. A value missing from `secrets.env` after that is not generated again; restore it from your backup. To change one deliberately, first do what its reason requires, for the database password: change it in the database, then set `ARANGODB_PASSWORD` in your file, then delete `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` and restart.
 
 !!! warning "Backups"
     Back up `/etc/kamerplanter/secrets.env` together with your data. Data restored without the matching `FERNET_KEY` and `ERASURE_TOMBSTONE_SALT` loses its encrypted fields and deletion records.

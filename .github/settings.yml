@@ -26,10 +26,10 @@ branches:
       required_pull_request_reviews: null
       required_status_checks:
         strict: true
-        # image-build is left out on purpose until the base image is
-        # mirrored: Fedora removes superseded digests behind its moving tags
-        # within about a day, which would turn a required check red for every
-        # pull request until the pin is bumped.
+        # disk-image (.github/workflows/disk-image.yml) is left out on
+        # purpose: it runs only on changes under image/ and build/, and until
+        # the base image is mirrored, Fedora removing superseded digests within
+        # about a day would turn it red for every pull request.
         contexts:
           - docs-build
           - pre-commit

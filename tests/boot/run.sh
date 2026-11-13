@@ -66,12 +66,20 @@ start_vm() {
 
 vm_alive() { [ -f "$OUT/vm.pid" ] && kill -0 "$(cat "$OUT/vm.pid")" 2>/dev/null; }
 
-# Prints the seconds until the web UI and the API both answer.
+# No systemd job is pending, so every unit has reached its state. HTTP answers
+# alone are not enough: a unit with Notify=healthy is still starting until
+# podman has marked the container healthy, and a restart issued in that window
+# merges into the pending start job and restarts nothing.
+settled() { [ -z "$(guest systemctl list-jobs --no-legend 2>/dev/null)" ] && guest true; }
+
+# Prints the seconds until the web UI and the API both answer and systemd has
+# no job left.
 wait_up() {
     local timeout=$1 start=$SECONDS
     while ((SECONDS - start < timeout)); do
         if curl -sf -o /dev/null --max-time 5 http://127.0.0.1:18080/ &&
-            curl -sf -o /dev/null --max-time 5 http://127.0.0.1:18000/api/v1/health/live; then
+            curl -sf -o /dev/null --max-time 5 http://127.0.0.1:18000/api/v1/health/live &&
+            settled; then
             echo $((SECONDS - start))
             return 0
         fi
@@ -128,11 +136,11 @@ run_1() {
 run_7() {
     vm_alive || { record run7 SKIP - "needs the running VM of run 1"; return; }
     local before after secs
-    before=$(guest systemctl show backend.service -p NRestarts --value)
+    before=$(guest systemctl show kamerplanter-backend.service -p NRestarts --value)
     guest podman kill backend >/dev/null
     sleep 5
     if secs=$(wait_up 300); then
-        after=$(guest systemctl show backend.service -p NRestarts --value)
+        after=$(guest systemctl show kamerplanter-backend.service -p NRestarts --value)
         if [ "$after" -gt "$before" ]; then
             record run7 PASS "${secs}s" "killed container restarted by systemd (restarts $before -> $after)"
         else
@@ -160,9 +168,10 @@ run_8() {
         return
     fi
     guest "echo FERNET_KEY=invalid >>$file; systemctl restart kamerplanter.target"
-    sleep 20
+    local waited=0
+    until settled || ((waited >= 120)); do sleep 5; waited=$((waited + 5)); done
     if ! guest systemctl is-failed --quiet kamerplanter-config.service ||
-        guest systemctl is-active --quiet backend.service; then
+        guest systemctl is-active --quiet kamerplanter-backend.service; then
         diagnose run8
         record run8 FAIL - "an invalid FERNET_KEY did not keep the services stopped"
         return
@@ -217,6 +226,7 @@ runs=("$@")
 for run in "${runs[@]}"; do "run_$run"; done
 kill_vm 2>/dev/null
 chmod -R a+rX "$OUT"
+chmod 600 "$KEY"
 echo
 column -t -s $'\t' "$RESULTS"
 grep -q FAIL "$RESULTS" && exit 1

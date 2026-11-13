@@ -3,8 +3,8 @@
 #
 #   configure           run by kamerplanter-config.service on every boot and on
 #                       `systemctl restart kamerplanter.target`
-#   configure pin KEY…  run by a service once it has started healthy, to record
-#                       the values it started with, which must not change
+#   configure pin KEY…  run by a service right before it starts, to record the
+#                       values it starts with, which must not change from then on
 #
 # Layers, later wins:
 #   /usr/share/kamerplanter/kamerplanter.env  defaults, part of the image
@@ -39,6 +39,17 @@ fernet() { head -c 32 /dev/urandom | base64 | tr '+/' '-_'; }
 errors=()
 fail() { errors+=("$1"); }
 
+# Replaces a file with what stdin delivers, durably: a reader sees either the
+# old or the new content, and the new content survives a power loss.
+replace() {
+    local tmp
+    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
+    cat >"$tmp"
+    sync "$tmp"
+    mv "$tmp" "$1"
+    sync "$(dirname "$1")"
+}
+
 # KEY=VALUE per line, the value taken literally. Leading whitespace, empty
 # lines and comments are skipped; any other line that is not KEY=VALUE is
 # reported when $report is set. Later files win.
@@ -52,6 +63,7 @@ load() {
         number=0
         while IFS= read -r line || [ -n "$line" ]; do
             number=$((number + 1))
+            line=${line%$'\r'}
             line=${line#"${line%%[![:space:]]*}"}
             case $line in '' | '#'*) continue ;; esac
             key=${line%%=*}
@@ -73,10 +85,11 @@ if [ "${1-}" = pin ]; then
     load "$out/app.env"
     for key in "$@"; do
         [ -e "$pins/$key" ] && continue
-        tmp=$(mktemp "$pins/.$key.XXXXXX")
-        digest "$key" >"$tmp"
-        sync "$tmp"
-        mv "$tmp" "$pins/$key"
+        if [ -z "$(get "$key")" ]; then
+            echo "not pinning $key: it has no value in $out/app.env" >&2
+            exit 1
+        fi
+        digest "$key" | replace "$pins/$key"
     done
     exit 0
 fi
@@ -84,7 +97,6 @@ fi
 install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$user" ] || install -m 0600 /dev/null "$user"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
-rm -f "$out"/*.env
 
 # A missing value is generated, except one that is already pinned: a new
 # FERNET_KEY or salt would not match the stored data, so it has to come back
@@ -98,11 +110,18 @@ missing() {
         return 1
     fi
 }
-missing ARANGODB_PASSWORD && printf 'ARANGODB_PASSWORD=%s\n' "$(hex 24)" >>"$secrets"
-missing JWT_SECRET_KEY && printf 'JWT_SECRET_KEY=%s\n' "$(hex 32)" >>"$secrets"
-missing FERNET_KEY && printf 'FERNET_KEY=%s\n' "$(fernet)" >>"$secrets"
-missing ERASURE_TOMBSTONE_SALT && printf 'ERASURE_TOMBSTONE_SALT=%s\n' "$(hex 32)" >>"$secrets"
-missing LOG_PSEUDONYM_SALT && printf 'LOG_PSEUDONYM_SALT=%s\n' "$(hex 32)" >>"$secrets"
+generated=()
+missing ARANGODB_PASSWORD && generated+=("ARANGODB_PASSWORD=$(hex 24)")
+missing JWT_SECRET_KEY && generated+=("JWT_SECRET_KEY=$(hex 32)")
+missing FERNET_KEY && generated+=("FERNET_KEY=$(fernet)")
+missing ERASURE_TOMBSTONE_SALT && generated+=("ERASURE_TOMBSTONE_SALT=$(hex 32)")
+missing LOG_PSEUDONYM_SALT && generated+=("LOG_PSEUDONYM_SALT=$(hex 32)")
+# Written before any service can start with them, and durably, so a pin can
+# never outlive the secret it protects. The existing content is kept as it is,
+# with a line break added where its last line lacks one.
+if [ ${#generated[@]} -gt 0 ]; then
+    { awk 1 "$secrets"; printf '%s\n' "${generated[@]}"; } | replace "$secrets"
+fi
 report=1
 load "$defaults" "$secrets" "$user"
 
@@ -138,6 +157,7 @@ if [ ${#errors[@]} -gt 0 ]; then
     printf 'Kamerplanter configuration is invalid; the services stay stopped:\n' >&2
     printf '  - %s\n' "${errors[@]}" >&2
     printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
+    rm -f "$out"/*.env
     exit 1
 fi
 
@@ -145,5 +165,5 @@ fi
 # value it needs to create its database.
 printf '%s\n' "${!cfg[@]}" | sort | while IFS= read -r key; do
     printf '%s=%s\n' "$key" "${cfg[$key]}"
-done >"$out/app.env"
-printf 'ARANGO_ROOT_PASSWORD=%s\n' "$(get ARANGO_ROOT_PASSWORD)" >"$out/arangodb.env"
+done | replace "$out/app.env"
+printf 'ARANGO_ROOT_PASSWORD=%s\n' "$(get ARANGO_ROOT_PASSWORD)" | replace "$out/arangodb.env"

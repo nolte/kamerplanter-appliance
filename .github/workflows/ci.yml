@@ -14,24 +14,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  image:
+  # The system image is built by disk-image.yml, which runs on every change
+  # under image/ and build/ and turns the image into the disk image as well.
+  docs:
     # Job names are the status-check contexts `.github/settings.yml` declares
     # under `branches[develop].required_status_checks`. Kept free of spaces;
     # renaming a job renames its context and silently drops it from the
     # required set — change both files together.
-    name: image-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      # The Containerfile ends with `bootc container lint` and a dry run of
-      # the Quadlet generator, so a broken unit or image layout fails here.
-      # Building the disk image needs privileges and loop devices and stays
-      # local (`task disk:build`) for now.
-      - name: Build the system image
-        run: podman build -t localhost/kamerplanter-appliance:ci image
-
-  docs:
     name: docs-build
     runs-on: ubuntu-latest
     steps:
