@@ -1,0 +1,6 @@
+[Unit]
+Description=Kamerplanter
+Wants=kamerplanter-config.service
+
+[Install]
+WantedBy=multi-user.target

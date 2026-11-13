@@ -1,4 +1,7 @@
 [Unit]
+PartOf=kamerplanter.target
+Requires=kamerplanter-config.service
+After=kamerplanter-config.service
 Description=Kamerplanter task scheduler
 Requires=arangodb.service valkey.service
 After=arangodb.service valkey.service
@@ -9,6 +12,7 @@ Image=ghcr.io/nolte/kamerplanter-backend:0.4.2@sha256:ba9dd4a150a0ad96e61ac19066
 Network=kamerplanter.network
 EnvironmentFile=/usr/share/kamerplanter/kamerplanter.env
 EnvironmentFile=/etc/kamerplanter/secrets.env
+EnvironmentFile=/etc/kamerplanter/kamerplanter.env
 Exec=celery -A app.tasks beat --loglevel=info
 
 [Service]
@@ -17,4 +21,4 @@ Restart=always
 TimeoutStartSec=900
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=kamerplanter.target

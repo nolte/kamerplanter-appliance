@@ -1,7 +1,8 @@
 [Unit]
+PartOf=kamerplanter.target
 Description=Kamerplanter Valkey
-Requires=kamerplanter-firstboot.service
-After=kamerplanter-firstboot.service
+Requires=kamerplanter-config.service
+After=kamerplanter-config.service
 
 [Container]
 ContainerName=valkey
@@ -21,4 +22,4 @@ Restart=always
 TimeoutStartSec=900
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=kamerplanter.target

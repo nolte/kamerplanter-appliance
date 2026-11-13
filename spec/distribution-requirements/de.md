@@ -26,6 +26,8 @@ Festgestellt am 2026-11-12 durch eine Sichtung der Dokumentation, Paketmanifeste
 | Firewall mit Default-Deny (G1) | Zu ergänzen | Zu ergänzen | In MicroOS zu ergänzen |
 | Support-Lebenszyklus (I1) | Fedora etwa 13 Monate je Release; CentOS Stream 10 bis 2030-05-31 | Ein Stable-Kanal ohne feste Enddaten, ein LTS-Kanal mit 18 Monaten | MicroOS rollend; der Status von Leap Micro ist unklar |
 
+Festgestellt am 2026-11-13 aus der Upstream-Dokumentation (`docs/de/deployment/konfigurationsmatrix.md`, `docs/de/reference/environment-variables.md`, `docs/de/deployment/backup-restore.md` in einer Arbeitskopie von `nolte/kamerplanter`) und aus den ersten Prototyp-Läufen: Mit `DEBUG=false` verweigert das Backend den Start ohne `JWT_SECRET_KEY`, `ARANGODB_PASSWORD`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT` und `LOG_PSEUDONYM_SALT`, während die Upstream-Datei `.env.example` nur das Datenbankpasswort und die beiden Salts nennt und die Release-Compose-Datei weder `JWT_SECRET_KEY` noch `FERNET_KEY` durchreicht. Die Upstream-Dokumentation sagt, dass `ERASURE_TOMBSTONE_SALT` sich nie ändern darf und dass mit `FERNET_KEY` verschlüsselte Daten und Löschnachweise nach einer Wiederherstellung von diesen Werten abhängen. Ein Versuch mit dem gepinnten ArangoDB-Image zeigte, dass es `ARANGO_ROOT_PASSWORD` nur beim ersten Anlegen der Datenbank übernimmt: Nach einem Neustart mit anderem Wert meldet sich das alte Passwort weiter an, das neue wird abgelehnt.
+
 Nicht festgestellt: alles, was die Akzeptanzkriterien von einem Prototyp verlangen, insbesondere Boot und Rollback unter Legacy-BIOS, die tatsächlich in der initialen RAM-Disk vorhandenen Treiber, das Verhalten bei Stromausfall und der Fußabdruck. Für openSUSE ließen sich die Seiten zu Lizenz, Marke und Lebensdauer nicht abrufen, und Teile der MicroOS-Befunde stammen aus einem Drittanbieter-Spiegel der Image-Beschreibung.
 
 Abgrenzung: Das Verhalten der Anwendung gehört zu `nolte/kamerplanter`. Wo die Appliance läuft und was sich zwischen diesen Orten unterscheidet, legt `spec/deployment-targets/` fest. Die Build-Pipeline, der Update-Kanal samt Release-Prozess und die Oberfläche der Ersteinrichtung sind Gegenstand eigener Specs, die es noch nicht gibt. Dieses Spec hält nur fest, was die Distribution dafür ermöglichen muss.
@@ -98,6 +100,10 @@ Leser: Maintainer, die die Basis-Distribution auswählen und die Appliance bauen
 - **D6 DARF NICHT [MUST NOT]** voreingestellte Zugangsdaten für ein Betriebssystemkonto oder einen Dienst ausliefern.
 - **D7 MUSS [MUST]** das Netzwerk standardmäßig per DHCP konfigurieren und eine statische Konfiguration erlauben.
 - **D8 MUSS [MUST]** sich als vorinstalliertes Image ausliefern lassen, das direkt von dem Medium bootet, auf das es geschrieben wurde, für Ziele ohne Installer-Schritt.
+- **D9 MUSS [MUST]** jedes Secret, das die Kamerplanter-Dienste verlangen, je Installation einzeln erzeugen und über Updates und Rollbacks hinweg behalten.
+- **D10 MUSS [MUST]** ein Secret, das ein späteres Release neu verlangt, beim ersten Boot dieses Releases ohne Nutzereingriff erzeugen.
+- **D11 MUSS [MUST]** dem Nutzer erlauben, jedes erzeugte Secret und jede Einstellung der Dienste vor oder nach dem ersten Start in einer dokumentierten Datei zu überschreiben, die Updates und Rollbacks überdauert.
+- **D12 MUSS [MUST]** die wirksame Konfiguration prüfen, bevor die Dienste starten, und sie mit einer Meldung, die den fehlerhaften Wert nennt, gestoppt lassen, wenn ein Wert ungültig ist oder sich ein Wert geändert hat, der nach dem ersten Start gleich bleiben muss.
 
 ### E. Zustand und Daten
 
@@ -105,6 +111,7 @@ Leser: Maintainer, die die Basis-Distribution auswählen und die Appliance bauen
 - **E2 MUSS [MUST]** die Menge der persistenten Orte aufzählbar machen, sodass alles außerhalb davon verworfen und reproduziert werden kann.
 - **E3 MUSS [MUST]** den Datenort auf den verfügbaren Platz wachsen lassen, beim ersten Boot und nach dem Vergrößern einer virtuellen Festplatte, ohne Neuinstallation.
 - **E4 SOLLTE [SHOULD]** auf virtualisierten Zielen konsistente Backups über Hypervisor-Snapshots unterstützen, einschließlich eines Dateisystem-Freeze über einen Gast-Agenten.
+- **E5 MUSS [MUST]** die erzeugten Secrets im persistenten Zustand halten und in der Backup-Anleitung nennen, weil Daten, die ohne sie wiederhergestellt werden, ihre verschlüsselten Felder und Löschnachweise verlieren.
 
 ### F. Fußabdruck
 
@@ -192,6 +199,10 @@ Jedes Kriterium wird an einem Prototyp des Kandidaten geprüft. Die Kriterien fa
 - [ ] Der Datenort umfasst nach dem ersten Boot den verfügbaren Platz und bietet nach dem Vergrößern einer virtuellen Festplatte den zusätzlichen Platz ohne Neuinstallation (E3).
 - [ ] Alle Auslieferungsartefakte einer Architektur aus einem CI-Lauf melden dieselbe System-Image-Kennung (H3, H4).
 - [ ] Die persistenten Orte sind aufgelistet, und die Appliance nimmt den Betrieb wieder auf, nachdem alles außerhalb davon verworfen wurde (A4, E2).
+- [ ] Eine frische Installation startet mit jedem Secret, das die Dienste verlangen, und ein aus der erzeugten Menge entferntes Secret wird beim nächsten Boot erneut erzeugt (D9, D10).
+- [ ] Ein in der Nutzerdatei gesetzter Wert erreicht die Dienste nach einem Neustart, gewinnt gegenüber dem erzeugten Wert und gilt nach einem Update und nach einem Rollback weiter (D11).
+- [ ] Ein ungültiger Wert in der Nutzerdatei und ein geänderter Wert einer Einstellung, die gleich bleiben muss, halten die Dienste mit einer Meldung gestoppt, die den Wert nennt (D12).
+- [ ] Die Backup-Anleitung nennt die erzeugten Secrets, und eine Wiederherstellung mit ihnen bringt verschlüsselte Felder zurück (E5).
 - [ ] Die Komponentenliste des Releases enthält kein grafisches System, keine Desktop-Umgebung und keine Entwicklungs-Toolchain, und es läuft kein Dienst, den die Appliance nicht nutzt (F1, F2, F3, F4, F5).
 - [ ] Speicherverbrauch im Leerlauf, installierte Größe und Bootzeit sind für den Kandidaten dokumentiert (F6).
 - [ ] Support-Lebenszyklus, Advisory-Prozess und Weitergabebedingungen sind mit ihren Quellen dokumentiert (G6, I1, I2, I3).
@@ -223,6 +234,8 @@ Jedes Kriterium wird an einem Prototyp des Kandidaten geprüft. Die Kriterien fa
 - **Raspberry Pi (zurückgestellt).** `spec/deployment-targets/` stellt den Raspberry Pi zurück, daher lässt H7 aarch64 optional. Kehrt das Ziel zurück, wird aarch64 Pflicht, und das Update- und Rollback-Verhalten aus §B muss auch auf einem Board ohne UEFI-Firmware gelten. Welche Kandidaten das bieten, ist nicht geprüft; ein Kandidat, der es nicht kann, müsste dann ersetzt werden.
 - **Artefaktformate.** `spec/deployment-targets/` §C verlangt ein Installer-ISO und ein vorinstalliertes Raw-Disk-Image. Weitere Formate folgen nur, wenn dort weitere Anbieter zu Zielen werden.
 - **Erster Start ohne Registry.** C3 lässt den ersten Start die Images aus einer Registry laden, nach Entscheidung des Projektinhabers vom 2026-11-12. Wie sich die Appliance verhält, wenn die Registry in diesem Moment nicht erreichbar ist, etwa wie lange sie es erneut versucht und was der Nutzer sieht, ist nicht entschieden.
+- **Überschreiben über Provisionierungsdaten.** D11 erfüllt der Prototyp mit einer Datei auf der Appliance. Dieselben Werte vor dem ersten Start über die Provisionierungsdaten aus D4 zu setzen, braucht cloud-init oder Gleichwertiges im Image, was der Prototyp noch nicht enthält.
+- **Einen Wert ändern, der gleich bleiben muss.** D12 stoppt die Dienste, wenn sich ein solcher Wert ändert. Wie ein Nutzer das Datenbankpasswort, das die Datenbank seit ihrem Anlegen behält, bewusst ändert, ist heute eine manuelle Folge: zuerst in der Datenbank, dann in der Nutzerdatei, dann die Prüfung freigeben. Ob die Appliance das als einen Schritt anbieten soll, ist nicht entschieden.
 - **Rollback nach einer Datenmigration.** B3 bringt das System auf die vorherige Version zurück, während E1 die Daten unberührt lässt. Hat das neuere Kamerplanter-Release die Datenbanken bereits migriert, läuft die vorherige Version darauf möglicherweise nicht. Die Distribution kann das nicht lösen; es braucht eine Entscheidung im Update-Spec.
 - **Health-Check für B3.** Die Appliance muss deklarieren, was nach einem Update „healthy“ bedeutet. Diese Definition hängt von den Health-Endpunkten des Hauptprojekts ab und ist noch nicht geschrieben.
 - **Ein Update oder zwei.** B9 bevorzugt ein Update für Betriebssystem und Container; B8 bevorzugt den Mechanismus der Distribution. Wo eine Distribution nur sich selbst aktualisiert und Container einer Registry überlässt, ziehen beide in verschiedene Richtungen: Ein Update braucht einen Build und eine Update-Quelle dieses Projekts, zwei Updates brauchen keines von beiden, erlauben aber Kombinationen, die nie gemeinsam veröffentlicht wurden. Was schwerer wiegt, ist nicht entschieden und wird mit der Wahl der Distribution geklärt.

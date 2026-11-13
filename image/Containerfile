@@ -3,8 +3,9 @@ FROM quay.io/fedora/fedora-bootc:44@sha256:ea70c130d55794252b081c606603c6d440556
 
 COPY rootfs/ /
 
-RUN chmod 0755 /usr/libexec/kamerplanter/firstboot \
-    && systemctl enable kamerplanter-firstboot.service
+RUN chmod 0755 /usr/libexec/kamerplanter/configure \
+    && chmod 0700 /etc/kamerplanter && chmod 0600 /etc/kamerplanter/kamerplanter.env \
+    && systemctl enable kamerplanter.target kamerplanter-config.service
 
 # Fail the build when a container unit does not translate.
 RUN /usr/lib/systemd/system-generators/podman-system-generator --dryrun >/dev/null

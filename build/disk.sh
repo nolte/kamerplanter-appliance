@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Builds the raw disk image from the system image in local container storage.
 # Runs inside the tool container (see build/in-tools.sh).
+#
+# The image is written with `bootc install to-disk`. `image-builder` is the
+# intended tool, but its build sandbox (bwrap) is denied by the AppArmor
+# profile that Ubuntu attaches to bwrap, also inside a privileged container.
 set -euo pipefail
 
 ref=${1:?usage: build/disk.sh <image-ref>}
-out=.build/disk
+size=${DISK_SIZE:-10G}
+out=.build/disk.raw
 
-rm -rf "$out"
-image-builder build raw \
-    --bootc-ref "$ref" \
-    --bootc-default-fs ext4 \
-    --output-dir "$out" \
-    --output-name disk \
-    --progress verbose
+mkdir -p .build /run/udev
+rm -f "$out"
+truncate -s "$size" "$out"
 
-raw=$(find "$out" -name '*.raw' | head -n1)
-[ -n "$raw" ] || { echo "no raw image in $out" >&2; ls -lR "$out" >&2; exit 1; }
-mv "$raw" .build/disk.raw
-ls -lh .build/disk.raw
+podman run --rm --privileged --pid=host \
+    --security-opt label=type:unconfined_t \
+    -v /dev:/dev \
+    -v /run/udev:/run/udev \
+    -v /var/lib/containers:/var/lib/containers \
+    -v "$PWD/.build":/output \
+    "$ref" \
+    bootc install to-disk --generic-image --via-loopback --filesystem ext4 --wipe /output/disk.raw
+
+ls -lhs "$out"

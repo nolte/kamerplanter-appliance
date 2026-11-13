@@ -1,7 +1,8 @@
 [Unit]
+PartOf=kamerplanter.target
 Description=Kamerplanter ArangoDB
-Requires=kamerplanter-firstboot.service
-After=kamerplanter-firstboot.service
+Requires=kamerplanter-config.service
+After=kamerplanter-config.service
 
 [Container]
 ContainerName=arangodb
@@ -10,8 +11,10 @@ Network=kamerplanter.network
 Volume=arangodb.volume:/var/lib/arangodb3
 EnvironmentFile=/usr/share/kamerplanter/kamerplanter.env
 EnvironmentFile=/etc/kamerplanter/secrets.env
-# Any HTTP answer counts: the endpoint requires authentication.
-HealthCmd=curl -s -o /dev/null http://localhost:8529/_api/version
+EnvironmentFile=/etc/kamerplanter/kamerplanter.env
+# The image ships neither curl nor an unauthenticated /_api/version, so the
+# upstream Compose health check cannot pass; this endpoint needs no login.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8529/_admin/server/availability
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=5
@@ -25,4 +28,4 @@ Restart=always
 TimeoutStartSec=900
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=kamerplanter.target
