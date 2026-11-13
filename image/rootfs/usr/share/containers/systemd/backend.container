@@ -18,7 +18,11 @@ HealthCmd=curl -sf http://localhost:8000/api/v1/health/live
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=5
-HealthStartPeriod=60s
+# The first start applies the migrations and seeds master data under a
+# database lock. A kill during that work orphans the lock for five minutes
+# (upstream LOCK_TTL_SECONDS), the next start waits on it and is killed in
+# turn, so failures during the start period must not count.
+HealthStartPeriod=10m
 HealthOnFailure=kill
 Notify=healthy
 

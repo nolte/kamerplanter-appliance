@@ -4,6 +4,10 @@
 # tool container (see build/in-tools.sh).
 #
 # Usage: tests/boot/run.sh [run ...]   (default: all runs)
+#
+# shellcheck disable=SC2054,SC2329
+# SC2054: QEMU option values are comma-separated by design.
+# SC2329: the run_* functions are dispatched by name at the bottom.
 set -uo pipefail
 
 DISK=$(realpath "${DISK:-.build/disk.raw}")
@@ -99,7 +103,7 @@ first_boot() {
     local name=$1 overlay=$OUT/$1.qcow2 secs
     new_overlay "$overlay"
     start_vm "$name" "$2" "$3" "$4" on "$overlay" || { record "$name" FAIL - "qemu did not start"; return 1; }
-    if secs=$(wait_up $FIRST_BOOT_TIMEOUT); then
+    if secs=$(wait_up "$FIRST_BOOT_TIMEOUT"); then
         record "$name" PASS "${secs}s" "$2, $3, $4: first boot to web UI and API"
     else
         diagnose "$name"
@@ -140,13 +144,45 @@ run_7() {
     fi
 }
 
+# A value in the user file reaches the services; an invalid one keeps them
+# stopped until it is fixed. Needs the VM of run 1.
+run_8() {
+    vm_alive || { record run8 SKIP - "needs the running VM of run 1"; return; }
+    local file=/etc/kamerplanter/kamerplanter.env secs
+    guest "echo REGISTRATION_MODE=invite_only >>$file && systemctl restart kamerplanter.target"
+    if ! secs=$(wait_up "$REBOOT_TIMEOUT"); then
+        diagnose run8
+        record run8 FAIL - "services did not come back after setting a value in the user file"
+        return
+    fi
+    if [ "$(guest podman exec backend printenv REGISTRATION_MODE)" != invite_only ]; then
+        record run8 FAIL - "value from the user file did not reach the backend"
+        return
+    fi
+    guest "echo FERNET_KEY=invalid >>$file; systemctl restart kamerplanter.target"
+    sleep 20
+    if ! guest systemctl is-failed --quiet kamerplanter-config.service ||
+        guest systemctl is-active --quiet backend.service; then
+        diagnose run8
+        record run8 FAIL - "an invalid FERNET_KEY did not keep the services stopped"
+        return
+    fi
+    guest "sed -i '/^FERNET_KEY=invalid\$/d' $file && systemctl restart kamerplanter.target"
+    if secs=$(wait_up "$REBOOT_TIMEOUT"); then
+        record run8 PASS "${secs}s" "user value applied; invalid value kept the services stopped until removed"
+    else
+        diagnose run8
+        record run8 FAIL - "services did not come back after the invalid value was removed"
+    fi
+}
+
 # Orderly shutdown, then boot the same disk without internet access.
 run_5() {
     [ -f "$OUT/run1.qcow2" ] || { record run5 SKIP - "needs the disk of run 1"; return; }
     vm_alive && stop_vm
     local secs
     start_vm run5 bios virtio-scsi virtio off "$OUT/run1.qcow2"
-    if secs=$(wait_up $REBOOT_TIMEOUT); then
+    if secs=$(wait_up "$REBOOT_TIMEOUT"); then
         record run5 PASS "${secs}s" "reboot without internet access"
     else
         diagnose run5
@@ -160,7 +196,7 @@ run_6() {
     local secs
     kill_vm
     start_vm run6 bios virtio-scsi virtio off "$OUT/run1.qcow2"
-    if secs=$(wait_up $REBOOT_TIMEOUT); then
+    if secs=$(wait_up "$REBOOT_TIMEOUT"); then
         record run6 PASS "${secs}s" "boot after hard reset"
     else
         diagnose run6
@@ -176,8 +212,11 @@ run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
 [ -f "$DISK" ] || { echo "disk image $DISK not found; run 'task disk:build' first" >&2; exit 1; }
 kill_vm 2>/dev/null
 : >"$RESULTS"
-for run in ${@:-1 7 5 6 2 3 4}; do "run_$run"; done
+runs=("$@")
+[ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4)
+for run in "${runs[@]}"; do "run_$run"; done
 kill_vm 2>/dev/null
+chmod -R a+rX "$OUT"
 echo
 column -t -s $'\t' "$RESULTS"
 grep -q FAIL "$RESULTS" && exit 1
