@@ -1,0 +1,41 @@
+name: Release Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (must match an open release-drafter draft)."
+        required: true
+        type: string
+      dry_run:
+        description: "Validate every gate but do not flip draft -> published."
+        required: false
+        type: boolean
+        default: false
+
+# Thin caller for the canonical reusable in nolte/gh-plumbing. The reusable
+# resolves the draft, verifies version-bearing-file alignment and the
+# `chore(release): <tag>` commit, then flips draft -> published. See
+# spec/project/release-automation/ and spec/project/release-skill-layer/.
+#
+# No `asset-filename` yet: building, signing and attaching the ISO and the
+# disk image is still to come, per spec/release-distribution/.
+#
+# When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
+# GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
+# uses it for `gh release edit --draft=false`. App-authored release:published
+# events cascade to release-cd-refresh-master.yml and
+# release-cd-deliver-docs.yml; GITHUB_TOKEN-authored ones do not.
+
+jobs:
+  publish:
+    uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@80cb5ebb91a3b49126729de31b1037f11c34b5cd # v2.2.0
+    with:
+      tag: ${{ inputs.tag }}
+      dry_run: ${{ inputs.dry_run }}
+      app-id: ${{ vars.PORTFOLIO_APP_ID }}
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      app-private-key: ${{ secrets.PORTFOLIO_APP_PRIVATE_KEY }}
+    permissions:
+      contents: write

@@ -1,6 +1,8 @@
 version: "3"
 
 vars:
+  VENV: .venv
+  PIP: "{{.VENV}}/bin/pip"
   TOOLS_IMAGE: kamerplanter-appliance-tools:poc
   IMAGE_REF: localhost/kamerplanter-appliance:poc
 
@@ -13,6 +15,49 @@ tasks:
     cmds:
       - task --list
     silent: true
+
+  setup:
+    desc: Create the project-local venv, install the tooling and docs sets, wire the git hooks
+    cmds:
+      - python3 -m venv {{.VENV}}
+      - "{{.PIP}} install --upgrade pip"
+      - "{{.PIP}} install -r requirements-dev.txt"
+      - "{{.PIP}} install -r docs/requirements.txt"
+      - "{{.VENV}}/bin/pre-commit install"
+      - "touch {{.VENV}}/.install-stamp"
+    # Keyed on the manifests, so a Renovate bump is installed locally before
+    # `task docs` runs against it, as CI does with a fresh install.
+    sources:
+      - requirements-dev.txt
+      - docs/requirements.txt
+      - .pre-commit-config.yaml
+    generates:
+      - "{{.VENV}}/.install-stamp"
+
+  lint:
+    desc: Run every pre-commit hook over the whole tree
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/pre-commit run --all-files"
+
+  docs:
+    desc: Build the documentation site the same way CI does
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/mkdocs build --strict"
+
+  docs:serve:
+    desc: Serve the documentation site locally with live reload
+    deps: [setup]
+    cmds:
+      - "{{.VENV}}/bin/mkdocs serve -a localhost:8001"
+
+  check:
+    desc: The aggregate quality gate — what CI runs on every pull request
+    cmds:
+      - task: lint
+      - task: docs
+      - task: image:build
 
   tools:build:
     desc: Build the tool container (podman, image-builder, QEMU)
@@ -38,4 +83,4 @@ tasks:
     desc: Remove build output and the tool container's volumes
     cmds:
       - build/in-tools.sh rm -rf .build
-      - docker volume rm -f kamerplanter-appliance-containers kamerplanter-appliance-osbuild
+      - docker volume rm -f kamerplanter-appliance-containers

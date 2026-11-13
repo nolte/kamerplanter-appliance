@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    # Job names are the status-check contexts `.github/settings.yml` declares
+    # under `branches[develop].required_status_checks`. Kept free of spaces;
+    # renaming a job renames its context and silently drops it from the
+    # required set — change both files together.
+    name: image-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The Containerfile ends with `bootc container lint` and a dry run of
+      # the Quadlet generator, so a broken unit or image layout fails here.
+      # Building the disk image needs privileges and loop devices and stays
+      # local (`task disk:build`) for now.
+      - name: Build the system image
+        run: podman build -t localhost/kamerplanter-appliance:ci image
+
+  docs:
+    name: docs-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.14'
+
+      - name: Install the docs toolchain
+        run: pip install -r docs/requirements.txt
+
+      # Same command `task docs` runs locally, so a local pass matches CI.
+      - name: Build the site
+        run: mkdocs build --strict
+
+  lint:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.14'
+
+      - name: Install the tooling install set
+        run: pip install -r requirements-dev.txt
+
+      - name: Run every hook
+        run: pre-commit run --all-files --show-diff-on-failure

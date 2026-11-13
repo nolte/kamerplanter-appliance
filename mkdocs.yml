@@ -1,0 +1,133 @@
+site_name: kamerplanter-appliance
+site_url: https://nolte.github.io/kamerplanter-appliance/
+site_description: A bootable, self-updating appliance for Kamerplanter.
+site_author: nolte
+
+repo_url: https://github.com/nolte/kamerplanter-appliance
+repo_name: nolte/kamerplanter-appliance
+# develop, not main: main is the release branch and carries no docs/ tree.
+edit_uri: edit/develop/docs/
+
+copyright: Copyright &copy; 2026 nolte
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: en
+
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: green
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: green
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+  features:
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+plugins:
+  # Declared explicitly: MkDocs enables `search` by default only while no other
+  # plugin is listed, so naming any plugin would otherwise drop the search bar.
+  - search:
+      lang:
+        - en
+        - de
+
+  - i18n:
+      docs_structure: folder
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: de
+          name: Deutsch
+          build: true
+          nav_translations:
+            Home: Startseite
+            Getting Started: Erste Schritte
+            References: Referenzen
+            Configuration: Konfiguration
+
+  # Lets a page quote a canonical source instead of a frozen copy. Include
+  # paths resolve relative to docs_dir, not relative to the including page.
+  - include-markdown
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/nolte/kamerplanter-appliance
+
+# Guides, ADRs and Project are further standard sections; they stay out until
+# the repository carries the corresponding content (spec/project/mkdocs-structure/
+# §Top-level navigation: an empty section is a reader trap).
+nav:
+  - Home: en/index.md
+  - Getting Started:
+      - en/getting-started/index.md
+  - References:
+      - en/references/index.md
+      - Configuration: en/references/configuration.md

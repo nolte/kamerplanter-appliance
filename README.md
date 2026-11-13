@@ -1,5 +1,9 @@
 # Kamerplanter Appliance
 
+[![ci](https://github.com/nolte/kamerplanter-appliance/actions/workflows/ci.yml/badge.svg)](https://github.com/nolte/kamerplanter-appliance/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-nolte.github.io%2Fkamerplanter--appliance-blue)](https://nolte.github.io/kamerplanter-appliance/)
+[![Status](https://img.shields.io/badge/status-proof%20of%20concept-orange.svg)](#)
+
 A bootable appliance for [Kamerplanter](https://github.com/nolte/kamerplanter), the self-hosted plant lifecycle management system.
 
 The appliance is built on an immutable Linux. Its image installs the operating system and brings up all required Kamerplanter containers. Getting started means booting that image, and running it afterwards means not having to look after a Linux distribution.
