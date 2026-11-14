@@ -14,10 +14,21 @@ LABEL org.opencontainers.image.title="Kamerplanter appliance" \
 
 COPY rootfs/ /
 
-# The key that signs released system images. Updates are verified against it
-# (spec/update-and-rollback/ B3); a build without it would install appliances
-# that accept no update at all.
-COPY keys/system-image.pub /usr/share/kamerplanter/keys/system-image.pub
+# The public half of the shared key that signs released system images.
+# Updates are verified against it (spec/update-and-rollback/ B3); a build
+# without it would install appliances that accept no update at all. Its
+# canonical copy is in nolte/gh-plumbing (keys/system-image.pub); the build
+# fetches it from a pinned ref and fails when the fingerprint differs. Change
+# both values together, and the fingerprint only during a key rotation.
+# The ref is the commit of nolte/gh-plumbing#444 until a gh-plumbing release
+# contains the key; then it becomes that release tag.
+ARG GH_PLUMBING_REF=de8d3192fbad4c30237b77b129d563ff84f40eb6
+ARG SYSTEM_IMAGE_KEY_SHA256=35eab2c5b1a413e82ebd8919f2158e68af7c165da4535533ebf15a9f9a8bd084
+RUN install -d -m 0755 /usr/share/kamerplanter/keys \
+    && curl -fsSL --retry 3 -o /usr/share/kamerplanter/keys/system-image.pub \
+        "https://raw.githubusercontent.com/nolte/gh-plumbing/${GH_PLUMBING_REF}/keys/system-image.pub" \
+    && echo "${SYSTEM_IMAGE_KEY_SHA256}  /usr/share/kamerplanter/keys/system-image.pub" | sha256sum -c - \
+    && chmod 0644 /usr/share/kamerplanter/keys/system-image.pub
 
 RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/bin/kamerplanter-update \
         /usr/lib/systemd/system-generators/kamerplanter-update-window \

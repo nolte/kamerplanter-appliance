@@ -14,7 +14,7 @@ name: disk-image
 # With `publish-image`, the release workflow's case, the system image is
 # pushed to ghcr.io under the version, signed with the update key that every
 # appliance trusts (spec/update-and-rollback/ B3), checked against the public
-# key in image/keys/, and the disk is written from the pushed image. An
+# key built into the image, and the disk is written from the pushed image. An
 # installed appliance then runs exactly the digest the registry serves.
 
 on:
@@ -171,7 +171,10 @@ jobs:
         run: |
           set -euo pipefail
           policy=$(mktemp "$RUNNER_TEMP/policy.XXXXXX")
-          jq -n --arg image "$IMAGE" --arg key "$PWD/image/keys/system-image.pub" '{
+          key=$(mktemp "$RUNNER_TEMP/key.XXXXXX")
+          sudo podman run --rm --entrypoint cat localhost/kamerplanter-appliance:ci \
+            /usr/share/kamerplanter/keys/system-image.pub >"$key"
+          jq -n --arg image "$IMAGE" --arg key "$key" '{
             default: [{type: "reject"}],
             transports: {docker: {($image): [{type: "sigstoreSigned", keyPath: $key,
               signedIdentity: {type: "matchRepository"}}]}}}' >"$policy"

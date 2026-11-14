@@ -60,7 +60,7 @@ sha256sum --check --ignore-missing SHA256SUMS
 
 Installed appliances update from `ghcr.io/nolte/kamerplanter-appliance`. Each released system image carries two signatures:
 
-- one with the **update key**, which every appliance checks before it stages an update. Its public part is in the repository at `image/keys/system-image.pub` and on every appliance at `/usr/share/kamerplanter/keys/system-image.pub`. Appliances cannot check the workflow identity below yet, because the container tools they use only accept keys for now.
+- one with the **update key**, which every appliance checks before it stages an update. Its public part is published in [`nolte/gh-plumbing`](https://github.com/nolte/gh-plumbing) at `keys/system-image.pub` and is on every appliance at `/usr/share/kamerplanter/keys/system-image.pub`. Appliances cannot check the workflow identity below yet, because the container tools they use only accept keys for now.
 - one **keyless** signature by the release workflow, like the files above:
 
 ```bash
