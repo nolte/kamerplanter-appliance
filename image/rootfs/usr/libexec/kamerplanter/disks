@@ -1,0 +1,545 @@
+#!/usr/bin/bash
+# The data disk and the backup disk of the Kamerplanter appliance
+# (spec/distribution-requirements/ E6-E16). Both are optional.
+#
+#   disks start data     run by kamerplanter-data-disk.service on every boot,
+#                        before anything reads the configuration or the data
+#   disks start backup   run by kamerplanter-backup-disk.service
+#   disks status         what is set up, and where it is mounted
+#
+# Naming. A disk is named by a /dev/disk/by-id/ or /dev/disk/by-uuid/ path in
+# the user file (DATA_DISK, BACKUP_DISK) or as the system credential
+# kamerplanter.data-disk or kamerplanter.backup-disk. Nothing else is ever
+# formatted or adopted, also not a disk that only carries the label.
+#
+# Set-up. A named disk that is not set up yet is
+#   - adopted when it carries an ext4 file system with its label already,
+#   - formatted ext4 with the label kp-data or kp-backup when it is blank,
+#   - refused when it carries another signature, which the message names,
+#     unless DATA_DISK_FORCE=1 or BACKUP_DISK_FORCE=1 (credential
+#     kamerplanter.data-disk-force, kamerplanter.backup-disk-force) forces the
+#     format; a force applies once to the path it names,
+#   - always refused when it, or a partition on it, carries kp-data or
+#     kp-backup in another way, is or lies on the disk holding the running
+#     system, is mounted or otherwise in use, or is not a local disk.
+#
+# State in /var/lib/kamerplanter/disks/ on the system disk:
+#   ROLE.env    the disk is set up: its label, file system and UUID. Only this
+#               record makes a disk "set up", so a missing disk is told apart
+#               from one that never was. Delete it only to retire the disk.
+#   forced      the paths a forced format was used for, one per line
+#   log.jsonl   one JSON object per set-up
+#
+# Every boot. A disk that is set up is found by its label and accepted only
+# under the recorded UUID; it is checked (e2fsck -p) and mounted nosuid,
+# nodev,noexec at /var/mnt/kamerplanter-data or /var/mnt/kamerplanter-backup.
+# The unit fails, and the services that require it stay stopped, when the
+# data disk is missing, when a label is on more than one device or under
+# another UUID, and when a check fails; the console says why
+# (/run/issue.d/40-kamerplanter-ROLE-disk.issue). A missing backup disk is
+# reported only: the pre-update backup then goes to the next location.
+set -euo pipefail
+umask 077
+
+records=/var/lib/kamerplanter/disks
+defaults=/usr/share/kamerplanter/kamerplanter.env
+user=/etc/kamerplanter/kamerplanter.env
+lock=/run/kamerplanter-disks.lock
+# Seconds a set-up disk, or a named one, gets to appear: USB disks take a moment.
+wait_seconds=30
+
+# ---------------------------------------------------------------------------
+# Decisions without side effects; tests/unit/disks.sh runs them on fake input.
+
+# classify LABEL UUID < the output of `blkid -o export` for every device:
+#   ok DEVICE            exactly one device carries LABEL, under UUID
+#   missing              no device carries LABEL
+#   duplicate DEVICE...  more than one device carries LABEL
+#   foreign DEVICE UUID  one device carries LABEL, under another UUID
+# A partition label (PARTLABEL) does not count. UUIDs compare case-blind.
+classify() {
+    local label=$1 uuid=${2,,} line dev='' lbl='' id='' hits=() d i
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+            DEVNAME=*)
+                if [ -n "$dev" ] && [ "$lbl" = "$label" ]; then hits+=("$dev ${id,,}"); fi
+                dev=${line#DEVNAME=} lbl='' id=''
+                ;;
+            LABEL=*) lbl=${line#LABEL=} ;;
+            UUID=*) id=${line#UUID=} ;;
+        esac
+    done
+    if [ -n "$dev" ] && [ "$lbl" = "$label" ]; then hits+=("$dev ${id,,}"); fi
+    case ${#hits[@]} in
+        0) echo missing ;;
+        1)
+            read -r d i <<<"${hits[0]}" || true
+            if [ "${i-}" = "$uuid" ]; then echo "ok $d"; else echo "foreign $d ${i:-none}"; fi
+            ;;
+        *)
+            printf duplicate
+            for d in "${hits[@]}"; do printf ' %s' "${d%% *}"; done
+            echo
+            ;;
+    esac
+}
+
+# setup_action LABEL TYPE FOUND_LABEL KEPT FORCE FORCED_BEFORE [SIGNATURE...]:
+# what to do with a named device that is not set up yet. TYPE and FOUND_LABEL
+# are the device's own file system and label, KEPT says which part of it
+# carries kp-data or kp-backup (empty when none), FORCE is 1 when the naming
+# forces a format, FORCED_BEFORE is 1 when a forced format was used for this
+# path already, and the signatures are those wipefs finds on it and on its
+# partitions. Prints adopt, format, wipe (wipe the signatures, then format),
+# or "refuse REASON".
+setup_action() {
+    local label=$1 type=$2 found=$3 kept=$4 force=$5 forced=$6
+    shift 6
+    if [ "$found" = "$label" ] && [ "$type" = ext4 ]; then echo adopt; return; fi
+    if [ -n "$kept" ]; then echo "refuse $kept, and is never formatted again"; return; fi
+    if [ $# -eq 0 ]; then echo format; return; fi
+    local sigs=$1
+    shift
+    while [ $# -gt 0 ]; do sigs+=", $1"; shift; done
+    if [ "$force" != 1 ]; then
+        echo "refuse it carries $sigs; it is formatted only when the naming forces it"
+    elif [ "$forced" = 1 ]; then
+        echo "refuse it carries $sigs, and the forced format of this path was used already"
+    else
+        echo wipe
+    fi
+}
+
+# remote_kind KNAME TRAN SYSFS_PATH: why a device in the chain of a disk is
+# not a local disk (spec/distribution-requirements/ E15); prints nothing when
+# it is one. KNAME is the kernel name, TRAN the transport lsblk reports, and
+# SYSFS_PATH the resolved /sys/class/block/KNAME.
+remote_kind() {
+    case $1 in
+        nbd* | rbd* | drbd*) echo "$1 is a network block device"; return ;;
+        loop* | ram* | zram* | sr*) echo "$1 is not a disk"; return ;;
+    esac
+    case $2 in
+        iscsi | fc | fcoe | tcp | rdma) echo "$1 is attached over the network ($2)"; return ;;
+    esac
+    case $3 in
+        */session[0-9]*/* | */nvme-fabrics/*) echo "$1 is attached over the network"; return ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# The appliance.
+
+role_vars() {
+    role=$1
+    case $role in
+        data) label=kp-data key=DATA_DISK cred=kamerplanter.data-disk other_key=BACKUP_DISK other_cred=kamerplanter.backup-disk other=backup ;;
+        backup) label=kp-backup key=BACKUP_DISK cred=kamerplanter.backup-disk other_key=DATA_DISK other_cred=kamerplanter.data-disk other=data ;;
+        *) return 1 ;;
+    esac
+    unit=kamerplanter-$role-disk.service
+    mnt=/var/mnt/kamerplanter-$role
+    record=$records/$role.env
+    issue=/run/issue.d/40-kamerplanter-$role-disk.issue
+}
+
+# report MESSAGE HINT: on the console until the unit succeeds again.
+report() {
+    install -d -m 0755 /run/issue.d
+    {
+        echo "Kamerplanter: $1"
+        if [ -n "${2-}" ]; then echo "  $2"; fi
+        echo "  details: systemctl status $unit"
+        echo
+    } >"$issue.tmp"
+    chmod 0644 "$issue.tmp"
+    mv "$issue.tmp" "$issue"
+    agetty --reload >/dev/null 2>&1 || true
+}
+clear_report() {
+    if [ -e "$issue" ]; then
+        rm -f "$issue"
+        agetty --reload >/dev/null 2>&1 || true
+    fi
+}
+
+# die MESSAGE [HINT]: the unit fails, so every service that requires it stays
+# stopped; the journal (and so `systemctl status`) and the console say why.
+die() {
+    local hint=${2:-fix this, then run: systemctl restart kamerplanter.target}
+    echo "$1" >&2
+    echo "$hint" >&2
+    report "$1; the services stay stopped" "$hint"
+    exit 1
+}
+
+log_event() {  # log_event EVENT DETAIL
+    install -d -m 0700 "$records"
+    jq -cn --arg time "$(date -u +%FT%TZ)" --arg disk "$label" --arg event "$1" --arg detail "$2" \
+        '{time: $time, disk: $disk, event: $event, detail: $detail}' >>"$records/log.jsonl"
+    echo "$label: $1: $2"
+}
+
+# Replaces a file with what stdin delivers, durably (as configure does).
+replace() {
+    local tmp
+    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
+    cat >"$tmp"
+    sync "$tmp"
+    mv "$tmp" "$1"
+    sync "$(dirname "$1")"
+}
+
+# credential NAME: a system credential imported by the unit; empty without.
+credential() {
+    local file=${CREDENTIALS_DIRECTORY-}/$1 value
+    [ -n "${CREDENTIALS_DIRECTORY-}" ] && [ -f "$file" ] || return 0
+    value=$(head -c 4096 "$file")
+    # Without trailing whitespace, a trailing CR included.
+    printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+# naming: sets name and force for this role, other_name for the other one,
+# and conflict when the setting and the credential name different disks.
+naming() {
+    local setting credential
+    load "$defaults" "$user"
+    setting=$(get "$key")
+    credential=$(credential "$cred")
+    name=${credential:-$setting}
+    conflict=
+    if [ -n "$setting" ] && [ -n "$credential" ] && [ "$setting" != "$credential" ]; then
+        conflict="the setting $key=$setting and the credential $cred=$credential name different disks"
+    fi
+    force=0
+    if [ "$(get "${key}_FORCE")" = 1 ] || [ "$(credential "$cred-force")" = 1 ]; then force=1; fi
+    other_name=$(credential "$other_cred")
+    other_name=${other_name:-$(get "$other_key")}
+}
+
+# probe DEVICE: sets fs_type, fs_label and fs_uuid from the device itself,
+# not from a cache.
+probe() {
+    fs_type='' fs_label='' fs_uuid=''
+    local line
+    while IFS= read -r line; do
+        case $line in
+            TYPE=*) fs_type=${line#TYPE=} ;;
+            LABEL=*) fs_label=${line#LABEL=} ;;
+            UUID=*) fs_uuid=${line#UUID=} ;;
+        esac
+    done < <(blkid -p -o export -- "$1" 2>/dev/null || true)
+}
+
+# not_local DEVICE: prints why DEVICE, or a device it is built on, is not a
+# local disk; fails when it is one.
+not_local() {
+    local kname tran why
+    while read -r kname tran; do
+        [ -n "$kname" ] || continue
+        why=$(remote_kind "$kname" "${tran-}" "$(readlink -f "/sys/class/block/$kname")")
+        if [ -n "$why" ]; then echo "$why"; return 0; fi
+    done < <(lsblk -nrso KNAME,TRAN -- "$1")
+    return 1
+}
+
+# roots DEVICE: the devices DEVICE is built on that are built on nothing
+# themselves: its whole disk, not a partition or a mapped device.
+roots() {
+    local path kname
+    while read -r path kname; do
+        [ -n "$kname" ] && [ ! -e "/sys/class/block/$kname/partition" ] || continue
+        [ -z "$(find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 2>/dev/null)" ] || continue
+        echo "$path"
+    done < <(lsblk -nrspo NAME,KNAME -- "$1") | sort -u
+}
+
+# The whole disks that hold the running system: below the mounted system
+# file systems and the swap areas.
+system_disks() {
+    local mp src
+    {
+        for mp in / /sysroot /boot /boot/efi /usr /etc /var; do
+            findmnt -rnvo SOURCE -T "$mp" 2>/dev/null || true
+        done
+        awk 'NR > 1 {print $1}' /proc/swaps
+    } | sort -u | while IFS= read -r src; do
+        [ -b "$src" ] || continue
+        roots "$src"
+    done | sort -u
+}
+
+# system_device DEVICE: prints why DEVICE belongs to the running system;
+# fails when it does not. When this cannot be decided, it counts as the system.
+system_device() {
+    local disks mine d
+    disks=$(system_disks)
+    if [ -z "$disks" ]; then echo "the disk holding the running system cannot be determined"; return 0; fi
+    mine=$(roots "$1")
+    if [ -z "$mine" ]; then echo "the disk it lies on cannot be determined"; return 0; fi
+    for d in $mine; do
+        if grep -Fqx -- "$d" <<<"$disks"; then echo "it is on $d, the disk holding the running system"; return 0; fi
+    done
+    return 1
+}
+
+# in_use DEVICE: prints why DEVICE or a partition on it is in use (mounted,
+# swap, or held by a device mapper or RAID device); fails when it is not.
+in_use() {
+    local d k at holders
+    while read -r d k; do
+        at=$(findmnt -rno TARGET -S "$d" 2>/dev/null | head -n1 || true)
+        if [ -n "$at" ]; then echo "$d is mounted at $at"; return 0; fi
+        if awk 'NR > 1 {print $1}' /proc/swaps | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
+        holders=$(find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)
+        if [ -n "$holders" ]; then echo "$d is in use by ${holders% }"; return 0; fi
+    done < <(lsblk -nrpo NAME,KNAME -- "$1")
+    return 1
+}
+
+# DEVICE itself, then the partitions and other devices on it.
+tree() { lsblk -nrpo NAME -- "$1"; }
+
+# kept DEVICE: which part of DEVICE carries kp-data or kp-backup; empty when none.
+kept() {
+    local d
+    while IFS= read -r d; do
+        probe "$d"
+        case $fs_label in
+            kp-data | kp-backup)
+                if [ "$d" = "$1" ]; then
+                    echo "it carries the label $fs_label${fs_type:+ on $fs_type}"
+                else
+                    echo "its partition $d carries the label $fs_label"
+                fi
+                return
+                ;;
+        esac
+    done < <(tree "$1")
+}
+
+# signatures DEVICE: every signature wipefs finds on DEVICE and its partitions.
+signatures() {
+    local d out line devices
+    devices=$(tree "$1") || return 1
+    while IFS= read -r d; do
+        out=$(wipefs --noheadings --output TYPE -- "$d") || return 1
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            if [ "$d" = "$1" ]; then echo "$line"; else echo "$line on $d"; fi
+        done <<<"$out"
+    done <<<"$devices"
+}
+
+# mount_disk DEVICE UUID: check and mount the disk; done already counts.
+mount_disk() {
+    local dev=$1 uuid=$2 src opts at rc=0
+    if mountpoint -q "$mnt"; then
+        src=$(findmnt -rnvo SOURCE -M "$mnt")
+        opts=$(findmnt -rno OPTIONS -M "$mnt")
+        probe "$src"
+        if [ "${fs_uuid,,}" = "${uuid,,}" ] && [[ ,$opts, == *,nosuid,* && ,$opts, == *,nodev,* && ,$opts, == *,noexec,* ]]; then
+            clear_report
+            echo "$label disk ($uuid) is mounted at $mnt"
+            return
+        fi
+        die "$mnt is mounted from $src, not from the $label disk with UUID $uuid as nosuid,nodev,noexec"
+    fi
+    at=$(findmnt -rno TARGET -S "$dev" 2>/dev/null | head -n1 || true)
+    [ -z "$at" ] || die "the $label disk $dev is mounted at $at already; it is not mounted a second time"
+    e2fsck -p "$dev" >&2 || rc=$?
+    # 1 and 2: errors corrected; anything above: not repaired.
+    if [ $((rc & ~3)) -ne 0 ]; then
+        die "the file system check of the $label disk $dev found errors it could not repair (e2fsck exit $rc)" \
+            "check it with: e2fsck -f $dev, then run: systemctl restart kamerplanter.target"
+    fi
+    [ -d /var/mnt ] || install -d -m 0755 /var/mnt
+    install -d -m 0700 "$mnt"
+    mount -t ext4 -o nosuid,nodev,noexec "$dev" "$mnt" || die "the $label disk $dev could not be mounted at $mnt"
+    chown root:root "$mnt"
+    chmod 0700 "$mnt"
+    clear_report
+    echo "$label disk $dev ($uuid) checked and mounted at $mnt"
+}
+
+# A disk that is set up: find it by label, accept it only under its UUID.
+find_and_mount() {
+    local uuid type result verdict dev other deadline
+    load "$record"
+    uuid=$(get UUID)
+    type=$(get TYPE)
+    [[ $uuid =~ ^[0-9A-Fa-f-]{8,}$ ]] && [ -n "$type" ] ||
+        die "the record $record of the $label disk is damaged" \
+            "restore it from a backup, or delete it and name the disk again, then run: systemctl restart kamerplanter.target"
+    deadline=$((SECONDS + wait_seconds))
+    udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
+    while :; do
+        result=$({ blkid -c /dev/null -o export 2>/dev/null || true; } | classify "$label" "$uuid")
+        if [ "$result" != missing ] || [ "$SECONDS" -ge "$deadline" ]; then break; fi
+        sleep 2
+    done
+    read -r verdict dev other _ <<<"$result" || true
+    case $verdict in
+        ok) ;;
+        missing)
+            if [ "$role" = backup ]; then
+                echo "backup disk $label ($uuid) is missing; the pre-update backup goes to the next location" >&2
+                report "backup disk $label is missing" "the pre-update backup goes to the next location; attach the disk to use it again"
+                return 0
+            fi
+            die "data disk $label is missing" \
+                "attach it (file system UUID $uuid), then run: systemctl restart kamerplanter.target"
+            ;;
+        duplicate)
+            die "$role disk $label: more than one device carries the label (${result#duplicate }); none of them is used" \
+                "detach or relabel every device that is not the $role disk with UUID $uuid, then run: systemctl restart kamerplanter.target"
+            ;;
+        foreign)
+            die "$role disk $label is missing: $dev carries the label under UUID $other, not under the UUID $uuid that was set up, and is not used" \
+                "attach the disk that was set up, then run: systemctl restart kamerplanter.target"
+            ;;
+        *) die "the devices could not be read for the label $label" ;;
+    esac
+    local why
+    if why=$(not_local "$dev"); then die "the $label disk $dev is not used: $why"; fi
+    if why=$(system_device "$dev"); then die "the $label disk $dev is not used: $why"; fi
+    probe "$dev"
+    [ "$fs_type" = "$type" ] ||
+        die "$role disk $label is missing: $dev carries the label as ${fs_type:-unknown}, but was set up as $type; it is not used"
+    if [ -n "$name" ] && [ "$(readlink -f -- "$name" 2>/dev/null || true)" != "$dev" ]; then
+        echo "$key names $name, but the $role disk set up is $dev ($uuid); the naming is not used while that disk is set up" >&2
+    fi
+    if [ "$type" != ext4 ]; then die "the $label disk $dev is $type, which this release cannot mount"; fi
+    mount_disk "$dev" "$uuid"
+}
+
+# A named disk that is not set up yet: adopt, format, or refuse it.
+set_up() {
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline
+    [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
+    disk_path_ok "$name" ||
+        die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $name" \
+            "name the disk by one of those paths (ls -l /dev/disk/by-id/), then run: systemctl restart kamerplanter.target"
+    deadline=$((SECONDS + wait_seconds))
+    udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
+    until [ -e "$name" ]; do
+        [ "$SECONDS" -lt "$deadline" ] ||
+            die "the disk $name named as $role disk is not attached" \
+                "attach it, or correct $key, then run: systemctl restart kamerplanter.target"
+        sleep 2
+    done
+    dev=$(readlink -f -- "$name")
+    [ -b "$dev" ] || die "$name, named as $role disk, is not a block device"
+    if [ -n "$other_name" ]; then
+        other_dev=$(readlink -f -- "$other_name" 2>/dev/null || true)
+        [ "$other_dev" != "$dev" ] || die "$name is named as data disk and as backup disk"
+    fi
+    if why=$(not_local "$dev"); then die "$name ($dev) is not used as $role disk: $why"; fi
+    if why=$(system_device "$dev"); then die "$name ($dev) is not used as $role disk: $why"; fi
+    if why=$(in_use "$dev"); then die "$name ($dev) is not used as $role disk: $why"; fi
+    probe "$dev"
+    local type=$fs_type found=$fs_label uuid=$fs_uuid
+    kept_by=$(kept "$dev")
+    out=$(signatures "$dev") || die "the signatures on $name ($dev) cannot be read; it is not formatted"
+    if [ -n "$out" ]; then mapfile -t sigs < <(awk '!seen[$0]++' <<<"$out"); fi
+    if grep -Fqx -- "$name" "$records/forced" 2>/dev/null; then forced_before=1; fi
+    action=$(setup_action "$label" "$type" "$found" "$kept_by" "$force" "$forced_before" "${sigs[@]}")
+    case $action in
+        adopt)
+            if [ -e "$records/$other.env" ]; then
+                load "$records/$other.env"
+                [ "$(get UUID)" != "$uuid" ] || die "$name ($dev) is set up as $other disk already"
+            fi
+            ;;
+        format | wipe)
+            if [ "$action" = wipe ]; then
+                # Recorded before the wipe, so a crash cannot make the force
+                # apply a second time.
+                install -d -m 0700 "$records"
+                { cat "$records/forced" 2>/dev/null || true; echo "$name"; } | replace "$records/forced"
+                # Partitions first, the device itself last.
+                local d
+                while IFS= read -r d; do
+                    wipefs --all --quiet -- "$d" || die "the signatures on $d could not be removed"
+                done < <(tree "$dev" | tac)
+                log_event wiped "removed ${sigs[*]} from $name ($dev), as the naming forced"
+            fi
+            mkfs.ext4 -q -F -L "$label" "$dev" || die "formatting $name ($dev) as $label failed"
+            udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
+            probe "$dev"
+            uuid=$fs_uuid
+            [ "$fs_label" = "$label" ] && [ -n "$uuid" ] || die "$name ($dev) does not carry $label after formatting"
+            ;;
+        refuse\ *)
+            die "$name ($dev) is not used as $role disk: ${action#refuse }" \
+                "name a blank disk, or force the format with ${key}_FORCE=1 if its content may be destroyed, then run: systemctl restart kamerplanter.target"
+            ;;
+        *) die "no decision for $name ($dev): $action" ;;
+    esac
+    install -d -m 0700 "$records"
+    {
+        echo "# The $role disk of this appliance, set up by /usr/libexec/kamerplanter/disks."
+        echo "# Delete this file only to retire the disk."
+        echo "LABEL=$label"
+        echo "TYPE=ext4"
+        echo "UUID=$uuid"
+        echo "NAMED=$name"
+        echo "SINCE=$(date -u +%FT%TZ)"
+    } | replace "$record"
+    if [ "$action" = adopt ]; then
+        log_event adopted "$name ($dev) with file system UUID $uuid"
+    else
+        log_event formatted "$name ($dev) as ext4, file system UUID $uuid"
+    fi
+    mount_disk "$dev" "$uuid"
+}
+
+cmd_start() {
+    role_vars "${1-}" || usage
+    exec 9>"$lock"
+    flock 9
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    naming
+    if [ -e "$record" ]; then
+        if [ -n "$conflict" ]; then echo "$conflict; both are ignored while a $role disk is set up" >&2; fi
+        find_and_mount
+    elif [ -n "$name" ]; then
+        set_up
+    else
+        clear_report
+        echo "no $role disk is set up or named"
+    fi
+}
+
+cmd_status() {
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    local r
+    for r in data backup; do
+        role_vars "$r"
+        if [ ! -e "$record" ]; then
+            echo "$role disk: not set up"
+            continue
+        fi
+        load "$record"
+        if mountpoint -q "$mnt"; then
+            echo "$role disk: $label, UUID $(get UUID), mounted at $mnt from $(findmnt -rnvo SOURCE -M "$mnt")"
+        else
+            echo "$role disk: $label, UUID $(get UUID), not mounted (see: systemctl status $unit)"
+        fi
+    done
+}
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+main() {
+    case ${1-} in
+        start) shift; cmd_start "$@" ;;
+        status) cmd_status ;;
+        *) usage ;;
+    esac
+}
+
+# Sourced by tests/unit/disks.sh for the decisions only.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

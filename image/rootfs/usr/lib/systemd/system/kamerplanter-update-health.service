@@ -1,7 +1,10 @@
 [Unit]
 Description=Check a newly activated Kamerplanter version and roll it back when it fails
 Documentation=file:///usr/bin/kamerplanter-update
-After=kamerplanter-update-guard.service kamerplanter-config.service network-online.target
+# A missing data disk is no failed start (spec/distribution-requirements/
+# E11): without it, no version is judged and none is rolled back.
+Requires=kamerplanter-data-disk.service
+After=kamerplanter-data-disk.service kamerplanter-update-guard.service kamerplanter-config.service network-online.target
 Wants=network-online.target
 
 [Service]

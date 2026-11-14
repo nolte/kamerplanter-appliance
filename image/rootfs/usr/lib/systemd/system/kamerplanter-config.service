@@ -1,6 +1,10 @@
 [Unit]
 Description=Prepare and check the Kamerplanter configuration
 PartOf=kamerplanter.target
+# The configuration may live on the data disk, and configure generates
+# secrets: it never runs while a data disk that is set up is missing.
+Requires=kamerplanter-data-disk.service
+After=kamerplanter-data-disk.service
 
 [Service]
 Type=oneshot

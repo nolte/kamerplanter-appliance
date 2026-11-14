@@ -1,0 +1,32 @@
+[Unit]
+Description=Find, check and mount the Kamerplanter data disk
+Documentation=file:///usr/libexec/kamerplanter/disks
+# Everything that reads the configuration or the data runs after this unit:
+# kamerplanter-config.service, kamerplanter-update-guard.service and
+# kamerplanter-update-health.service require it and are ordered after it, and
+# every Kamerplanter container requires the first two. Without a data disk set
+# up or named, this unit does nothing. When one is set up but missing, it
+# fails and none of them starts (spec/distribution-requirements/ E12); once
+# the disk is back, `systemctl restart kamerplanter.target` runs it again.
+# Not part of kamerplanter.target, so restarting the target does not restart
+# the units that require this one.
+DefaultDependencies=no
+After=local-fs.target systemd-udev-trigger.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/kamerplanter/disks start data
+# The provisioner may name the disks as system credentials; both are read, so
+# one disk is never named as data disk and as backup disk.
+ImportCredential=kamerplanter.data-disk
+ImportCredential=kamerplanter.data-disk-force
+ImportCredential=kamerplanter.backup-disk
+ImportCredential=kamerplanter.backup-disk-force
+# Formatting and checking a large disk take as long as they take.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=kamerplanter.target

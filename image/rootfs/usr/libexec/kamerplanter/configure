@@ -55,6 +55,16 @@ replace() {
 . /usr/lib/kamerplanter/env.sh
 digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
 
+# A data disk that is set up but not mounted is never replaced by the system
+# disk: nothing is generated or written (spec/distribution-requirements/
+# E12). kamerplanter-config.service requires kamerplanter-data-disk.service,
+# which mounts it; this holds however configure is started.
+if [ -e /var/lib/kamerplanter/disks/data.env ] && ! mountpoint -q /var/mnt/kamerplanter-data; then
+    echo "data disk kp-data is missing; the services stay stopped and nothing is generated." >&2
+    echo "Attach it, then run: systemctl restart kamerplanter.target (details: systemctl status kamerplanter-data-disk.service)" >&2
+    exit 1
+fi
+
 if [ "${1-}" = pin ]; then
     # Pin what the services were started with, not what the files say now.
     shift
@@ -126,6 +136,14 @@ fi
     fail "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes"
 [[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]*$ ]] ||
     fail "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
+# Checked for their form only; kamerplanter-data-disk.service and
+# kamerplanter-backup-disk.service decide whether a named disk is used.
+for key in DATA_DISK BACKUP_DISK; do
+    value=$(get "$key")
+    [ -z "$value" ] || disk_path_ok "$value" ||
+        fail "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path"
+    [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
+done
 case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
 
 for key in "${!pinned[@]}"; do

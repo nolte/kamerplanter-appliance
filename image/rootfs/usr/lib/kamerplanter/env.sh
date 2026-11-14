@@ -34,3 +34,13 @@ load() {
     done
 }
 get() { printf '%s' "${cfg[$1]-}"; }
+
+# disk_path_ok PATH: whether PATH names a disk the only way
+# spec/distribution-requirements/ E7 allows, /dev/disk/by-id/NAME or
+# /dev/disk/by-uuid/NAME, with NAME one path component in the characters udev
+# uses for these links. The configuration check and the disk service
+# (/usr/libexec/kamerplanter/disks) both test a naming with it.
+disk_path_ok() {
+    local re='^/dev/disk/by-(id|uuid)/[-0-9A-Za-z#+.:=@_]+$'
+    [[ $1 =~ $re ]] && [ "${1##*/}" != . ] && [ "${1##*/}" != .. ]
+}
