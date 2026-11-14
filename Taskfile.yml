@@ -92,6 +92,12 @@ tasks:
     cmds:
       - build/in-tools.sh tests/boot/run.sh {{.CLI_ARGS}}
 
+  test:update:
+    desc: Update and rollback tests against a local registry (after image:build; steps as CLI_ARGS)
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh tests/boot/update.sh {{.CLI_ARGS}}
+
   clean:
     desc: Remove build output and the tool container's volumes
     cmds:

@@ -1,0 +1,6 @@
+# The system image is signed with the appliance's update key in the sigstore
+# format of containers/image; its signatures are stored next to the image in
+# the registry. policy.json requires them for this repository.
+docker:
+  ghcr.io/nolte/kamerplanter-appliance:
+    use-sigstore-attachments: true

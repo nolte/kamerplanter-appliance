@@ -69,7 +69,7 @@ Leser: Maintainer, die die Workflows schreiben, Reviewer des Release-Prozesses u
 - **D5 MUSS [MUST]** die Berechtigungen zum Signieren und Attestieren nur dem Job gewähren, der signiert.
 - **D6 MUSS [MUST]** nur signieren, was derselbe Workflow-Lauf gebaut hat.
 - **D7 MUSS [MUST]** das Signaturmaterial als Release-Assets neben den Artefakten veröffentlichen.
-- **D8 MUSS [MUST]** das System-Image in der Container-Registry mit derselben Identität signieren, sodass die Download-Prüfung und die Update-Prüfung aus `spec/distribution-requirements/` §B einem Unterzeichner vertrauen.
+- **D8 MUSS [MUST]** das System-Image in der Container-Registry mit derselben Identität signieren, sodass es sich wie die heruntergeladenen Artefakte prüfen lässt. Solange die Container-Werkzeuge auf der Appliance diese Identität nicht prüfen können, **MUSS [MUST]** das System-Image zusätzlich eine Signatur mit einem Update-Schlüssel tragen, dessen öffentlicher Teil im Image liegt, und die Update-Prüfung aus `spec/distribution-requirements/` §B nutzt diesen Schlüssel.
 
 ### E. Prüfung durch den Nutzer
 
@@ -105,7 +105,7 @@ Die Kriterien fassen mehrere Anforderungen zusammen; jede Anforderung bleibt fü
 - [ ] Dasselbe Kommando scheitert für eine Datei mit einem geänderten Byte und für ein Artefakt, das derselbe Workflow in einem Fork gebaut hat (E4).
 - [ ] Die Prüfung gelingt auf einer Maschine ohne GitHub-Anmeldung und, mit vorliegendem Prüfmaterial, ohne Netzwerkzugang; wo eines davon nicht möglich ist, sagt die Dokumentation das (E5, E6).
 - [ ] Jede Installationsanleitung für ein Ziel setzt die Prüfung vor den Schritt, der das Artefakt schreibt oder bootet (E7).
-- [ ] Das System-Image in der Registry lässt sich gegen denselben Unterzeichner prüfen wie die heruntergeladenen Artefakte (C4, D8).
+- [ ] Das System-Image in der Registry lässt sich gegen denselben Unterzeichner prüfen wie die heruntergeladenen Artefakte und gegen den Update-Schlüssel, dem eine installierte Appliance vertraut (C4, D8).
 - [ ] Ein Pull Request aus einem Fork kann keinen Job mit Signier-Berechtigungen starten, und nur benannte Rollen können den Release-Workflow starten oder einen Release-Tag anlegen (F1, F2).
 - [ ] Die Release Notes nennen die Kamerplanter-Version, die Version der Basis-Distribution und die geprüften Ziele, und das Verfahren für ein zurückgezogenes Release ist dokumentiert (B9, F3).
 

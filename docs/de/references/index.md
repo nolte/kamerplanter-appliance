@@ -10,6 +10,7 @@ last_updated: 2026-11-13
 
 - [Konfiguration](configuration.md) — die Dateien, die die Kamerplanter-Dienste auf einer installierten Appliance konfigurieren
 - [Einen Download prüfen](verify.md) — wie du prüfst, dass ein Disk-Image vom Release-Workflow dieses Repositorys stammt
+- [Zugehörige Repositorys](repositories.md) — alle Kamerplanter-Repositorys und was sie für die Appliance bedeuten, auch die nur indirekt benötigten
 
 Die Anforderungen liegen als Spezifikationen im Repository, Englisch maßgeblich, mit deutscher Übersetzung:
 

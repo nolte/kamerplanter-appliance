@@ -1,0 +1,19 @@
+[Unit]
+Description=Back up or restore the Kamerplanter data around an update
+Documentation=file:///usr/bin/kamerplanter-update
+# Runs before any database container touches the data (see the drop-in
+# kamerplanter-.container.d/10-kamerplanter.conf).
+After=local-fs.target
+DefaultDependencies=no
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/kamerplanter-update guard
+# Copying the database volumes takes as long as the data is large.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=kamerplanter.target

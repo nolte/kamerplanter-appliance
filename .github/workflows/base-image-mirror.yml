@@ -1,0 +1,51 @@
+name: base-image-mirror
+
+# Copies the Fedora bootc base image into this project's registry. Fedora
+# publishes it under moving tags only and deletes superseded digests within
+# about a day, so a digest pinned in image/Containerfile stops resolving soon
+# after it was pinned. The mirror keeps every digest it has seen under a tag
+# of its own (`46-<digest prefix>`) and the newest one under `46`; Renovate
+# proposes the move of the pin from the `46` tag.
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: base-image-mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SOURCE: quay.io/fedora/fedora-bootc:46
+      TARGET: ghcr.io/${{ github.repository }}-base
+    steps:
+      - name: Copy the base image when it changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          digest=$(skopeo inspect --raw "docker://$SOURCE" | sha256sum | cut -d' ' -f1)
+          tag="46-${digest::12}"
+          if skopeo inspect --raw "docker://$TARGET:$tag" >/dev/null 2>&1; then
+            echo "$SOURCE is sha256:$digest, already mirrored as $TARGET:$tag"
+          else
+            skopeo copy --all --preserve-digests --retry-times 3 \
+              "docker://$SOURCE@sha256:$digest" "docker://$TARGET:$tag"
+          fi
+          skopeo copy --all --preserve-digests --retry-times 3 \
+            "docker://$TARGET:$tag" "docker://$TARGET:46"
+          echo "### Mirrored \`$SOURCE\`" >>"$GITHUB_STEP_SUMMARY"
+          echo "\`$TARGET:$tag\` and \`:46\` → \`sha256:$digest\`" >>"$GITHUB_STEP_SUMMARY"

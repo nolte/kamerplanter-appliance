@@ -37,6 +37,10 @@ Bei jedem Boot erzeugt die Appliance jedes verlangte Secret, das noch fehlt: `AR
 
 Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerplanter.env` ein, am besten vor dem ersten Start.
 
+## Updates
+
+`UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT` und `UPDATE_BACKUP_KEEP_DAYS` legen fest, wann Updates aktiviert und wie sie geprüft werden; siehe [Updates und Rollback](../getting-started/updates.md#einstellungen). Die Konfigurationsprüfung lehnt ein Fenster ab, das nicht `HH:MM` ist, und eine Frist oder Aufbewahrungsdauer, die keine ganze Zahl ist.
+
 ## Prüfungen vor dem Start der Dienste
 
 Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplanter-config`, wenn:

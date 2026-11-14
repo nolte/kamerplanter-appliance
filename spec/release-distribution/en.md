@@ -69,7 +69,7 @@ Readers: maintainers who write the workflows, reviewers of the release process, 
 - **D5 MUST** grant the permissions for signing and attesting only to the job that signs.
 - **D6 MUST** sign only what the same workflow run has built.
 - **D7 MUST** publish the signature material as release assets next to the artifacts.
-- **D8 MUST** sign the system image in the container registry with the same identity, so that the download check and the update check of `spec/distribution-requirements/` §B trust one signer.
+- **D8 MUST** sign the system image in the container registry with the same identity, so that it can be checked like the downloaded artifacts. As long as the container tools on the appliance cannot check that identity, the system image additionally **MUST** carry a signature by an update key whose public part ships in the image, and the update check of `spec/distribution-requirements/` §B uses that key.
 
 ### E. Verification by the user
 
@@ -105,7 +105,7 @@ The criteria roll several requirements together; every requirement stays normati
 - [ ] The same command fails for a file with one changed byte and for an artifact built by the same workflow in a fork (E4).
 - [ ] Verification succeeds on a machine without a GitHub login and, with the verification material at hand, without network access; where either is not possible, the documentation says so (E5, E6).
 - [ ] Every installation guide for a target places the verification before the step that writes or boots the artifact (E7).
-- [ ] The system image in the registry verifies against the same signer as the downloaded artifacts (C4, D8).
+- [ ] The system image in the registry verifies against the same signer as the downloaded artifacts, and against the update key an installed appliance trusts (C4, D8).
 - [ ] A pull request from a fork cannot start a job with signing permissions, and only named roles can start the release workflow or create a release tag (F1, F2).
 - [ ] The release notes name the Kamerplanter version, the base distribution version, and the verified targets, and the procedure for a withdrawn release is documented (B9, F3).
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=Activate a staged Kamerplanter appliance release
+Documentation=file:///usr/bin/kamerplanter-update
+ConditionPathExists=/run/ostree-booted
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/kamerplanter-update apply

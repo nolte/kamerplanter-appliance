@@ -1,0 +1,12 @@
+[Unit]
+Description=Download and stage a new Kamerplanter appliance release
+Documentation=file:///usr/bin/kamerplanter-update
+ConditionPathExists=/run/ostree-booted
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/kamerplanter-update fetch
+Nice=10
+IOSchedulingClass=idle

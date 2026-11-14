@@ -1,0 +1,15 @@
+[Unit]
+Description=Check a newly activated Kamerplanter version and roll it back when it fails
+Documentation=file:///usr/bin/kamerplanter-update
+After=kamerplanter-update-guard.service kamerplanter-config.service network-online.target
+Wants=network-online.target
+
+[Service]
+# Waits up to UPDATE_HEALTH_TIMEOUT minutes and returns at once when no update
+# is being checked. Type=exec counts the unit as started once the check runs,
+# so the boot (multi-user.target) does not wait for the decision.
+Type=exec
+ExecStart=/usr/bin/kamerplanter-update health
+
+[Install]
+WantedBy=multi-user.target

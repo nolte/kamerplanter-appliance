@@ -10,6 +10,12 @@ name: disk-image
 # The steps are the same scripts `task disk:build` and `task disk:package`
 # run locally, minus the tool container: the runner already has podman, and
 # the disk build needs root for its loop devices.
+#
+# With `publish-image`, the release workflow's case, the system image is
+# pushed to ghcr.io under the version, signed with the update key that every
+# appliance trusts (spec/update-and-rollback/ B3), checked against the public
+# key built into the image, and the disk is written from the pushed image. An
+# installed appliance then runs exactly the digest the registry serves.
 
 on:
   workflow_call:
@@ -24,10 +30,25 @@ on:
         required: false
         type: string
         default: ''
+      publish-image:
+        description: "Push the signed system image to ghcr.io and build the disk from it."
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      system-image-signing-key:
+        description: "Sigstore private key that signs the system image (publish-image only)."
+        required: false
+      system-image-signing-passphrase:
+        description: "Passphrase of that key."
+        required: false
     outputs:
       artifact-name:
         description: "Name of the uploaded workflow artifact."
         value: ${{ jobs.disk.outputs.artifact-name }}
+      image-digest:
+        description: "Digest of the pushed system image (publish-image only)."
+        value: ${{ jobs.disk.outputs.image-digest }}
   workflow_dispatch:
     inputs:
       version:
@@ -66,8 +87,14 @@ jobs:
     name: disk-image
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # packages: write is used only with publish-image; a pull request from a
+    # fork gets a read-only token whatever is declared here.
+    permissions:
+      contents: read
+      packages: write
     outputs:
       artifact-name: ${{ steps.meta.outputs.artifact }}
+      image-digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -96,10 +123,68 @@ jobs:
         run: df -h /
 
       - name: Build the system image
-        run: sudo podman build -t localhost/kamerplanter-appliance:ci image
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: sudo podman build --build-arg VERSION="$VERSION" -t localhost/kamerplanter-appliance:ci image
+
+      - name: Push and sign the system image
+        id: push
+        if: inputs.publish-image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNING_KEY: ${{ secrets.system-image-signing-key }}
+          SIGNING_PASSPHRASE: ${{ secrets.system-image-signing-passphrase }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY" ] || [ -z "$SIGNING_PASSPHRASE" ]; then
+            echo "::error::publish-image needs the secrets SYSTEM_IMAGE_SIGNING_KEY and SYSTEM_IMAGE_SIGNING_PASSPHRASE"
+            exit 1
+          fi
+          keys=$(mktemp -d "$RUNNER_TEMP/keys.XXXXXX")
+          trap 'sudo rm -rf "$keys"' EXIT
+          (umask 077; printf '%s\n' "$SIGNING_KEY" >"$keys/key"; printf '%s' "$SIGNING_PASSPHRASE" >"$keys/pass")
+          # Signatures go next to the image, where the appliance looks for them.
+          sudo install -D -m 0644 image/rootfs/usr/share/containers/registries.d/kamerplanter-appliance.yaml \
+            /etc/containers/registries.d/kamerplanter-appliance.yaml
+          sudo podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          # Through an OCI layout: layers that container storage cannot
+          # reproduce byte for byte cannot be signed on their way out of it.
+          sudo podman push --remove-signatures localhost/kamerplanter-appliance:ci "oci:$keys/oci"
+          sudo skopeo copy --retry-times 3 --authfile /run/containers/0/auth.json --digestfile "$keys/digest" \
+            --sign-by-sigstore-private-key "$keys/key" --sign-passphrase-file "$keys/pass" \
+            "oci:$keys/oci" "docker://$IMAGE:$VERSION"
+          digest=$(cat "$keys/digest")
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "ref=$IMAGE@$digest" >>"$GITHUB_OUTPUT"
+          echo "Pushed $IMAGE:$VERSION as $digest"
+
+      # The pull is checked against the public key the image ships, under the
+      # same policy an appliance applies: a secret that does not match it would
+      # publish an update no appliance accepts.
+      - name: Pull the pushed image as an appliance would
+        if: inputs.publish-image
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          policy=$(mktemp "$RUNNER_TEMP/policy.XXXXXX")
+          key=$(mktemp "$RUNNER_TEMP/key.XXXXXX")
+          sudo podman run --rm --entrypoint cat localhost/kamerplanter-appliance:ci \
+            /usr/share/kamerplanter/keys/system-image.pub >"$key"
+          jq -n --arg image "$IMAGE" --arg key "$key" '{
+            default: [{type: "reject"}],
+            transports: {docker: {($image): [{type: "sigstoreSigned", keyPath: $key,
+              signedIdentity: {type: "matchRepository"}}]}}}' >"$policy"
+          sudo podman rmi --force "$REF" >/dev/null 2>&1 || true
+          sudo podman pull --signature-policy "$policy" "$REF"
 
       - name: Build the raw disk image
-        run: sudo build/disk.sh localhost/kamerplanter-appliance:ci
+        env:
+          REF: ${{ steps.push.outputs.ref || 'localhost/kamerplanter-appliance:ci' }}
+        run: sudo build/disk.sh "$REF"
 
       - name: Package the disk image
         env:

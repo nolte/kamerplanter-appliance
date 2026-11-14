@@ -1,0 +1,12 @@
+[Unit]
+Description=Maintenance window for Kamerplanter appliance updates
+
+# The start of the window comes from UPDATE_WINDOW, written as a drop-in by
+# /usr/lib/systemd/system-generators/kamerplanter-update-window. A missed
+# window is not made up after boot: the next one is used.
+[Timer]
+RandomizedDelaySec=30min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

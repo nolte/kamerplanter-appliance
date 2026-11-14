@@ -121,4 +121,7 @@ The audiences these documents serve are listed in [`AUDIENCES.md`](AUDIENCES.md)
 ## Related repositories
 
 - [`nolte/kamerplanter`](https://github.com/nolte/kamerplanter) — the application, its container images, Compose files, and Helm chart
+- [`nolte/kamerplanter-infrastructure`](https://github.com/nolte/kamerplanter-infrastructure) — Terraform modules and scripts that provision the appliance at hosting providers such as Proxmox VE, from server and network to the first-boot configuration
 - [Documentation](https://nolte.github.io/kamerplanter/)
+
+All Kamerplanter repositories, including the companions and the ones the appliance needs only indirectly, are described in [Related repositories](docs/en/references/repositories.md).

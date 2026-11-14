@@ -15,6 +15,7 @@ Prüfe jedes heruntergeladene Disk-Image, bevor du es schreibst oder bootest. Ei
 | `kamerplanter-appliance-<version>-x86_64.raw.xz` | das komprimierte Disk-Image |
 | `SHA256SUMS` | SHA-256-Prüfsummen des Images und der Commit-Datei, je Dateiname |
 | `*.sigstore.json` | schlüssellose Signatur-Bundles für das Image und für `SHA256SUMS` |
+| `kamerplanter-appliance-<version>-system-image.txt` | das System-Image in der Registry, aus dem das Disk-Image geschrieben wurde, per Digest |
 | `kamerplanter-appliance-<version>-source-commit.txt` | der Commit, aus dem das Image gebaut wurde |
 
 Der Release-Workflow signiert mit seiner eigenen Identität; einen privaten Schlüssel gibt es nicht. Eine Signatur beweist, dass der Release-Workflow dieses Repositorys auf `develop` die Datei gebaut hat. Sie sagt für sich nicht, **zu welchem** Release die Datei gehört, weil jedes Release mit derselben Identität signiert wird. Jeder der folgenden Wege bindet die Datei deshalb zusätzlich an die gewünschte Version.
@@ -54,3 +55,18 @@ sha256sum --check --ignore-missing SHA256SUMS
 ## Nur Prüfsummen
 
 `sha256sum --check --ignore-missing SHA256SUMS` allein bestätigt, dass ein Download vollständig ist. Woher die Datei stammt, beweist das nur, wenn `SHA256SUMS` selbst wie oben geprüft wurde.
+
+## Das System-Image in der Registry
+
+Installierte Appliances aktualisieren sich aus `ghcr.io/nolte/kamerplanter-appliance`. Jedes veröffentlichte System-Image trägt zwei Signaturen:
+
+- eine mit dem **Update-Schlüssel**, die jede Appliance prüft, bevor sie ein Update bereitlegt. Sein öffentlicher Teil ist in [`nolte/gh-plumbing`](https://github.com/nolte/gh-plumbing) unter `keys/system-image.pub` veröffentlicht und liegt auf jeder Appliance unter `/usr/share/kamerplanter/keys/system-image.pub`. Die Workflow-Identität unten können Appliances noch nicht prüfen, weil die Container-Werkzeuge, die sie nutzen, vorerst nur Schlüssel annehmen.
+- eine **schlüssellose** Signatur des Release-Workflows, wie bei den Dateien oben:
+
+```bash
+cosign verify ghcr.io/nolte/kamerplanter-appliance@sha256:<digest> \
+  --certificate-identity "https://github.com/nolte/kamerplanter-appliance/.github/workflows/release-publish.yml@refs/heads/develop" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Den Digest entnimmst du der Datei `-system-image.txt` des Releases.
