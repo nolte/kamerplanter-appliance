@@ -52,6 +52,10 @@
 # system disk while the key of the data disk is kept on it count. Wherever
 # the backup is, backups/D says so and holds the checksum verified before it
 # is restored (D10).
+# The disks count only when the release a rollback would return to finds a
+# backup there: its tree lists backup-locations in
+# /usr/lib/kamerplanter/features. An older release, or one that cannot be
+# determined, gets its backup on the system disk.
 #
 # On the data disk, when one is set up, the release marker "release"
 # (/usr/lib/kamerplanter/env.sh, data_disk_marker), and the backups written
@@ -73,6 +77,8 @@ user=/etc/kamerplanter/kamerplanter.env
 issue=/run/issue.d/50-kamerplanter.issue
 # The disk service, which keeps the record of a move onto the data disk.
 disks_tool=/usr/libexec/kamerplanter/disks
+# The deployments of the system image, each with its own tree (bootc/ostree).
+deployments=/sysroot/ostree/deploy
 # The console message of a refused data disk (release_check); before the
 # general one, after those of the disk service (40-kamerplanter-*-disk.issue).
 release_issue=/run/issue.d/45-kamerplanter-release.issue
@@ -222,17 +228,45 @@ protected() {
 
 free_bytes() { echo $(($(stat -f -c '%a * %S' "$1"))); }
 
-# assess: what each location of backup_locations is like for a backup of the
-# volumes now, in that order: sets at_state and at_reason (empty when the
-# location may take the backup and has space for it).
+# deployment_root SLOT: the tree of the deployment in bootc's SLOT
+# (/sysroot/ostree/deploy/STATEROOT/deploy/CHECKSUM.SERIAL, from bootc's
+# status); empty when bootc does not name one in that form.
+deployment_root() {
+    local stateroot checksum serial
+    read -r stateroot checksum serial < <(host | jq -r --arg s "$1" \
+        '.status[$s].ostree // {} | "\(.stateroot // "") \(.checksum // "") \(.deploySerial // "")"') || return 0
+    [[ $stateroot =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && $checksum =~ ^[0-9a-f]{64}$ && $serial =~ ^[0-9]+$ ]] || return 0
+    printf '%s' "$deployments/$stateroot/deploy/$checksum.$serial"
+}
+
+# rollback_support FROM: whether the release a rollback returns to finds a
+# backup at every location: supported, unsupported, or unknown when bootc's
+# rollback deployment is not FROM, the release that was left, or its tree is
+# not there (rollback_reach in /usr/lib/kamerplanter/env.sh).
+rollback_support() {
+    local root
+    if [ -z "$1" ] || [ "$(slot rollback digest)" != "$1" ]; then echo unknown; return; fi
+    root=$(deployment_root rollback)
+    if [ -z "$root" ] || [ ! -d "$root/usr" ]; then echo unknown; return; fi
+    if has_feature "$root" backup-locations; then echo supported; else echo unsupported; fi
+}
+
+# assess [FROM]: what each location of backup_locations is like for a backup
+# of the volumes now, in that order: sets at_state and at_reason (empty when
+# the location may take the backup and has space for it). With FROM, the
+# release the guard would roll back to, a disk counts only when that release
+# finds backups there (rollback_support); without, as for an activation,
+# whose rollback target is the running release.
 assess() {
-    local loc need encrypted reason fs
+    local loc need encrypted reason fs reach=''
     need=$(backup_need "$(volume_bytes)")
     encrypted=$(data_encrypted)
+    if [ $# -gt 0 ]; then reach=$(rollback_reach "$(rollback_support "$1")" "$(slot rollback version)"); fi
     at_state=() at_reason=()
     for loc in "${backup_locations[@]}"; do
         at_state+=("$(location_state "$loc")")
         reason=$(backup_refusal "$loc" "${at_state[-1]}" "$encrypted" "$(protected "$loc")")
+        if [ "$loc" != system-disk ] && [ "${at_state[-1]}" != not-set-up ] && [ -n "$reach" ]; then reason=$reach; fi
         if [ -z "$reason" ]; then
             fs=$(backup_fs "$loc")
             reason=$(space_problem "$(free_bytes "$fs")" "$need" "$fs")
@@ -372,7 +406,7 @@ take_backup() {
     local i where='' detail=''
     backup_failure=
     forget_backup "$1" || { backup_failure="the earlier backup of $(short "$1") could not be deleted"; return 1; }
-    assess
+    assess "$1"
     for i in "${!backup_locations[@]}"; do
         [ -z "${at_reason[i]}" ] || continue
         if write_backup "${backup_locations[i]}" "$1" "$2"; then

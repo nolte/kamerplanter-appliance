@@ -133,6 +133,45 @@ expect "restore: no identity recorded" "it is on the data disk kp-data with the 
 expect "restore: data disk in place" "" "$(restore_problem data-disk ok "$id" "$id")"
 expect "restore: parity does not matter for reading" "" "$(restore_problem backup-disk ok "$id" "$id")"
 
+# --- the release to roll back to must find the backup (features) ---
+trees=$(mktemp -d)
+mkdir -p "$trees/new/usr/lib/kamerplanter" "$trees/old/usr/lib/kamerplanter" "$trees/bare/usr"
+printf '# comment\nbackup-locations\n' >"$trees/new/usr/lib/kamerplanter/features"
+printf '# backup-locations\nsomething-else\n' >"$trees/old/usr/lib/kamerplanter/features"
+feat() { if has_feature "$1" "$2"; then echo yes; else echo no; fi; }
+expect "features: this image lists backup-locations" yes "$(feat "$root/image/rootfs" backup-locations)"
+expect "features: a tree that lists it" yes "$(feat "$trees/new" backup-locations)"
+expect "features: listed only in a comment, or another feature" no "$(feat "$trees/old" backup-locations)"
+expect "features: no features file means none" no "$(feat "$trees/bare" backup-locations)"
+expect "features: no tree at all" no "$(feat "$trees/none" backup-locations)"
+expect "features: no prefix match" no "$(feat "$trees/new" backup)"
+printf 'backup-locations \r\n' >"$trees/new/usr/lib/kamerplanter/features"
+expect "features: trailing blank and CR are ignored" yes "$(feat "$trees/new" backup-locations)"
+rm -rf -- "${trees:?}"
+expect "reach: a release that finds every location" "" "$(rollback_reach supported 1.4)"
+expect "reach: an older release" "the release to roll back to (1.3) only finds backups on the system disk" "$(rollback_reach unsupported 1.3)"
+expect "reach: an older release without version" "the release to roll back to (unversioned) only finds backups on the system disk" "$(rollback_reach unsupported '')"
+expect "reach: unknown target" "the release to roll back to cannot be determined, so the backup goes where every release finds it, the system disk" \
+    "$(rollback_reach unknown 1.3)"
+# decide_reach SUPPORT BACKUP_STATE DATA_STATE FREE_SYSTEM: as assess with a
+# rollback target: a disk that is set up gets the reach reason.
+decide_reach() {
+    local reach states=("$2" "$3" ok) reasons=() i r
+    reach=$(rollback_reach "$1" 1.3)
+    for i in 0 1 2; do
+        r=$(backup_refusal "${backup_locations[i]}" "${states[i]}" 0 0)
+        if [ "${backup_locations[i]}" != system-disk ] && [ "${states[i]}" != not-set-up ] && [ -n "$reach" ]; then r=$reach; fi
+        [ -n "$r" ] || r=$(space_problem 100 50 /x)
+        [ "${backup_locations[i]}" != system-disk ] || [ -n "$r" ] || r=$(space_problem "$4" 50 /var)
+        reasons+=("$r")
+    done
+    backup_first "${reasons[@]}" || echo none
+}
+expect "target supports it: the backup disk" backup-disk "$(decide_reach supported ok ok 100)"
+expect "target older: the system disk, disks present" system-disk "$(decide_reach unsupported ok ok 100)"
+expect "target unknown: the system disk" system-disk "$(decide_reach unknown ok ok 100)"
+expect "target older, system disk full: none, as today" none "$(decide_reach unsupported ok ok 10)"
+
 # --- records ---
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT

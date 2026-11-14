@@ -26,6 +26,6 @@ repos:
         # The repository's own shell scripts, including the first-boot
         # configuration and update scripts that ship without a file extension.
         # -x follows the shared configuration parser they source.
-        files: '^(build/.*\.sh|tests/.*\.sh|image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*))$'
+        files: '^(build/.*\.sh|tests/.*\.sh|image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*))$'
         types: [file]
         args: [-x]

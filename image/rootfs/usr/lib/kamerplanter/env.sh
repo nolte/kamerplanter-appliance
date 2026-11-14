@@ -297,6 +297,33 @@ backup_fs() {
     esac
 }
 
+# The features of a release (/usr/lib/kamerplanter/features in its tree).
+# The guard writes the pre-update backup only where the release it would
+# roll back to finds it: a release without "backup-locations" (one from
+# before the backup locations) looks for it on the system disk only.
+release_features=/usr/lib/kamerplanter/features
+
+# has_feature ROOT NAME: whether the release whose tree is at ROOT (empty for
+# the running one) lists NAME in its features file; not when it has none.
+has_feature() {
+    local file=$1$release_features
+    [ -f "$file" ] && grep -v '^[[:space:]]*#' -- "$file" 2>/dev/null | tr -d '[:blank:]\r' | grep -Fqx -- "$2"
+}
+
+# rollback_reach SUPPORT VERSION: why the backup goes to the system disk only,
+# for the release VERSION it would roll back to; empty when that release
+# finds it at every location. SUPPORT is supported (its tree lists
+# backup-locations), unsupported (it does not, or has no features file), or
+# unknown (its tree cannot be found, or it is not the release that was left):
+# then the safe assumption is the system disk.
+rollback_reach() {
+    case $1 in
+        supported) ;;
+        unsupported) echo "the release to roll back to (${2:-unversioned}) only finds backups on the system disk" ;;
+        *) echo "the release to roll back to cannot be determined, so the backup goes where every release finds it, the system disk" ;;
+    esac
+}
+
 # backup_where LOCATION: LOCATION in a message.
 backup_where() {
     case $1 in
