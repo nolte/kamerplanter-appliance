@@ -1,0 +1,15 @@
+[Unit]
+Description=Check a newly activated Kamerplanter version and roll it back when it fails
+Documentation=file:///usr/bin/kamerplanter-update
+After=kamerplanter-update-guard.service kamerplanter-config.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Waits up to UPDATE_HEALTH_TIMEOUT minutes; returns at once when no update
+# is being checked.
+ExecStart=/usr/bin/kamerplanter-update health
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

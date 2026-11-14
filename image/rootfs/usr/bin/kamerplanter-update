@@ -1,0 +1,417 @@
+#!/usr/bin/bash
+# Updates and rollbacks of the Kamerplanter appliance (spec/update-and-rollback/).
+#
+#   kamerplanter-update status [--json]   running, staged and previous version,
+#                                         next maintenance window, update record
+#   kamerplanter-update fetch             download and stage a new release
+#                                         (kamerplanter-update-fetch.timer)
+#   kamerplanter-update apply [--now]     activate a staged release with one
+#                                         reboot (kamerplanter-update-apply.timer;
+#                                         --now ignores a postponement)
+#   kamerplanter-update apply-now         fetch, then apply at once
+#   kamerplanter-update postpone <days>   no activation for that many days (1-30)
+#   kamerplanter-update resume            end a postponement
+#   kamerplanter-update rollback          back to the previous version and the
+#                                         data from before the update
+#
+# Run on every boot by units, not by the user:
+#   guard    before the databases start: back up the data when a new version
+#            boots for the first time, restore it after a rollback
+#   health   after the services start: decide whether a new version is
+#            healthy, and roll it back when it is not
+#
+# State in /var/lib/kamerplanter/update/:
+#   good        digest of the last version that passed its health check
+#   pending     "FROM TO PHASE": PHASE is applied (TO activated, not booted
+#               yet), checking (TO booted, data backed up under FROM, health
+#               not decided) or manual (rollback from TO to FROM requested)
+#   failed      digests that failed and are never applied again
+#   backup/D/   the volumes as they were when D was left
+#   log.jsonl   one JSON object per event
+#   postpone    epoch seconds until which no update is activated
+set -euo pipefail
+umask 077
+
+state=/var/lib/kamerplanter/update
+volumes=/var/lib/containers/storage/volumes
+# Named volumes of the Quadlet units (image/rootfs/usr/share/containers/systemd/*.volume).
+data_volumes=(arangodb_data valkey_data)
+defaults=/usr/share/kamerplanter/kamerplanter.env
+user=/etc/kamerplanter/kamerplanter.env
+issue=/run/issue.d/50-kamerplanter.issue
+
+die() { echo "kamerplanter-update: $*" >&2; exit 1; }
+
+# The last value of KEY in the defaults and the user file; the configuration
+# check (/usr/libexec/kamerplanter/configure) validates both files.
+setting() {
+    local value
+    value=$(cat "$defaults" "$user" 2>/dev/null | sed -n "s/^[[:space:]]*$1=//p" | tail -n1)
+    printf '%s' "${value:-$2}"
+}
+
+log() {  # log EVENT RESULT DETAIL [FROM] [TO]
+    install -d -m 0700 "$state"
+    jq -cn --arg time "$(date -u +%FT%TZ)" --arg event "$1" --arg result "$2" \
+        --arg detail "$3" --arg from "${4-}" --arg to "${5-}" \
+        '{time: $time, event: $event, result: $result, detail: $detail}
+         + (if $from != "" then {from: $from} else {} end)
+         + (if $to != "" then {to: $to} else {} end)' >>"$state/log.jsonl"
+    echo "$1: $2: $3" >&2
+}
+
+host() { bootc status --format json; }
+# Fields of a deployment slot (booted, staged, rollback); empty when absent.
+slot() { host | jq -r --arg s "$1" --arg f "$2" '.status[$s].image // {} | (
+    if $f == "digest" then .imageDigest
+    elif $f == "version" then .version
+    elif $f == "ref" then .image.image
+    elif $f == "transport" then .image.transport
+    else empty end) // ""'; }
+short() { printf '%s' "${1#sha256:}" | cut -c1-12; }
+
+failed() { [ -n "$1" ] && grep -Fqx -- "$1" "$state/failed" 2>/dev/null; }
+pending() { cat "$state/pending" 2>/dev/null || true; }
+
+volume_bytes() {
+    local total=0 name
+    for name in "${data_volumes[@]}"; do
+        [ -d "$volumes/$name" ] || continue
+        total=$((total + $(du -sb "$volumes/$name" | cut -f1)))
+    done
+    echo "$total"
+}
+
+# A backup needs room for a copy of the volumes plus a margin of 10 % and
+# 512 MiB for the database to keep working (spec D5).
+space_ok() {
+    local need free
+    need=$(($(volume_bytes) * 11 / 10 + 512 * 1024 * 1024))
+    free=$(($(stat -f -c '%a * %S' /var)))
+    [ "$free" -ge "$need" ] || { echo "$free bytes free in /var, $need needed for the pre-update backup"; return 1; }
+}
+
+copy_volumes() {  # copy_volumes SRC_DIR DST_DIR
+    local name
+    for name in "${data_volumes[@]}"; do
+        [ -d "$1/$name" ] || continue
+        rm -rf "${2:?}/$name"
+        cp -a --reflink=auto "$1/$name" "$2/$name"
+    done
+}
+
+write_issue() {
+    install -d -m 0755 /run/issue.d
+    local booted staged window
+    booted=$(slot booted version)
+    staged=$(slot staged version)
+    window=$(next_window)
+    {
+        echo "Kamerplanter appliance ${booted:-unknown version}"
+        if [ -n "$staged" ]; then echo "  update to $staged staged, activated in the next maintenance window"; fi
+        if [ -n "$window" ]; then echo "  next maintenance window: $window"; fi
+        if [ -n "$(pending)" ]; then echo "  an update is being checked"; fi
+        echo "  details: kamerplanter-update status"
+        echo
+    } >"$issue.tmp"
+    chmod 0644 "$issue.tmp"
+    mv "$issue.tmp" "$issue"
+}
+
+next_window() {
+    local usec
+    usec=$(systemctl show kamerplanter-update-apply.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
+    if [ -n "$usec" ] && [ "$usec" != n/a ] && [ "$usec" != 0 ]; then printf '%s' "$usec"; fi
+}
+
+postponed_until() {
+    local until
+    until=$(cat "$state/postpone" 2>/dev/null || echo 0)
+    [ "$until" -gt "$(date +%s)" ] || return 1
+    echo "$until"
+}
+
+cmd_status() {
+    local json=0
+    [ "${1-}" = --json ] && json=1
+    local doc
+    doc=$(host | jq --arg window "$(next_window)" --arg postponed "$(postponed_until || true)" \
+        --arg pending "$(pending)" --rawfile failed <(cat "$state/failed" 2>/dev/null || true) \
+        --slurpfile log <(tail -n 20 "$state/log.jsonl" 2>/dev/null || true) '
+        def slot(s): .status[s].image // null | if . == null then null else
+            {version, digest: .imageDigest, image: .image.image, timestamp} end;
+        {
+          source: (.spec.image.image // null),
+          booted: slot("booted"), staged: slot("staged"), previous: slot("rollback"),
+          nextWindow: (if $window == "" then null else $window end),
+          postponedUntil: (if $postponed == "" then null else ($postponed | tonumber | todate) end),
+          checking: (if $pending == "" then null else ($pending | split(" ") | {from: .[0], to: .[1]}) end),
+          failed: ($failed | split("\n") | map(select(. != ""))),
+          record: $log
+        }')
+    if [ "$json" = 1 ]; then
+        printf '%s\n' "$doc"
+        return
+    fi
+    jq -r '
+        def v(s): if s == null then "none" else "\(s.version // "unversioned") (\(s.digest[7:19]))" end;
+        "Update source:  \(.source // "none")",
+        "Running:        \(v(.booted))",
+        "Staged:         \(v(.staged))",
+        "Previous:       \(v(.previous))",
+        "Next window:    \(.nextWindow // "none")",
+        (if .postponedUntil then "Postponed until \(.postponedUntil)" else empty end),
+        (if .checking then "Checking:       update \(.checking.from[7:19]) -> \(.checking.to[7:19])" else empty end),
+        (if (.failed | length) > 0 then "Never applied:  \(.failed | map(.[7:19]) | join(", "))" else empty end),
+        "",
+        "Recent events:",
+        (.record[] | "  \(.time)  \(.event)  \(.result)  \(.detail)")' <<<"$doc"
+}
+
+cmd_fetch() {
+    install -d -m 0700 "$state"
+    exec 9>"$state/.lock"
+    flock -n 9 || die "another update action is running"
+    write_issue || true
+    [ -z "$(pending)" ] || { echo "an update is being checked; not fetching"; return 0; }
+    local ref transport remote booted staged
+    ref=$(slot booted ref)
+    transport=$(slot booted transport)
+    [ -n "$ref" ] || die "the booted system has no update source"
+    [ "$transport" = registry ] || die "update source $ref uses transport $transport, not registry"
+    if ! remote=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$ref" 2>&1); then
+        log fetch error "cannot reach $ref: ${remote##*$'\n'}"
+        return 1
+    fi
+    booted=$(slot booted digest)
+    staged=$(slot staged digest)
+    if [ "$remote" = "$booted" ] || [ "$remote" = "$staged" ]; then
+        echo "nothing to do: $ref is $(short "$remote"), already running or staged"
+        write_issue || true
+        return 0
+    fi
+    if failed "$remote"; then
+        echo "not fetching $(short "$remote"): it failed before and is never applied again"
+        return 0
+    fi
+    local out
+    if ! out=$(bootc upgrade --download-only --quiet 2>&1); then
+        log fetch error "download of $(short "$remote") failed: ${out##*$'\n'}" "$booted" "$remote"
+        return 1
+    fi
+    staged=$(slot staged digest)
+    if [ "$staged" != "$remote" ] && failed "$staged"; then
+        log fetch error "the registry moved to $(short "$staged"), which failed before" "$booted" "$staged"
+        return 1
+    fi
+    log fetch staged "$(slot staged version) ready for the next maintenance window" "$booted" "$staged"
+    write_issue || true
+}
+
+cmd_apply() {
+    local now=0
+    [ "${1-}" = --now ] && now=1
+    install -d -m 0700 "$state"
+    exec 9>"$state/.lock"
+    flock -n 9 || die "another update action is running"
+    local booted staged reason
+    booted=$(slot booted digest)
+    staged=$(slot staged digest)
+    [ -n "$staged" ] || { echo "no update staged"; return 0; }
+    [ -z "$(pending)" ] || { echo "an update is being checked; not applying another"; return 0; }
+    if [ "$now" = 0 ] && postponed_until >/dev/null; then
+        echo "updates are postponed until $(date -d "@$(postponed_until)")"
+        return 0
+    fi
+    if failed "$staged"; then
+        log apply refused "$(short "$staged") failed before" "$booted" "$staged"
+        return 1
+    fi
+    if ! reason=$(space_ok); then
+        log apply refused "$reason" "$booted" "$staged"
+        return 1
+    fi
+    # The backup of the data is taken by the guard on the first boot of the
+    # new version, while the databases are still stopped.
+    log apply reboot "activating $(slot staged version)" "$booted" "$staged"
+    printf '%s %s applied\n' "$booted" "$staged" >"$state/pending"
+    sync "$state/pending"
+    if ! bootc upgrade --from-downloaded --apply --quiet; then
+        rm -f "$state/pending"
+        log apply error "bootc could not activate the staged update" "$booted" "$staged"
+        return 1
+    fi
+}
+
+cmd_postpone() {
+    local days=${1-}
+    [[ $days =~ ^[0-9]+$ ]] && [ "$days" -ge 1 ] && [ "$days" -le 30 ] || die "usage: kamerplanter-update postpone <days, 1-30>"
+    install -d -m 0700 "$state"
+    echo $(($(date +%s) + days * 86400)) >"$state/postpone"
+    log postpone ok "no update is activated before $(date -d "@$(cat "$state/postpone")")"
+}
+
+cmd_resume() {
+    rm -f "$state/postpone"
+    log resume ok "updates are activated in the next maintenance window again"
+}
+
+cmd_rollback() {
+    exec 9>"$state/.lock"
+    flock -n 9 || die "another update action is running"
+    local booted previous
+    booted=$(slot booted digest)
+    previous=$(slot rollback digest)
+    [ -n "$previous" ] || die "there is no previous version to return to"
+    failed "$previous" && die "the previous version $(short "$previous") failed its own update and cannot be returned to"
+    [ -d "$state/backup/$previous" ] ||
+        die "no data backup from before the update exists for $(short "$previous"); returning would run it on data it may not read"
+    [ -z "$(pending)" ] || die "an update is being checked; wait for its result"
+    cat >&2 <<EOF
+Returning to $(slot rollback version) ($(short "$previous")).
+The data is restored to the state before the update to $(slot booted version).
+Everything written since then is lost. The current version will not be
+installed again.
+EOF
+    if [ -t 0 ]; then
+        read -r -p "Continue? [y/N] " answer
+        [ "$answer" = y ] || [ "$answer" = Y ] || die "cancelled"
+    fi
+    printf '%s %s manual\n' "$previous" "$booted" >"$state/pending"
+    sync "$state/pending"
+    log rollback reboot "manual return to $(short "$previous")" "$booted" "$previous"
+    bootc rollback --apply
+}
+
+# Before the databases start, on every boot.
+cmd_guard() {
+    install -d -m 0700 "$state" "$state/backup"
+    local booted good from to phase
+    booted=$(slot booted digest)
+    [ -n "$booted" ] || { echo "not booted from a bootc image"; return 0; }
+    good=$(cat "$state/good" 2>/dev/null || true)
+    if [ -z "$good" ]; then
+        echo "$booted" >"$state/good"
+        log install ok "first boot of $(slot booted version)" "" "$booted"
+        write_issue || true
+        return 0
+    fi
+    read -r from to phase <<<"$(pending)" || true
+    if [ -n "${from-}" ] && [ "$booted" = "$from" ] && [ "$phase" = applied ]; then
+        # The activating reboot did not switch; the new version never ran.
+        rm -f "$state/pending"
+        log apply missed "$(short "$to") was not booted; it is staged again by the next fetch" "$from" "$to"
+    elif [ -n "${from-}" ] && [ "$booted" = "$from" ]; then
+        # Back on the version the data was backed up under: the update was
+        # rolled back, automatically or by hand, so its data goes back too.
+        local detail="the data was not backed up and is unchanged"
+        if [ -d "$state/backup/$from" ]; then
+            copy_volumes "$state/backup/$from" "$volumes"
+            detail="data restored to the state before the update; changes made since then are lost"
+        fi
+        echo "$to" >>"$state/failed"
+        echo "$booted" >"$state/good"
+        rm -f "$state/pending"
+        log rollback "done" "running $(slot booted version) again; $(short "$to") is never applied again; $detail" "$to" "$from"
+    elif [ -n "${to-}" ] && [ "$booted" = "$to" ] && [ "$phase" = checking ]; then
+        # Rebooted while the new version was being checked: the data may
+        # already be migrated, so the backup from before stays as it is.
+        echo "still checking $(short "$to")"
+    elif [ "$booted" != "$good" ]; then
+        # First boot of a new version, before it touches the data. Without a
+        # pending record it was activated outside kamerplanter-update.
+        from=$good
+        local reason
+        if ! reason=$(space_ok); then
+            echo "$booted" >>"$state/failed"
+            rm -f "$state/pending"
+            log guard refused "$reason; returning to the previous version" "$from" "$booted"
+            bootc rollback --apply
+            return 1
+        fi
+        install -d -m 0700 "$state/backup/$from"
+        copy_volumes "$volumes" "$state/backup/$from"
+        sync -f "$state/backup/$from"
+        printf '%s %s checking\n' "$from" "$booted" >"$state/pending"
+        sync "$state/pending"
+        log update backup "data backed up before the first start of $(slot booted version)" "$from" "$booted"
+    elif [ -n "${from-}" ]; then
+        rm -f "$state/pending"
+        log guard cleared "the activation of $(short "$to") did not take place" "$from" "$to"
+    fi
+    write_issue || true
+}
+
+# After the services started, on every boot; acts only while a new version
+# is being checked.
+cmd_health() {
+    local from to phase booted
+    read -r from to phase <<<"$(pending)" || true
+    booted=$(slot booted digest)
+    [ "${phase-}" = checking ] && [ "$booted" = "$to" ] || return 0
+    local budget deadline problem
+    budget=$(setting UPDATE_HEALTH_TIMEOUT 20)
+    deadline=$(($(date +%s) + budget * 60))
+    until problem=$(check_health); do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            log health failed "$problem after $budget minutes; returning to the previous version" "$from" "$to"
+            bootc rollback --apply
+            return 1
+        fi
+        sleep 10
+    done
+    echo "$to" >"$state/good"
+    rm -f "$state/pending"
+    log health ok "$(slot booted version) is healthy" "$from" "$to"
+    cleanup
+    write_issue || true
+}
+
+check_health() {
+    systemctl is-active -q kamerplanter-config.service || { echo "the configuration check did not pass"; return 1; }
+    local unit name status
+    for unit in arangodb valkey backend celery-worker celery-beat frontend; do
+        systemctl is-active -q "kamerplanter-$unit.service" || { echo "kamerplanter-$unit is not running"; return 1; }
+    done
+    for name in arangodb valkey backend frontend; do
+        # The images are bound images in bootc's store; podman finds them, and
+        # so the containers built on them, only with that store, as the units
+        # add it (kamerplanter-.container.d/10-kamerplanter.conf).
+        if ! status=$(podman --storage-opt=additionalimagestore=/usr/lib/bootc/storage \
+            inspect --format '{{.State.Health.Status}}' "$name" 2>&1); then
+            echo "container $name cannot be inspected: ${status##*$'\n'}"
+            return 1
+        fi
+        [ "$status" = healthy ] || { echo "container $name is ${status:-without health status}, not healthy"; return 1; }
+    done
+    curl -sf -o /dev/null --max-time 5 http://127.0.0.1:8080/ || { echo "the web UI does not answer"; return 1; }
+    curl -sf -o /dev/null --max-time 5 http://127.0.0.1:8000/api/v1/health/live || { echo "the API does not answer"; return 1; }
+}
+
+# Backups older than UPDATE_BACKUP_KEEP_DAYS are deleted; a manual rollback
+# needs one, so it is possible only within that period (spec D4).
+cleanup() {
+    local keep dir
+    keep=$(setting UPDATE_BACKUP_KEEP_DAYS 7)
+    for dir in "$state"/backup/*/; do
+        [ -d "$dir" ] || continue
+        if [ -n "$(find "$dir" -maxdepth 0 -mtime "+$((keep - 1))")" ]; then
+            rm -rf "$dir"
+            log cleanup ok "deleted the pre-update backup of $(short "$(basename "$dir")")"
+        fi
+    done
+}
+
+case ${1-status} in
+    status) shift || true; cmd_status "$@" ;;
+    fetch) cmd_fetch; cleanup ;;
+    apply) shift; cmd_apply "$@" ;;
+    apply-now) cmd_fetch && cmd_apply --now ;;
+    postpone) shift; cmd_postpone "$@" ;;
+    resume) cmd_resume ;;
+    rollback) cmd_rollback ;;
+    guard) cmd_guard ;;
+    health) cmd_health ;;
+    issue) write_issue ;;
+    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

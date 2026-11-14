@@ -144,6 +144,12 @@ value=$(get TENANT_EXPORT_SIGNING_SECRET)
 if [ -n "$value" ] && [ "${#value}" -lt 32 ]; then
     fail "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
 fi
+[[ $(get UPDATE_WINDOW) =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
+    fail "UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)"
+[[ $(get UPDATE_HEALTH_TIMEOUT) =~ ^[1-9][0-9]*$ ]] ||
+    fail "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes"
+[[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]*$ ]] ||
+    fail "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
 case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
 
 for key in "${!pinned[@]}"; do

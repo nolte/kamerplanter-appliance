@@ -74,7 +74,9 @@ plugins:
             Getting Started: Erste Schritte
             References: Referenzen
             Configuration: Konfiguration
+            Updates and rollback: Updates und Rollback
             Verifying a download: Einen Download prüfen
+            Related repositories: Zugehörige Repositorys
 
   # Lets a page quote a canonical source instead of a frozen copy. Include
   # paths resolve relative to docs_dir, not relative to the including page.
@@ -129,7 +131,9 @@ nav:
   - Home: en/index.md
   - Getting Started:
       - en/getting-started/index.md
+      - Updates and rollback: en/getting-started/updates.md
   - References:
       - en/references/index.md
       - Configuration: en/references/configuration.md
       - Verifying a download: en/references/verify.md
+      - Related repositories: en/references/repositories.md

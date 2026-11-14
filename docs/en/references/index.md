@@ -10,6 +10,7 @@ last_updated: 2026-11-13
 
 - [Configuration](configuration.md) — the files that configure the Kamerplanter services on an installed appliance
 - [Verifying a download](verify.md) — how to check that a disk image comes from this repository's release workflow
+- [Related repositories](repositories.md) — every Kamerplanter repository and what it means for the appliance, including the ones needed only indirectly
 
 The requirements live as specifications in the repository, English canonical with a German translation:
 

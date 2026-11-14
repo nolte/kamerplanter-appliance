@@ -24,16 +24,22 @@ on:
 #            draft, and either the draft has no assets yet or they were built
 #            from the commit develop is at now
 #   disk     builds the disk image from exactly that commit (skipped when the
-#            draft already carries it, because a rebuild is not bit-identical)
-#   assets   signs the image and SHA256SUMS keylessly with this workflow's
-#            identity, records build provenance, verifies both, and attaches
-#            image, checksums, signature bundles and the source commit to the
+#            draft already carries it, because a rebuild is not bit-identical);
+#            outside a dry run it first pushes the system image to ghcr.io
+#            under the tag, signed with the appliances' update key
+#   assets   signs the disk image, SHA256SUMS and the system image keylessly
+#            with this workflow's identity, records build provenance, verifies
+#            all of it, and attaches disk image, checksums, signature bundles,
+#            the system image reference and the source commit to the
 #            still-draft release; publishing makes the release immutable
 #            (enabled for this repository) and cascades at once to
 #            release-cd-refresh-master.yml and release-cd-deliver-docs.yml
 #   current  confirms develop has not moved while the image was built, so the
 #            tag the reusable creates on develop matches the attached image
 #   publish  the reusable
+#   channel  moves the release channel `:stable`, which installed appliances
+#            update from, to the published system image; nothing reaches an
+#            appliance before its release is published
 #
 # When `vars.PORTFOLIO_APP_ID` is set, the reusable mints a short-lived
 # GitHub-App installation token from `secrets.PORTFOLIO_APP_PRIVATE_KEY` and
@@ -123,8 +129,14 @@ jobs:
     with:
       version: ${{ inputs.tag }}
       ref: ${{ needs.prepare.outputs.commit }}
+      # A dry run publishes nothing, also no system image.
+      publish-image: ${{ !inputs.dry_run }}
+    secrets:
+      system-image-signing-key: ${{ secrets.SYSTEM_IMAGE_SIGNING_KEY }}
+      system-image-signing-passphrase: ${{ secrets.SYSTEM_IMAGE_SIGNING_PASSPHRASE }}
     permissions:
       contents: read
+      packages: write
 
   assets:
     name: Sign and attach disk image
@@ -136,6 +148,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      packages: write
     # Serialises two dispatches of the same tag without touching the
     # reusable's own group; an upload in flight is never cut off.
     concurrency:
@@ -152,9 +165,19 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           COMMIT: ${{ needs.prepare.outputs.commit }}
+          DIGEST: ${{ needs.disk.outputs.image-digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           sha256sum --check SHA256SUMS
+          # The system image the disk was written from, which the release
+          # channel moves to on publish.
+          if [ "$DRY_RUN" != true ]; then
+            [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no system image digest from the disk job"; exit 1; }
+            printf '%s:%s@%s\n' "$IMAGE" "$TAG" "$DIGEST" >"kamerplanter-appliance-$TAG-system-image.txt"
+            sha256sum -- "kamerplanter-appliance-$TAG-system-image.txt" >>SHA256SUMS
+          fi
           source_asset="kamerplanter-appliance-$TAG-source-commit.txt"
           printf '%s\n' "$COMMIT" >"$source_asset"
           sha256sum -- "$source_asset" >>SHA256SUMS
@@ -186,11 +209,18 @@ jobs:
       - name: Sign image and checksums
         if: ${{ !inputs.dry_run }}
         working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ghcr.io/${{ github.repository }}@${{ needs.disk.outputs.image-digest }}
         run: |
           set -euo pipefail
           for file in *.raw.xz SHA256SUMS; do
             cosign sign-blob --yes --bundle "$file.sigstore.json" "$file"
           done
+          # The system image carries the update-key signature from the disk
+          # job, which appliances check; this one is for checks from outside.
+          cosign login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"
+          cosign sign --yes "$REF"
 
       - name: Record build provenance
         if: ${{ !inputs.dry_run }}
@@ -208,8 +238,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release-publish.yml@refs/heads/develop
+          REF: ghcr.io/${{ github.repository }}@${{ needs.disk.outputs.image-digest }}
         run: |
           set -euo pipefail
+          cosign verify "$REF" --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
           for file in *.raw.xz SHA256SUMS; do
             cosign verify-blob --bundle "$file.sigstore.json" \
               --certificate-identity "$IDENTITY" \
@@ -236,7 +269,7 @@ jobs:
           # The image and the checksums with their signature bundles first,
           # the source-commit file last: prepare treats that file as the sign
           # of a complete upload.
-          for file in *.raw.xz *.raw.xz.sigstore.json SHA256SUMS SHA256SUMS.sigstore.json "$source_asset"; do
+          for file in *.raw.xz *.raw.xz.sigstore.json *-system-image.txt SHA256SUMS SHA256SUMS.sigstore.json "$source_asset"; do
             gh release upload "$TAG" -- "$file"
           done
           attached=$(gh release view "$TAG" --json assets -q '.assets[].name')
@@ -287,3 +320,38 @@ jobs:
       app-private-key: ${{ secrets.PORTFOLIO_APP_PRIVATE_KEY }}
     permissions:
       contents: write
+
+  channel:
+    name: Move the release channel
+    needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Point stable at the published system image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Appliances only move forward (spec/update-and-rollback/ A4): a
+          # release published after a newer one leaves the channel alone.
+          latest=$(gh release view --json tagName -q .tagName)
+          if [ "$latest" != "$TAG" ]; then
+            echo "::notice::$TAG is not the latest release ($latest); the channel stays where it is"
+            exit 0
+          fi
+          ref=$(gh release download "$TAG" --pattern "kamerplanter-appliance-$TAG-system-image.txt" --output -)
+          [[ $ref =~ ^$IMAGE:$TAG@sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected system image reference '$ref'"; exit 1; }
+          digest=${ref##*@}
+          skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          # Signatures are stored per digest, so the channel tag carries them too.
+          skopeo copy --preserve-digests --retry-times 3 "docker://$IMAGE@$digest" "docker://$IMAGE:stable"
+          [ "$(skopeo inspect --raw "docker://$IMAGE:stable" | sha256sum | cut -d' ' -f1)" = "${digest#sha256:}" ] ||
+            { echo "::error::$IMAGE:stable does not resolve to $digest"; exit 1; }
+          echo "### \`$IMAGE:stable\` → $TAG (\`$digest\`)" >>"$GITHUB_STEP_SUMMARY"

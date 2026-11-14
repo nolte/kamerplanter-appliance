@@ -37,6 +37,10 @@ On every boot the appliance generates each required secret that is still missing
 
 To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`, ideally before the first start.
 
+## Updates
+
+`UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT`, and `UPDATE_BACKUP_KEEP_DAYS` control when updates are activated and how they are checked; see [Updates and rollback](../getting-started/updates.md#settings). The configuration check rejects a window that is not `HH:MM` and a timeout or keeping period that is not a whole number.
+
 ## Checks before the services start
 
 The services stay stopped, with a message in `systemctl status kamerplanter-config`, when:

@@ -129,7 +129,16 @@ run_1() {
         echo "== system image"; guest "bootc status --format=json | jq '.status.booted.image'"
         echo "== containers"; guest "podman ps --format '{{.Names}} {{.Status}}'"
         echo "== image store"; guest podman system df
+        echo "== update source"; guest kamerplanter-update status
     } >"$OUT/run1.measure.txt" 2>&1
+    # spec/update-and-rollback/ A2: the release channel, never a local name.
+    local source
+    source=$(guest "bootc status --format=json | jq -r .spec.image.image")
+    if [ "$source" = ghcr.io/nolte/kamerplanter-appliance:stable ]; then
+        record run1-source PASS - "update source is $source"
+    else
+        record run1-source FAIL - "update source is $source, not the release channel"
+    fi
 }
 
 # Kill a container, expect systemd to bring it back. Needs the VM of run 1.
@@ -217,6 +226,9 @@ run_6() {
 run_2() { first_boot run2 uefi virtio-scsi virtio; stop_vm; }
 run_3() { first_boot run3 bios lsi e1000; stop_vm; }
 run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
+
+# tests/boot/update.sh sources this file for the helpers above.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 [ -f "$DISK" ] || { echo "disk image $DISK not found; run 'task disk:build' first" >&2; exit 1; }
 kill_vm 2>/dev/null

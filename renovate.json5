@@ -56,6 +56,8 @@
       matchPackageNames: [
         'quay.io/fedora/fedora-bootc',
         'quay.io/fedora/fedora',
+        // The mirror of fedora-bootc (.github/workflows/base-image-mirror.yml).
+        'ghcr.io/nolte/kamerplanter-appliance-base',
       ],
       automerge: false,
     },
