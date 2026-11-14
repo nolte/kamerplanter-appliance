@@ -3,8 +3,11 @@ Description=Prepare and check the Kamerplanter configuration
 PartOf=kamerplanter.target
 # The configuration may live on the data disk, and configure generates
 # secrets: it never runs while a data disk that is set up is missing.
-Requires=kamerplanter-data-disk.service
-After=kamerplanter-data-disk.service
+# Nor on a data disk that a newer release has used: the update guard keeps
+# the services stopped then (spec/distribution-requirements/ E13), and an
+# older release generates no secret and writes no pin onto that disk.
+Requires=kamerplanter-data-disk.service kamerplanter-update-guard.service
+After=kamerplanter-data-disk.service kamerplanter-update-guard.service
 
 [Service]
 Type=oneshot

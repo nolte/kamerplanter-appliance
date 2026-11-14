@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the decisions of the disk service (image/rootfs/usr/libexec/kamerplanter/disks)
-# and the naming and placement checks of the shared parser on fake input and
-# in temporary directories. Needs no root, no disk and no VM.
+# and the naming and placement checks, the release comparison and the release
+# marker decisions of the shared parser (image/rootfs/usr/lib/kamerplanter/env.sh)
+# on fake input and in temporary directories. Needs no root, no disk and no VM.
 #
 # Usage: tests/unit/disks.sh
 set -uo pipefail
@@ -196,6 +197,78 @@ expect "no data disk set up: the system disk is used" placed "$(placed)"
 data_disk_record=$work/data.env data_disk_mount=$work/mnt
 touch "$data_disk_record"; mkdir -p "$data_disk_mount"
 expect "data disk set up, not mounted: nothing is written" "not placed" "$(placed)"
+
+# --- release comparison and marker (spec/update-and-rollback/ A4, A7; E13) ---
+yesno() { if "$@"; then echo yes; else echo no; fi; }
+expect "forward: newer release follows" yes "$(yesno forward 1.3 1.2)"
+expect "forward: patch release follows" yes "$(yesno forward 1.2.1 1.2)"
+expect "forward: v prefix is the same release" no "$(yesno forward v1.2 1.2)"
+expect "forward: same release does not follow" no "$(yesno forward 1.2 1.2)"
+expect "forward: older release does not follow" no "$(yesno forward 1.10 1.11)"
+expect "forward: numeric, not lexical order" yes "$(yesno forward 1.10 1.9)"
+expect "forward: development build never follows a release" no "$(yesno forward dev 1.2)"
+expect "forward: anything follows a development build" yes "$(yesno forward 0.1 dev)"
+
+expect "no marker: no release refused" no "$(yesno marker_refuses '' 1.2)"
+expect "no marker: development build runs" no "$(yesno marker_refuses '' dev)"
+expect "marker of a newer release refuses" yes "$(yesno marker_refuses 1.3 1.2)"
+expect "marker of a newer patch release refuses" yes "$(yesno marker_refuses 1.2.1 1.2)"
+expect "marker of the same release does not refuse" no "$(yesno marker_refuses 1.2 1.2)"
+expect "marker of the same release with v does not refuse" no "$(yesno marker_refuses 1.2 v1.2)"
+expect "marker of an older release does not refuse" no "$(yesno marker_refuses 1.2 1.3)"
+expect "development build refused on a disk of the oldest release" yes "$(yesno marker_refuses 0.1 dev)"
+expect "unversioned build refused on a marked disk" yes "$(yesno marker_refuses 1.0 unversioned)"
+expect "unreadable marker refuses a release" yes "$(yesno marker_refuses unreadable 9.9)"
+expect "unreadable marker refuses a development build" yes "$(yesno marker_refuses unreadable dev)"
+
+expect "release marks an unmarked disk" yes "$(yesno marker_raises 1.2 '')"
+expect "newer release raises the marker" yes "$(yesno marker_raises 1.3 1.2)"
+expect "same release leaves the marker" no "$(yesno marker_raises 1.2 1.2)"
+expect "older release (allowed by override) never lowers the marker" no "$(yesno marker_raises 1.2 1.3)"
+expect "release replaces an unreadable marker" yes "$(yesno marker_raises 1.2 unreadable)"
+expect "development build never raises a release's marker" no "$(yesno marker_raises dev 0.1)"
+expect "development build leaves an unmarked disk unmarked" no "$(yesno marker_raises dev '')"
+
+overrides=$work/downgrades
+printf '1.4 1.3 2026-11-14T10:00:00Z\nunreadable 1.2 2026-11-14T11:00:00Z\n1.4 dev 2026-11-14T12:00:00Z\n' >"$overrides"
+expect "override holds for its pair" yes "$(yesno downgrade_allowed 1.4 1.3 "$overrides")"
+expect "override not for another running release" no "$(yesno downgrade_allowed 1.4 1.2 "$overrides")"
+expect "override not for another disk release" no "$(yesno downgrade_allowed 1.5 1.3 "$overrides")"
+expect "override not for the reversed pair" no "$(yesno downgrade_allowed 1.3 1.4 "$overrides")"
+expect "override no prefix match" no "$(yesno downgrade_allowed 1.4 1.3.1 "$overrides")"
+expect "override of an unreadable marker" yes "$(yesno downgrade_allowed unreadable 1.2 "$overrides")"
+expect "override for a development build" yes "$(yesno downgrade_allowed 1.4 dev "$overrides")"
+expect "no overrides recorded" no "$(yesno downgrade_allowed 1.4 1.3 "$work/none")"
+
+# Reading the marker: only from a set-up, mounted disk; only a release.
+mountpoint() { [ "${!#}" = "$data_disk_mount" ] && [ -e "$data_disk_mount/.mounted" ]; }
+data_disk_marker=$data_disk_mount/release
+marker() { data_disk_release; echo "|$?"; }
+data_disk_record=$work/none.env
+expect "marker: no data disk set up" "|0" "$(marker)"
+data_disk_record=$work/data.env
+expect "marker: disk set up, not mounted" "|0" "$(marker)"
+touch "$data_disk_mount/.mounted"
+expect "marker: mounted disk without marker" "|0" "$(marker)"
+printf '1.4\n' >"$data_disk_marker"
+expect "marker: release" "1.4|0" "$(marker)"
+printf 'v1.4.2' >"$data_disk_marker"
+expect "marker: v prefix and no line break" "1.4.2|0" "$(marker)"
+printf '1.4\nsomething else\n' >"$data_disk_marker"
+expect "marker: first line only" "1.4|0" "$(marker)"
+printf 'dev\n' >"$data_disk_marker"
+expect "marker: no release is unreadable" "unreadable|0" "$(marker)"
+: >"$data_disk_marker"
+expect "marker: empty is unreadable" "unreadable|0" "$(marker)"
+head -c 200 /dev/zero | tr '\0' 1 >"$data_disk_marker"
+expect "marker: overlong is unreadable" "unreadable|0" "$(marker)"
+rm "$data_disk_marker"; printf '1.4\n' >"$work/elsewhere"; ln -s "$work/elsewhere" "$data_disk_marker"
+expect "marker: symbolic link is unreadable" "unreadable|0" "$(marker)"
+rm "$data_disk_marker"; ln -s "$work/nowhere" "$data_disk_marker"
+expect "marker: dangling symbolic link is unreadable" "unreadable|0" "$(marker)"
+rm "$data_disk_marker"; mkdir "$data_disk_marker"
+expect "marker: directory is unreadable" "unreadable|0" "$(marker)"
+unset -f mountpoint
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

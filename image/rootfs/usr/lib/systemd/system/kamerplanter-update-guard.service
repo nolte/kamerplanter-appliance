@@ -3,7 +3,12 @@ Description=Back up or restore the Kamerplanter data around an update
 Documentation=file:///usr/bin/kamerplanter-update
 # Runs before any database container touches the data (see the drop-in
 # kamerplanter-.container.d/10-kamerplanter.conf), and after the data disk
-# and the backup disk are mounted.
+# and the backup disk are mounted. It fails, and so keeps the configuration
+# check and every container stopped, while the data disk is marked by a
+# newer release than the running one (spec/distribution-requirements/ E13);
+# it checks that after a rollback has restored the marker with the data.
+# `kamerplanter-update allow-downgrade` overrides it and restarts
+# kamerplanter.target, which runs this unit again.
 Requires=kamerplanter-data-disk.service kamerplanter-backup-disk.service
 After=local-fs.target kamerplanter-data-disk.service kamerplanter-backup-disk.service
 DefaultDependencies=no

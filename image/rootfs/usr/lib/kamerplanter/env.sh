@@ -12,7 +12,8 @@
 # skipped.
 #
 # It also names the locations of the data disk (data_disk_places below),
-# which the disk service binds and every writer checks.
+# which the disk service binds and every writer checks, and holds the release
+# comparison and the release marker of the data disk (release_version below).
 declare -A cfg
 cfg_invalid=()
 load() {
@@ -86,4 +87,84 @@ data_disk_placed() {
         read -r dir path <<<"$place"
         bound_from "$dir" "$path" || return 1
     done
+}
+
+# Releases (spec/update-and-rollback/ A4, A7). One comparison serves the
+# update tool, which offers and activates only newer releases, and the release
+# marker of the data disk below, which keeps an older release off a disk a
+# newer one has used.
+#
+# Releases are versioned X.Y or X.Y.Z, optionally with a leading v (the
+# release tag); anything else is a development build.
+release_version() {
+    local v=${1#v}
+    [[ $v =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || return 1
+    printf '%s' "$v"
+}
+# forward CANDIDATE RUNNING: whether version CANDIDATE may follow RUNNING
+# (spec A4): a release only after an older release. A development build runs
+# anything after it, and is never accepted after a release.
+forward() {
+    local candidate running
+    running=$(release_version "$2") || return 0
+    candidate=$(release_version "$1") || return 1
+    [ "$candidate" != "$running" ] &&
+        [ "$(printf '%s\n%s\n' "$running" "$candidate" | sort -V | tail -n1)" = "$candidate" ]
+}
+
+# The release marker (spec/distribution-requirements/ E13): the file
+# "release" at the top of the data disk holds the highest release whose
+# services passed the health check of spec/update-and-rollback/ E1 on it. It
+# lies outside every location of data_disk_places, so it is neither part of
+# /etc/kamerplanter, which configure reads and the deployments merge, nor of a
+# volume a container writes to. The update tool (/usr/bin/kamerplanter-update)
+# raises it, checks it before any container starts, and keeps a copy with
+# every pre-update backup; nothing else of the update state is on the disk.
+data_disk_marker=$data_disk_mount/release
+
+# data_disk_release: the release the marker of a set-up, mounted data disk
+# holds; empty when no data disk is set up, it is not mounted, or it carries
+# no marker; "unreadable" when the marker is not a regular file or holds no
+# release. Reads only, and at most 64 bytes.
+data_disk_release() {
+    [ -e "$data_disk_record" ] && mountpoint -q -- "$data_disk_mount" || return 0
+    [ -e "$data_disk_marker" ] || [ -L "$data_disk_marker" ] || return 0
+    local line
+    if [ -f "$data_disk_marker" ] && [ ! -L "$data_disk_marker" ] &&
+        line=$(head -c 64 -- "$data_disk_marker" 2>/dev/null) && release_version "${line%%$'\n'*}"; then
+        return 0
+    fi
+    printf unreadable
+}
+
+# marker_refuses MARKER RUNNING: whether the release RUNNING keeps the
+# services stopped on a data disk whose marker holds MARKER (E13). No marker
+# (MARKER empty) refuses nothing. A marker newer than RUNNING refuses, decided
+# by forward; an unreadable marker refuses every release, since the release
+# that wrote it is unknown. A development build counts as older than any
+# release (forward): it is refused on every marked disk, also on one marked
+# by the oldest release, and runs only on a disk without a marker.
+marker_refuses() {
+    [ -n "$1" ] || return 1
+    release_version "$1" >/dev/null || return 0
+    forward "$1" "$2"
+}
+
+# marker_raises RUNNING MARKER: whether the release RUNNING, once its services
+# passed the health check, writes itself into a marker that holds MARKER: only
+# a release, and only over no marker, an older one or an unreadable one. A
+# development build never writes the marker, so it never raises one a release
+# set and leaves an unmarked disk unmarked.
+marker_raises() {
+    release_version "$1" >/dev/null || return 1
+    [ -z "$2" ] || forward "$1" "$2"
+}
+
+# downgrade_allowed MARKER RUNNING FILE: whether FILE, the overrides that
+# `kamerplanter-update allow-downgrade` records in the update state, lets the
+# release RUNNING use a disk marked MARKER. One line "MARKER RUNNING TIME"
+# per override; an override holds only for its own pair.
+downgrade_allowed() {
+    [ -f "$3" ] || return 1
+    awk -v m="$1" -v r="$2" '$1 == m && $2 == r { found = 1 } END { exit !found }' "$3"
 }

@@ -49,7 +49,9 @@
 # disk is refused when a location is a symbolic link, or a file in etc or
 # pinned is hard-linked or special. The SELinux labels follow the bound
 # paths. When anything fails, the binds made are undone and the disk is
-# unmounted again, so configure finds no location to write to.
+# unmounted again, so configure finds no location to write to. At its top the
+# disk also carries the release marker "release", which only the update tool
+# reads and writes (/usr/bin/kamerplanter-update, E13); it is bound nowhere.
 set -euo pipefail
 umask 077
 
@@ -779,6 +781,12 @@ cmd_status() {
             echo "$role disk: $label, UUID $(get UUID), not mounted (see: systemctl status $unit)"
         fi
         [ "$role" = data ] || continue
+        # Kept by the update tool (E13); see kamerplanter-update status.
+        if mountpoint -q "$mnt"; then
+            local release
+            release=$(data_disk_release)
+            echo "  release marker: ${release:-none yet}"
+        fi
         local place dir path
         for place in "${data_disk_places[@]}"; do
             read -r dir path <<<"$place"

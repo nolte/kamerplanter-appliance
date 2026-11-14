@@ -13,12 +13,18 @@
 #   kamerplanter-update resume            end a postponement
 #   kamerplanter-update rollback          back to the previous version and the
 #                                         data from before the update
+#   kamerplanter-update allow-downgrade <disk release> <running release>
+#                                         as root: let the running release start
+#                                         the services on a data disk that the
+#                                         newer disk release has used (E13)
 #
 # Run on every boot by units, not by the user:
 #   guard    before the databases start: back up the data when a new version
-#            boots for the first time, restore it after a rollback
+#            boots for the first time, restore it after a rollback; then keep
+#            the services stopped on a data disk a newer release has used
 #   health   after the services start: decide whether a new version is
-#            healthy, and roll it back when it is not
+#            healthy, and roll it back when it is not; raise the release
+#            marker of the data disk once the services are healthy
 #
 # State in /var/lib/kamerplanter/update/:
 #   good        digest of the last version that passed its health check
@@ -29,6 +35,12 @@
 #   backup/D/   the volumes as they were when D was left
 #   log.jsonl   one JSON object per event
 #   postpone    epoch seconds until which no update is activated
+#   downgrades  "DISK RUNNING TIME" per allow-downgrade: the running release
+#               may use a data disk whose marker holds the newer DISK
+#
+# On the data disk, when one is set up, only the release marker "release"
+# (/usr/lib/kamerplanter/env.sh, data_disk_marker); a copy of it is part of
+# every backup/D/ (data-disk-release).
 set -euo pipefail
 umask 077
 
@@ -44,6 +56,9 @@ data_volumes=(arangodb_data valkey_data)
 defaults=/usr/share/kamerplanter/kamerplanter.env
 user=/etc/kamerplanter/kamerplanter.env
 issue=/run/issue.d/50-kamerplanter.issue
+# The console message of a refused data disk (release_check); before the
+# general one, after those of the disk service (40-kamerplanter-*-disk.issue).
+release_issue=/run/issue.d/45-kamerplanter-release.issue
 
 die() { echo "kamerplanter-update: $*" >&2; exit 1; }
 
@@ -84,23 +99,9 @@ slot() { host | jq -r --arg s "$1" --arg f "$2" '.status[$s].image // {} | (
     else empty end) // ""'; }
 short() { printf '%s' "${1#sha256:}" | cut -c1-12; }
 
-# Releases are versioned X.Y or X.Y.Z, optionally with a leading v (the
-# release tag); anything else is a development build.
-release_version() {
-    local v=${1#v}
-    [[ $v =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || return 1
-    printf '%s' "$v"
-}
-# forward CANDIDATE RUNNING: whether version CANDIDATE may follow RUNNING
-# (spec A4): a release only after an older release. A development build runs
-# anything after it, and is never accepted after a release.
-forward() {
-    local candidate running
-    running=$(release_version "$2") || return 0
-    candidate=$(release_version "$1") || return 1
-    [ "$candidate" != "$running" ] &&
-        [ "$(printf '%s\n%s\n' "$running" "$candidate" | sort -V | tail -n1)" = "$candidate" ]
-}
+# release_version and forward, the comparison of releases (spec A4), come from
+# /usr/lib/kamerplanter/env.sh, which checks the release marker of the data
+# disk with the same comparison (A7).
 
 failed() { [ -n "$1" ] && grep -Fqx -- "$1" "$state/failed" 2>/dev/null; }
 pending() { cat "$state/pending" 2>/dev/null || true; }
@@ -143,6 +144,130 @@ copy_volumes() {
     sync -f "$2" || return 1
 }
 
+# ---------------------------------------------------------------------------
+# The release marker of the data disk (spec/distribution-requirements/ E13,
+# spec/update-and-rollback/ A7). The decisions are in
+# /usr/lib/kamerplanter/env.sh (data_disk_release, marker_refuses,
+# marker_raises, downgrade_allowed); tests/unit/disks.sh checks them. Without
+# a data disk none of this does anything.
+
+# running_release: the running version as compared and shown: a release
+# without its leading v, or the label of a development build, at most 64
+# characters with anything outside [A-Za-z0-9._+~-] replaced, so it is one
+# word in the overrides file and harmless in a message; "unversioned" when
+# the image has no version.
+running_release() {
+    local v
+    v=$(slot booted version)
+    release_version "$v" && return 0
+    v=${v:-unversioned}
+    v=${v:0:64}
+    printf '%s' "${v//[^A-Za-z0-9._+~-]/?}"
+}
+
+# write_marker CONTENT: replaces the marker on the data disk with CONTENT,
+# durably and never through a link: a reader sees the old or the new marker.
+write_marker() {
+    local tmp
+    tmp=$(mktemp "$data_disk_mount/.release.XXXXXX") || return 1
+    if ! { printf '%s\n' "$1" >"$tmp" && sync "$tmp" && mv -fT -- "$tmp" "$data_disk_marker"; }; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    sync -f "$data_disk_mount"
+}
+
+# backup_marker DIR: the marker into the pre-update backup in DIR (spec
+# update-and-rollback/ D2), so that the rollback restores it with the data.
+# No copy when the disk has no marker or no data disk is set up, also none
+# left from an earlier backup in the same DIR.
+backup_marker() {
+    local disk
+    disk=$(data_disk_release)
+    rm -f -- "$1/data-disk-release" || return 1
+    [ -z "$disk" ] || printf '%s\n' "$disk" >"$1/data-disk-release"
+}
+
+# restore_marker DIR: the marker as it was when the backup in DIR was taken.
+# A backup without one restores a disk without one: it was either unmarked
+# then, or the data was on the system disk.
+restore_marker() {
+    [ -e "$data_disk_record" ] || return 0
+    if [ -f "$1/data-disk-release" ]; then
+        write_marker "$(head -n1 -- "$1/data-disk-release")"
+    elif [ -e "$data_disk_marker" ] || [ -L "$data_disk_marker" ]; then
+        rm -f -- "$data_disk_marker" && sync -f "$data_disk_mount"
+    fi
+}
+
+# release_check: before any container starts, after a rollback has restored
+# the marker. Keeps the services stopped (fails, and so does the guard, which
+# every container requires) while the data disk is marked by a newer release
+# than the running one, unless allow-downgrade was run for exactly this pair;
+# the journal, the update record and the console name both releases.
+release_check() {
+    local disk running hint
+    disk=$(data_disk_release)
+    running=$(running_release)
+    if ! marker_refuses "$disk" "$running"; then
+        clear_release_issue
+        return 0
+    fi
+    if downgrade_allowed "$disk" "$running" "$state/downgrades"; then
+        echo "release $running uses the data disk kp-data, which release $disk used, as allowed by kamerplanter-update allow-downgrade"
+        clear_release_issue
+        return 0
+    fi
+    local message
+    if [ "$disk" = unreadable ]; then
+        message="the release marker of the data disk kp-data is unreadable, so release $running cannot tell whether a newer release has used the disk"
+    elif ! release_version "$running" >/dev/null; then
+        message="the data disk kp-data was used by release $disk; the running $running is a development build, which counts as older than any release"
+    else
+        message="the data disk kp-data was used by release $disk, which is newer than the running release $running"
+    fi
+    if [ "$disk" = unreadable ]; then
+        hint="run a release that used the disk, or restore its data from a backup; to run $running on it all the same, run as root: kamerplanter-update allow-downgrade $disk $running"
+    else
+        hint="return to release $disk or newer; to run $running on it all the same, at the risk of data that $disk has migrated, run as root: kamerplanter-update allow-downgrade $disk $running"
+    fi
+    log release refused "$message; the services stay stopped"
+    echo "$hint" >&2
+    install -d -m 0755 /run/issue.d
+    {
+        echo "Kamerplanter: $message; the services stay stopped"
+        echo "  $hint"
+        echo "  details: systemctl status kamerplanter-update-guard.service"
+        echo
+    } >"$release_issue.tmp"
+    chmod 0644 "$release_issue.tmp"
+    mv "$release_issue.tmp" "$release_issue"
+    agetty --reload >/dev/null 2>&1 || true
+    return 1
+}
+clear_release_issue() {
+    if [ -e "$release_issue" ]; then
+        rm -f "$release_issue"
+        agetty --reload >/dev/null 2>&1 || true
+    fi
+}
+
+# raise_marker: after the services passed the health check, the running
+# release into the marker when it is higher than what the marker holds
+# (marker_raises). A failure is recorded; the services keep running.
+raise_marker() {
+    [ -e "$data_disk_record" ] && data_disk_placed || return 0
+    local disk running
+    disk=$(data_disk_release)
+    running=$(running_release)
+    marker_raises "$running" "$disk" || return 0
+    if write_marker "$running"; then
+        log release marked "the data disk kp-data is marked as used by release $running${disk:+ (was $disk)}"
+    else
+        log release error "the release marker of the data disk kp-data could not be raised to $running; it stays ${disk:-unset}"
+    fi
+}
+
 write_issue() {
     install -d -m 0755 /run/issue.d
     local booted staged window
@@ -178,8 +303,28 @@ cmd_status() {
     local json=0
     [ "${1-}" = --json ] && json=1
     local doc
+    # The data disk, when one is set up: the release its marker holds, whether
+    # the running release is refused on it, and the overrides recorded.
+    local disk=null release running refused=false mounted=false
+    if [ -e "$data_disk_record" ]; then
+        if data_disk_placed; then mounted=true; fi
+        release=$(data_disk_release)
+        running=$(running_release)
+        if marker_refuses "$release" "$running" && ! downgrade_allowed "$release" "$running" "$state/downgrades"; then
+            refused=true
+        fi
+        disk=$(jq -cn --arg release "$release" --argjson refused "$refused" --argjson mounted "$mounted" \
+            --rawfile allowed <(cat "$state/downgrades" 2>/dev/null || true) '{
+              inPlace: $mounted,
+              release: (if $release == "" then null else $release end),
+              refused: $refused,
+              allowedDowngrades: ($allowed | split("\n") | map(select(. != "") | split(" ")
+                  | {disk: .[0], running: .[1], time: .[2]}))
+            }')
+    fi
     doc=$(host | jq --arg window "$(next_window)" --arg postponed "$(postponed_until || true)" \
         --arg pending "$(pending)" --rawfile failed <(cat "$state/failed" 2>/dev/null || true) \
+        --argjson disk "$disk" \
         --slurpfile log <(tail -n 20 "$state/log.jsonl" 2>/dev/null || true) '
         def slot(s): .status[s].image // null | if . == null then null else
             {version, digest: .imageDigest, image: .image.image, timestamp} end;
@@ -190,6 +335,7 @@ cmd_status() {
           postponedUntil: (if $postponed == "" then null else ($postponed | tonumber | todate) end),
           checking: (if $pending == "" then null else ($pending | split(" ") | {from: .[0], to: .[1]}) end),
           failed: ($failed | split("\n") | map(select(. != ""))),
+          dataDisk: $disk,
           record: $log
         }')
     if [ "$json" = 1 ]; then
@@ -206,6 +352,14 @@ cmd_status() {
         (if .postponedUntil then "Postponed until \(.postponedUntil)" else empty end),
         (if .checking then "Checking:       update \(.checking.from[7:19]) -> \(.checking.to[7:19])" else empty end),
         (if (.failed | length) > 0 then "Never applied:  \(.failed | map(.[7:19]) | join(", "))" else empty end),
+        (if .dataDisk then
+            "Data disk:      kp-data, " + (if .dataDisk.inPlace | not then "not in place (see: kamerplanter-data-disk.service)"
+                elif .dataDisk.release == null then "no release marker yet"
+                elif .dataDisk.release == "unreadable" then "release marker unreadable"
+                else "marked by release \(.dataDisk.release)" end)
+            + (if .dataDisk.refused then "; newer than the running release, the services stay stopped" else "" end),
+            (.dataDisk.allowedDowngrades[] | "  allowed:      \(.running) on the disk of \(.disk) (\(.time))")
+         else empty end),
         "",
         "Recent events:",
         (.record[] | "  \(.time)  \(.event)  \(.result)  \(.detail)")' <<<"$doc"
@@ -344,6 +498,57 @@ EOF
     fi
 }
 
+# allow-downgrade DISK RUNNING: the deliberate override of E13. Only root, on
+# the console or through administrative access; nothing in the web UI, the
+# API, the provisioning data or on the data disk reaches it. It holds only for
+# the pair it names, which must be the pair in effect: the release the marker
+# of the data disk holds (or "unreadable") and the running release, as the
+# refusal names them. It is recorded in the update state on the system disk
+# (downgrades, log.jsonl); the marker stays as it is, so a later release
+# older than DISK, or another running release, needs an override of its own.
+# Then it restarts kamerplanter.target, which runs the failed guard again and
+# starts the services; a reboot does the same.
+cmd_allow_downgrade() {
+    [ $# -eq 2 ] || die "usage: kamerplanter-update allow-downgrade <disk release> <running release>"
+    [ -e "$data_disk_record" ] || die "no data disk is set up; there is nothing to allow"
+    data_disk_placed || die "the data disk kp-data is missing or not in place (see: systemctl status kamerplanter-data-disk.service)"
+    install -d -m 0700 "$state"
+    exec 9>"$state/.lock"
+    flock -n 9 || die "another update action is running"
+    local disk running named_disk named_running
+    disk=$(data_disk_release)
+    running=$(running_release)
+    marker_refuses "$disk" "$running" ||
+        die "release $running may use the data disk kp-data (${disk:+marked by release $disk}${disk:-not marked}); there is nothing to allow"
+    named_disk=$(release_version "$1") || named_disk=$1
+    named_running=$(release_version "$2") || named_running=$2
+    [ "$named_disk" = "$disk" ] && [ "$named_running" = "$running" ] ||
+        die "the pair named ($1, $2) is not the one in effect: the data disk kp-data was used by $disk, the running release is $running"
+    if downgrade_allowed "$disk" "$running" "$state/downgrades"; then
+        echo "release $running is allowed on the data disk of release $disk already"
+    else
+        cat >&2 <<EOF
+Release $running is to start the services on the data disk kp-data, which
+release $disk has used. $disk may have migrated the data in a way that $running
+cannot read, or damages when it writes. If in doubt, restore a backup from
+before $disk instead.
+This override holds only for $running on a disk of $disk.
+EOF
+        if [ -t 0 ]; then
+            read -r -p "Continue? [y/N] " answer
+            [ "$answer" = y ] || [ "$answer" = Y ] || die "cancelled"
+        fi
+        printf '%s %s %s\n' "$disk" "$running" "$(date -u +%FT%TZ)" >>"$state/downgrades"
+        sync "$state/downgrades"
+        log allow-downgrade ok "release $running may use the data disk kp-data, which release $disk used; overridden deliberately as root"
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl restart --no-block kamerplanter.target ||
+            die "the services could not be started; run: systemctl restart kamerplanter.target"
+        echo "the services are starting (see: systemctl status kamerplanter.target)"
+    fi
+}
+
 # Before the databases start, on every boot.
 cmd_guard() {
     # The unit requires kamerplanter-data-disk.service; this holds however the
@@ -358,6 +563,7 @@ cmd_guard() {
     if [ -z "$good" ]; then
         echo "$booted" >"$state/good"
         log install ok "first boot of $(slot booted version)" "" "$booted"
+        release_check || { write_issue || true; return 1; }
         write_issue || true
         return 0
     fi
@@ -373,7 +579,7 @@ cmd_guard() {
         if [ -d "$state/backup/$from" ]; then
             # On failure the services stay stopped (they require this unit)
             # and the next boot restores again.
-            copy_volumes "$state/backup/$from" "$volumes" ||
+            { copy_volumes "$state/backup/$from" "$volumes" && restore_marker "$state/backup/$from"; } ||
                 { log rollback error "the data could not be restored; the services stay stopped" "$to" "$from"; return 1; }
             detail="data restored to the state before the update; changes made since then are lost"
         fi
@@ -395,7 +601,8 @@ cmd_guard() {
         local reason=
         if ! reason=$(space_ok); then
             :
-        elif ! { install -d -m 0700 "$state/backup/$from" && copy_volumes "$volumes" "$state/backup/$from"; }; then
+        elif ! { install -d -m 0700 "$state/backup/$from" && copy_volumes "$volumes" "$state/backup/$from" &&
+            backup_marker "$state/backup/$from"; }; then
             reason="the data could not be copied for the pre-update backup"
         fi
         if [ -n "$reason" ]; then
@@ -412,32 +619,74 @@ cmd_guard() {
         rm -f "$state/pending"
         log guard cleared "the activation of $(short "$to") did not take place" "$from" "$to"
     fi
+    # After the restore above, so a rollback runs on the marker it restored.
+    # On the first boot of a new version the backup is taken already; a
+    # refusal then fails its health check, which returns to the previous one.
+    release_check || { write_issue || true; return 1; }
     write_issue || true
 }
 
-# After the services started, on every boot; acts only while a new version
-# is being checked.
+# After the services started, on every boot. While a new version is being
+# checked, it decides whether that version is healthy, and raises the marker
+# of the data disk when it is. Otherwise, with a data disk, it raises the
+# marker once the services are healthy, when the running release is higher
+# than the marker: on the first boot of an appliance, on a disk it adopted,
+# and on every boot until the marker holds it (E13). The services started by
+# `systemctl restart kamerplanter.target` alone are marked on the next boot.
 cmd_health() {
-    local from to phase booted
+    local from to phase booted problem
     read -r from to phase <<<"$(pending)" || true
     booted=$(slot booted digest)
-    [ "${phase-}" = checking ] && [ "$booted" = "$to" ] || return 0
+    if ! { [ "${phase-}" = checking ] && [ "$booted" = "$to" ]; }; then
+        mark_when_healthy
+        return 0
+    fi
+    if ! problem=$(wait_healthy); then
+        log health failed "$problem; returning to the previous version" "$from" "$to"
+        bootc rollback --apply
+        return 1
+    fi
+    echo "$to" >"$state/good"
+    rm -f "$state/pending"
+    log health ok "$(slot booted version) is healthy" "$from" "$to"
+    raise_marker
+    cleanup
+    write_issue || true
+}
+
+# wait_healthy: waits up to UPDATE_HEALTH_TIMEOUT minutes for check_health;
+# fails with the last problem found when the time is up.
+wait_healthy() {
     local budget deadline problem
     budget=$(count UPDATE_HEALTH_TIMEOUT 20)
     deadline=$(($(date +%s) + budget * 60))
     until problem=$(check_health); do
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            log health failed "$problem after $budget minutes; returning to the previous version" "$from" "$to"
-            bootc rollback --apply
+            echo "$problem after $budget minutes"
             return 1
         fi
         sleep 10
     done
-    echo "$to" >"$state/good"
-    rm -f "$state/pending"
-    log health ok "$(slot booted version) is healthy" "$from" "$to"
-    cleanup
-    write_issue || true
+}
+
+# mark_when_healthy: raises the marker of the data disk once the services of
+# a release that would raise it are healthy, by the same health check as an
+# update. Not on a disk this release is refused on: its services stay
+# stopped. A check that fails leaves the marker as it is, and is recorded.
+mark_when_healthy() {
+    [ -e "$data_disk_record" ] && data_disk_placed || return 0
+    local disk running problem
+    disk=$(data_disk_release)
+    running=$(running_release)
+    marker_raises "$running" "$disk" || return 0
+    if marker_refuses "$disk" "$running" && ! downgrade_allowed "$disk" "$running" "$state/downgrades"; then
+        return 0
+    fi
+    if ! problem=$(wait_healthy); then
+        log release unmarked "$problem; the data disk kp-data stays marked by ${disk:-no release}"
+        return 0
+    fi
+    raise_marker
 }
 
 check_health() {
@@ -476,6 +725,7 @@ cleanup() {
 }
 
 case ${1-status} in
+    allow-downgrade) [ "$(id -u)" = 0 ] || die "allow-downgrade must be run as root"; refresh ;;
     status | fetch | apply | apply-now | rollback | guard | health | issue) refresh ;;
 esac
 case ${1-status} in
@@ -486,8 +736,9 @@ case ${1-status} in
     postpone) shift; cmd_postpone "$@" ;;
     resume) cmd_resume ;;
     rollback) cmd_rollback ;;
+    allow-downgrade) shift; cmd_allow_downgrade "$@" ;;
     guard) cmd_guard ;;
     health) cmd_health ;;
     issue) write_issue ;;
-    *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
