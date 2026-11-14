@@ -12,7 +12,11 @@ P=.build/spike
 rm -rf "$P"; mkdir -p "$P"
 LOG=$P/log.txt
 say() { echo "### $*" | tee -a "$LOG"; }
-run() { guest bash -s >>"$LOG" 2>&1; }
+run() {  # bounded: a hung guest command must not stall the spike
+    timeout 900 ssh -i "$KEY" -p 10022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15 root@127.0.0.1 bash -s >>"$LOG" 2>&1 ||
+        echo "### run ended with $?" >>"$LOG"
+}
 EXTRA=()
 qemu-system-x86_64() { command qemu-system-x86_64 "$@" "${EXTRA[@]}"; }
 up() { wait_up 1500 >/dev/null || { say "NOT UP"; diagnose spike; cp "$OUT"/spike.diagnose.txt "$P/" 2>/dev/null; }; }
@@ -77,7 +81,7 @@ echo "--- ds-identify"; cat /run/cloud-init/ds-identify.log 2>/dev/null | grep -
 echo "--- schema"; cloud-init schema --system 2>&1 | tail -5
 echo "--- addresses"; ip -4 -o addr show scope global; ip route | head -3
 nmcli -g NAME,TYPE,DEVICE con show --active 2>/dev/null; for c in $(nmcli -g UUID con show --active 2>/dev/null); do echo "$c method=$(nmcli -g ipv4.method con show "$c")"; done
-echo "--- NM keyfiles"; ls -l /etc/NetworkManager/system-connections/ 2>&1; grep -hE "^(id|method|address1)=" /etc/NetworkManager/system-connections/* 2>/dev/null
+echo "--- NM keyfiles"; ls -l /etc/NetworkManager/system-connections/ 2>&1; cat /etc/NetworkManager/system-connections/* 2>/dev/null | grep -vE "^(uuid|psk)"; nmcli -f NAME,UUID,DEVICE,ACTIVE,AUTOCONNECT-PRIORITY con show; journalctl -b -o short-monotonic --no-pager -u NetworkManager -u cloud-init-local -u cloud-init-network 2>/dev/null | grep -iE "Started|activat|cloud-init primary|Wired connection" | head -15
 echo "--- cloud-init network log"; grep -iE "network|render|netplan|NetworkManager" /var/log/cloud-init.log 2>/dev/null | grep -viE "url|metadata" | tail -12
 echo "--- root authorized_keys"; wc -l /root/.ssh/authorized_keys 2>&1; grep -c spike-userdata /root/.ssh/authorized_keys 2>/dev/null || true
 echo "--- default user"; getent passwd fedora cloud-user 2>&1 | head
@@ -116,7 +120,10 @@ guest "cat >/var/lib/cloud/seed/nocloud/user-data" <"$P/seed-c/user-data"
 guest "cloud-init clean --logs >/dev/null 2>&1; true"
 say "C2 seed dir before reboot"; guest "ls -la /var/lib/cloud/seed/nocloud/; findmnt -no SOURCE,FSTYPE,OPTIONS /var/lib/cloud" >>"$LOG" 2>&1
 reboot_vm
-say "C2 seed dir after reboot, full ds-identify log"; guest "ls -la /var/lib/cloud/seed/nocloud/; cat /run/cloud-init/ds-identify.log" >>"$LOG" 2>&1
+say "C2 seed dir after reboot, full ds-identify log"; guest "ls -la /var/lib/cloud/seed/nocloud/; cat /run/cloud-init/ds-identify.log; systemctl show -p ActiveEnterTimestampMonotonic var.mount; findmnt -no SOURCE,FSROOT /var" >>"$LOG" 2>&1
+say "C3 same seed, datasource_list NoCloud only"; guest "printf 'datasource_list: [ NoCloud, None ]\\n' >/etc/cloud/cloud.cfg.d/90-spike-only-nocloud.cfg; cloud-init clean --logs >/dev/null 2>&1; true"
+reboot_vm
+guest "grep -E 'found|Found|single|returning' /run/cloud-init/ds-identify.log; cloud-init status --long | head -5" >>"$LOG" 2>&1
 report_common
 stop_vm
 fi
@@ -169,7 +176,7 @@ table inet kp_metadata {
 NFT
 curl -s -m 3 -o /dev/null -w 'after: root %{http_code}\n' http://169.254.169.254/
 runuser -u nobody -- curl -s -m 3 -o /dev/null -w 'after: nobody %{http_code}\n' http://169.254.169.254/ || echo "after: nobody blocked"
-podman --storage-opt=additionalimagestore=/usr/lib/bootc/storage exec backend python3 -c "import urllib.request;print('after: container', urllib.request.urlopen('http://169.254.169.254/',timeout=3).status)" 2>&1 | tail -1
+timeout 30 podman --storage-opt=additionalimagestore=/usr/lib/bootc/storage exec backend python3 -c "import urllib.request;print('after: container', urllib.request.urlopen('http://169.254.169.254/',timeout=3).status)" </dev/null >/tmp/md/exec.out 2>&1; tail -1 /tmp/md/exec.out
 EOS
 stop_vm
 fi
