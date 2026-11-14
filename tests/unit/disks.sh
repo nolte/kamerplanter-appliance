@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the decisions of the disk service (image/rootfs/usr/libexec/kamerplanter/disks),
-# its key checks (E14), and the naming and placement checks, the release comparison and the release
+# its key checks (E14), the decisions and the record of a move onto a data disk (E11),
+# and the naming and placement checks, the release comparison and the release
 # marker decisions of the shared parser (image/rootfs/usr/lib/kamerplanter/env.sh)
 # on fake input and in temporary directories. Needs no root, no disk and no VM.
 #
@@ -350,6 +351,87 @@ expect "marker: dangling symbolic link is unreadable" "unreadable|0" "$(marker)"
 rm "$data_disk_marker"; mkdir "$data_disk_marker"
 expect "marker: directory is unreadable" "unreadable|0" "$(marker)"
 unset -f mountpoint
+
+# --- moving the system disk's data onto a data disk (E11) ---
+tr_() { local n; n=$(move_transition "$1" "$2"); echo "${n:-refused}"; }
+expect "move: begins without a record" copying "$(tr_ none start)"
+expect "move: an interrupted copy starts over" copying "$(tr_ copying start)"
+expect "move: a failed move starts again once named anew" copying "$(tr_ failed start)"
+expect "move: complete copy is moved" moved "$(tr_ copying copied)"
+expect "move: a copy that cannot be made is abandoned" failed "$(tr_ copying abandon)"
+expect "move: healthy from the disk" verified "$(tr_ moved healthy)"
+expect "move: unhealthy from the disk falls back" falling-back "$(tr_ moved unhealthy)"
+expect "move: back on the system copy" failed "$(tr_ falling-back returned)"
+expect "move: system copy deleted after verification" cleaned "$(tr_ verified cleaned)"
+expect "move: no deletion before the health check" refused "$(tr_ moved cleaned)"
+expect "move: no deletion while copying" refused "$(tr_ copying cleaned)"
+expect "move: no deletion after a fallback" refused "$(tr_ failed cleaned)"
+expect "move: no new move over a disk in use" refused "$(tr_ moved start)"
+expect "move: no new move over a verified one" refused "$(tr_ verified start)"
+expect "move: no new move over a cleaned one" refused "$(tr_ cleaned start)"
+expect "move: no health result while copying" refused "$(tr_ copying healthy)"
+expect "move: no fallback once verified" refused "$(tr_ verified unhealthy)"
+expect "move: no fallback once cleaned" refused "$(tr_ cleaned unhealthy)"
+expect "move: nothing returns without a fallback" refused "$(tr_ moved returned)"
+expect "move: unknown state" refused "$(tr_ bogus start)"
+
+expect "move target: blank file system" ok "$(move_target '' "$uuid" '')"
+expect "move target: own earlier target with content" ok "$(move_target $'etc\nvolumes' "$uuid" "$uuid")"
+expect "move target: own earlier target, UUID case-blind" ok "$(move_target 'etc' "${uuid^^}" "$uuid")"
+expect "move target: foreign data refused, entries named" "refuse it holds data of its own (etc, release, volumes)" \
+    "$(move_target $'etc\nrelease\nvolumes' "$uuid" '')"
+expect "move target: another disk's earlier move does not count" "refuse it holds data of its own (notes)" \
+    "$(move_target notes "$uuid" 99999999-8888-7777-6666-555555555555)"
+expect "move target: any earlier target counts" ok "$(move_target etc "$uuid" $'99999999-8888-7777-6666-555555555555\n'"$uuid")"
+expect "move target: no prefix match" "refuse it holds data of its own (etc)" "$(move_target etc "${uuid:0:8}" "$uuid")"
+expect "move target: no identity, no match" "refuse it holds data of its own (etc)" "$(move_target etc '' "$uuid")"
+
+ign() { if naming_ignored "$@"; then echo ignored; else echo used; fi; }
+expect "naming: the naming of a failed move is ignored" ignored "$(ign failed /dev/disk/by-id/a /dev/disk/by-id/a)"
+expect "naming: another naming is a new one" used "$(ign failed /dev/disk/by-id/a /dev/disk/by-id/b)"
+expect "naming: after the naming was withdrawn, the same one is new" used "$(ign failed '' /dev/disk/by-id/a)"
+expect "naming: only after a failed move" used "$(ign verified /dev/disk/by-id/a /dev/disk/by-id/a)"
+
+due() { if cleanup_due "$@"; then echo due; else echo kept; fi; }
+expect "cleanup: kept within the period" kept "$(due 1000000 7 $((1000000 + 7 * 86400 - 1)))"
+expect "cleanup: due when the period is over" due "$(due 1000000 7 $((1000000 + 7 * 86400)))"
+expect "cleanup: due later" due "$(due 1000000 1 2000000)"
+expect "cleanup: no verification time is never due" kept "$(due '' 7 2000000)"
+expect "cleanup: a damaged time is never due" kept "$(due 'x' 7 2000000)"
+expect "cleanup: no period is never due" kept "$(due 1000000 '' 2000000)"
+
+t=$(mktemp -d "$work/top.XXXXXX")
+expect "top entries: lost+found alone counts as empty" "" "$(mkdir "$t/lost+found"; top_entries "$t")"
+expect "top entries: everything else, sorted" $'etc\nrelease' "$(touch "$t/release"; mkdir "$t/etc"; top_entries "$t")"
+a=$(mktemp -d "$work/tree.XXXXXX"); b=$(mktemp -d "$work/tree.XXXXXX")
+mkdir -p "$a/_data/sub"; printf 'x' >"$a/_data/sub/f"; ln -s target "$a/_data/l"; chmod 0750 "$a/_data"
+cp -a "$a/." "$b/"
+expect "tree listing: a copy lists the same" same "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+chmod 0700 "$b/_data"
+expect "tree listing: another mode differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+chmod 0750 "$b/_data"; printf 'xy' >"$b/_data/sub/f"
+expect "tree listing: another size differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+printf 'x' >"$b/_data/sub/f"; rm "$b/_data/l"; ln -s elsewhere "$b/_data/l"
+expect "tree listing: another link target differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+
+# The move record: written whole and durably, one line per value.
+records=$work/records data_disk_move=$work/records/move.env
+mkdir -p "$records"
+move_write --new STATE=copying UUID="$uuid" NAMED=/dev/disk/by-id/a STARTED=2026-11-14T10:00:00Z
+expect "record: a field is read back" copying "$(move_get STATE)"
+expect "record: no file, no field" "" "$(data_disk_move_field STATE "$work/none.env")"
+move_advance copied MOVED=2026-11-14T10:05:00Z
+expect "record: advanced, other fields kept" "moved|$uuid|2026-11-14T10:00:00Z|2026-11-14T10:05:00Z" \
+    "$(move_get STATE)|$(move_get UUID)|$(move_get STARTED)|$(move_get MOVED)"
+move_advance cleaned 2>/dev/null; rc=$?
+expect "record: a step that cannot happen is refused, the record kept" "1|moved" "$rc|$(move_get STATE)"
+move_advance unhealthy REASON=$'container arangodb is unhealthy\nsecond line'
+expect "record: a reason stays on one line" "container arangodb is unhealthy?second line" "$(move_get REASON)"
+expect "record: one line per field, comments aside" 6 "$(grep -vc '^#' "$data_disk_move")"
+move_write IGNORED_NAME=
+expect "record: an emptied field is dropped" "" "$(grep '^IGNORED_NAME' "$data_disk_move")"
+move_write --new STATE=copying
+expect "record: a new move starts from an empty record" "copying||" "$(move_get STATE)|$(move_get UUID)|$(move_get REASON)"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

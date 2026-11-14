@@ -12,8 +12,9 @@
 # skipped.
 #
 # It also names the locations of the data disk (data_disk_places below),
-# which the disk service binds and every writer checks, and holds the release
-# comparison and the release marker of the data disk (release_version below).
+# which the disk service binds and every writer checks, the record of a move
+# onto the data disk (data_disk_move), and holds the release comparison and
+# the release marker of the data disk (release_version below).
 declare -A cfg
 cfg_invalid=()
 load() {
@@ -87,6 +88,35 @@ data_disk_placed() {
         read -r dir path <<<"$place"
         bound_from "$dir" "$path" || return 1
     done
+}
+
+# data_disk_present: whether the device the data disk is mounted from still
+# answers: a direct read of its first block, past the page cache. A disk
+# pulled or failed while mounted keeps its mount, so the mount alone does not
+# tell (spec/distribution-requirements/ E11, E12: a missing disk is no failed
+# start).
+data_disk_present() {
+    local src
+    mountpoint -q -- "$data_disk_mount" || return 1
+    src=$(findmnt -rnvo SOURCE -M "$data_disk_mount" 2>/dev/null | tail -n1)
+    [ -b "$src" ] || return 1
+    dd if="$src" of=/dev/null bs=4096 count=1 iflag=direct status=none 2>/dev/null
+}
+
+# The move of an appliance's data from the system disk onto a newly named
+# data disk (spec/distribution-requirements/ E11), recorded on the system disk
+# by the disk service (/usr/libexec/kamerplanter/disks, which explains the
+# states). One KEY=VALUE per line; STATE is copying, moved, verified,
+# cleaned, falling-back or failed. The update tool reads it to check the
+# services after a move and to delete the system copy once it may.
+data_disk_move=/var/lib/kamerplanter/disks/move.env
+
+# data_disk_move_field KEY [FILE]: the value of KEY in the move record; empty
+# when there is none.
+data_disk_move_field() {
+    local file=${2:-$data_disk_move}
+    [ -f "$file" ] || return 0
+    sed -n "s/^$1=//p" -- "$file" | tail -n1
 }
 
 # Releases (spec/update-and-rollback/ A4, A7). One comparison serves the

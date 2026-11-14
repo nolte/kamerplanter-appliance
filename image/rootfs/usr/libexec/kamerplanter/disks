@@ -6,7 +6,14 @@
 #                        before anything reads the configuration or the data
 #   disks start backup   run by kamerplanter-backup-disk.service
 #   disks stop ROLE      run when the unit stops: unbinds, unmounts, closes
-#   disks status         what is set up, and where it is mounted
+#   disks status         what is set up, where it is mounted, and how far a
+#                        move from the system disk has come
+#
+# Run by the update tool (/usr/bin/kamerplanter-update), not by the user:
+#   disks move healthy | unhealthy REASON | missing REASON
+#                        the result of the health check after a move
+#   disks cleanup DAYS   deletes the system disk's copy of moved data, DAYS
+#                        days after the services passed that check
 #
 # Naming. A disk is named by a /dev/disk/by-id/ or /dev/disk/by-uuid/ path in
 # the user file (DATA_DISK, BACKUP_DISK) or as the system credential
@@ -55,7 +62,9 @@
 #               only to retire the disk.
 #   keys/       the stored keys (ROLE.key) and the provisioned key files
 #   forced      the paths a forced format was used for, one per line
-#   log.jsonl   one JSON object per set-up
+#   move.env    the move of the system disk's data onto the data disk
+#   move-targets  the UUIDs of the disks moves went to, one per line
+#   log.jsonl   one JSON object per set-up, and per step of a move
 #
 # Every boot. A disk that is set up is found by its label and accepted only
 # under the recorded UUID; it is checked (e2fsck -p) and mounted nosuid,
@@ -79,6 +88,45 @@
 # unmounted again, so configure finds no location to write to. At its top the
 # disk also carries the release marker "release", which only the update tool
 # reads and writes (/usr/bin/kamerplanter-update, E13); it is bound nowhere.
+#
+# Moving (E11). A data disk named on an appliance whose system disk holds
+# Kamerplanter data already (secrets, pins, database files; system_data) is
+# set up as above, then that data is moved onto it before any service starts:
+# /etc/kamerplanter, the pins and both volumes are copied onto the disk's
+# locations, compared, and synced, and only then bound. The release marker is
+# not copied (the first healthy start marks the disk), nor are the records in
+# /var/lib/kamerplanter/disks/ or the update state. The disk receiving the
+# data must be blank, carry nothing but lost+found, or be the disk of an
+# earlier move of this appliance; a disk holding data of its own is refused,
+# since one of the two would be lost. The move is recorded in move.env
+# (data_disk_move in /usr/lib/kamerplanter/env.sh); its STATE is
+#   copying       the copy is being made. The system disk is in use, and the
+#                 disk's locations are never bound in this state: a start
+#                 that finds it (a reset during the copy) empties them and
+#                 copies again from the unchanged system copy. move.env is
+#                 written before ROLE.env, so no reset leaves a disk set up
+#                 without it.
+#   moved         the copy is complete and synced; this record is the point
+#                 from which the disk is in use. The pre-move files stay on
+#                 the system disk, underneath the binds, as the copy to
+#                 return to; kamerplanter-update-health.service checks the
+#                 services (kamerplanter-update health).
+#   verified      the services passed that check from the disk.
+#   cleaned       UPDATE_BACKUP_KEEP_DAYS after that, the system disk's copy
+#                 was deleted: underneath the binds, and /etc/kamerplanter of
+#                 every installed deployment (disks cleanup, run daily by
+#                 kamerplanter-update-fetch.service).
+#   falling-back  the services failed the check from the disk; the check
+#                 restarts this unit, which returns to the system copy.
+#   failed        the services run from the system copy again: the disk is
+#                 no longer set up (ROLE.env deleted, its stored key too),
+#                 and the naming in NAMED is not used again until it is named
+#                 anew: a start without any naming lifts that, and a later
+#                 naming moves again from the start. A copy that cannot be
+#                 made (too little space, a write error) ends here too.
+# A data disk that goes missing during or after the move is no failed start:
+# the services stay stopped as for any missing disk (E12), and the move goes
+# on once it is back. Every step is recorded in log.jsonl (events move-*).
 set -euo pipefail
 umask 077
 
@@ -278,9 +326,8 @@ layout_problem() {
 # system_data ROOT: what the system disk under ROOT (/ on the appliance)
 # holds of the state that belongs on the data disk, one line each: the
 # secrets, pins, or data in a database volume. The user file is not counted:
-# the image ships it. Moving such state onto a data disk
-# (spec/distribution-requirements/ E11) is not part of this release, so a
-# named disk is not set up while the system disk holds any.
+# the image ships it. When it holds any, a newly named data disk receives it
+# (spec/distribution-requirements/ E11, "Moving" above).
 system_data() {
     local root=${1%/} place dir path
     for place in "${data_disk_places[@]}"; do
@@ -307,6 +354,66 @@ window_stale() {
     fi
     rm -rf -- "$tmp"
     return "$rc"
+}
+
+# move_transition STATE EVENT: the state of the move record (move.env) after
+# EVENT, from STATE ("none" without a record); prints nothing when EVENT
+# cannot happen in STATE. Events: start (a move begins, also over an
+# interrupted or a failed one), copied, abandon (the copy cannot be made, or
+# the naming was withdrawn before it was), healthy, unhealthy, returned (back
+# on the system copy), cleaned (the system copy deleted).
+move_transition() {
+    case $1/$2 in
+        none/start | copying/start | failed/start) echo copying ;;
+        copying/copied) echo moved ;;
+        copying/abandon) echo failed ;;
+        moved/healthy) echo verified ;;
+        moved/unhealthy) echo falling-back ;;
+        falling-back/returned) echo failed ;;
+        verified/cleaned) echo cleaned ;;
+    esac
+}
+
+# move_target ENTRIES UUID KNOWN: whether a named disk that is adopted, not
+# formatted, may receive the system disk's data. ENTRIES are the names at the
+# top of its file system other than lost+found, one per line, UUID its
+# identity, and KNOWN the identities of the disks earlier moves of this
+# appliance went to (move-targets), one per line: what such a disk holds is a
+# copy of this appliance's own data. Prints ok, or "refuse REASON".
+move_target() {
+    if [ -z "$1" ]; then echo ok; return; fi
+    if [ -n "$2" ] && grep -Fqxi -- "$2" <<<"$3"; then echo ok; return; fi
+    local list=${1//$'\n'/, }
+    echo "refuse it holds data of its own ($(shown "$list"))"
+}
+
+# naming_ignored STATE IGNORED NAME: whether the naming NAME is not used,
+# since a move onto the disk it names failed (STATE failed, IGNORED the naming
+# then) and it has not been named anew since.
+naming_ignored() {
+    [ "$1" = failed ] && [ -n "$2" ] && [ "$2" = "$3" ]
+}
+
+# cleanup_due VERIFIED DAYS NOW: whether the system disk's copy of moved data
+# may be deleted at NOW: DAYS days (UPDATE_BACKUP_KEEP_DAYS) after VERIFIED,
+# the time the services passed the health check from the disk; all in epoch
+# seconds. A time that is not a number is never due.
+cleanup_due() {
+    [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || return 1
+    [ "$3" -ge $(($1 + $2 * 86400)) ]
+}
+
+# top_entries ROOT: the names at the top of the file system mounted at ROOT,
+# other than lost+found, one per line.
+top_entries() {
+    find "$1" -mindepth 1 -maxdepth 1 ! -name lost+found -printf '%f\n' | sort
+}
+
+# tree_listing DIR: type, mode, owner and, for files and links, size and
+# target of everything below DIR, one line each, sorted; the copy of a move is
+# compared by it.
+tree_listing() {
+    (cd "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p\n' && find . -mindepth 1 \( -type f -o -type l \) -printf '%y %s %p -> %l\n') | LC_ALL=C sort
 }
 
 # ---------------------------------------------------------------------------
@@ -812,17 +919,20 @@ find_and_mount() {
 
 # A named disk that is not set up yet: adopt, format, or refuse it.
 set_up() {
-    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held
     [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
     disk_path_ok "$name" ||
         die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $name" \
             "name the disk by one of those paths (ls -l /dev/disk/by-id/), then run: systemctl restart kamerplanter.target"
-    if [ "$role" = data ]; then
-        local held
-        held=$(system_data /)
-        [ -z "$held" ] ||
-            die "$name is not set up as data disk: the system disk holds Kamerplanter data already (${held//$'\n'/, }), which this release does not move onto a data disk" \
-                "remove the naming ($key or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
+    # E11: the system disk holds data already, which is moved onto the disk.
+    held=
+    if [ "$role" = data ]; then held=$(system_data /); fi
+    if [ -n "$held" ]; then
+        local running
+        running=$(services_running)
+        [ -z "$running" ] ||
+            die "$name is not set up as data disk: the data of the system disk is moved onto it only while the services are stopped, and ${running% } run" \
+                "run: systemctl restart $unit (it stops the services, moves the data, and starts them again), or reboot"
     fi
     deadline=$((SECONDS + wait_seconds))
     udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
@@ -879,6 +989,15 @@ set_up() {
                 [ "$fs_type" = ext4 ] && [ "$fs_label" = "$label" ] ||
                     die "$name ($dev) is not used as $role disk: its LUKS2 container holds ${fs_type:-an unknown signature}${fs_label:+ labelled $(shown "$fs_label")}, not ext4 labelled $label"
             fi
+            if [ -n "$held" ]; then
+                local fs=$dev entries verdict
+                if [ "$action" = unlock ]; then fs=$mapper; fi
+                entries=$(target_entries "$fs") || die "$name ($dev) could not be looked into; nothing is moved onto it"
+                verdict=$(move_target "$entries" "$uuid" "$(cat "$records/move-targets" 2>/dev/null || true)")
+                [ "$verdict" = ok ] ||
+                    die "$name ($dev) is not used as data disk: the system disk holds Kamerplanter data (${held//$'\n'/, }), and ${verdict#refuse }; moving one onto the other would lose data" \
+                        "name a blank disk to move the data onto, or remove the naming ($key or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
+            fi
             ;;
         format | wipe)
             if [ ${#supplied[@]} -gt 1 ] && ! cmp -s -- "${supplied[0]}" "${supplied[1]}"; then
@@ -929,6 +1048,9 @@ set_up() {
         *) die "no decision for $name ($dev): $action" ;;
     esac
     install -d -m 0700 "$records"
+    # Recorded before the disk itself, so that no start finds the disk set
+    # up without the move that is to fill it.
+    if [ -n "$held" ]; then move_begin "$uuid"; fi
     {
         echo "# The $role disk of this appliance, set up by /usr/libexec/kamerplanter/disks."
         echo "# Delete this file only to retire the disk."
@@ -1096,6 +1218,437 @@ refresh_window() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Moving the system disk's data onto the data disk (E11; "Moving" above).
+
+self=/usr/libexec/kamerplanter/disks
+# The fields of move.env, in the order they are written.
+move_fields=(STATE UUID NAMED STARTED MOVED VERIFIED CLEANED FAILED REASON IGNORED_NAME)
+# The Kamerplanter containers, which must be stopped while data is moved.
+service_units=(arangodb valkey backend celery-worker celery-beat frontend)
+# The installed deployments of the system image, each with its own /etc.
+deployments=/sysroot/ostree/deploy
+
+move_get() { data_disk_move_field "$1"; }
+
+# move_write [--new] KEY=VALUE...: replaces move.env durably with its fields
+# changed as given; --new starts from an empty record. A value is kept on one
+# line, with every character that is not printable replaced.
+move_write() {
+    local -A m=()
+    local f arg
+    if [ "${1-}" = --new ]; then
+        shift
+    else
+        for f in "${move_fields[@]}"; do m[$f]=$(move_get "$f"); done
+    fi
+    for arg in "$@"; do m[${arg%%=*}]=$(shown "${arg#*=}"); done
+    install -d -m 0700 "$records"
+    {
+        echo "# The move of the data from the system disk onto the data disk,"
+        echo "# kept by /usr/libexec/kamerplanter/disks; see its comments."
+        for f in "${move_fields[@]}"; do
+            if [ -n "${m[$f]-}" ]; then echo "$f=${m[$f]}"; fi
+        done
+    } | replace "$data_disk_move"
+}
+
+# move_advance EVENT KEY=VALUE...: the move record after EVENT
+# (move_transition), with the fields given; fails when EVENT cannot happen in
+# the state recorded.
+move_advance() {
+    local state next
+    state=$(move_get STATE)
+    next=$(move_transition "${state:-none}" "$1")
+    if [ -z "$next" ]; then
+        echo "the move cannot go from ${state:-none} on $1" >&2
+        return 1
+    fi
+    shift
+    move_write STATE="$next" "$@"
+}
+
+now() { date -u +%FT%TZ; }
+
+# move_begin UUID: records that the system disk's data is moved onto the disk
+# with UUID, before the disk is recorded as set up (ROLE.env).
+move_begin() {
+    local state
+    state=$(move_get STATE)
+    [ -n "$(move_transition "${state:-none}" start)" ] ||
+        die "a move onto a data disk is recorded as $state already ($data_disk_move), but no data disk is set up" \
+            "restore $record from a backup, or delete $data_disk_move to start over, then run: systemctl restart kamerplanter.target"
+    if ! grep -Fqxi -- "$1" "$records/move-targets" 2>/dev/null; then
+        { cat "$records/move-targets" 2>/dev/null || true; echo "$1"; } | replace "$records/move-targets"
+    fi
+    move_write --new STATE=copying UUID="$1" NAMED="$name" STARTED="$(now)"
+    log_event move-started "the system disk holds Kamerplanter data (${held//$'\n'/, }); it is copied onto $name before any service starts"
+}
+
+# target_entries DEVICE: top_entries of the ext4 file system on DEVICE,
+# mounted read-only for the look.
+target_entries() {
+    local dir=/run/kamerplanter-probe-$role rc=0
+    install -d -m 0700 "$dir"
+    mount -t ext4 -o ro,nosuid,nodev,noexec "$1" "$dir" || { rmdir "$dir"; return 1; }
+    top_entries "$dir" || rc=1
+    umount "$dir" || rc=1
+    rmdir "$dir" || true
+    return "$rc"
+}
+
+# services_running: the Kamerplanter containers that run; none at boot, since
+# all of them are ordered after this unit.
+services_running() {
+    [ -d /run/systemd/system ] || return 0
+    local u
+    for u in "${service_units[@]}"; do
+        if systemctl is-active -q "kamerplanter-$u.service" 2>/dev/null; then printf 'kamerplanter-%s ' "$u"; fi
+    done
+}
+
+# move_bytes: the bytes the move copies, as du counts them on the system disk.
+move_bytes() {
+    local place dir path total=0 n
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        [ -d "$path" ] || continue
+        n=$(du -sbx -- "$path" | cut -f1) || return 1
+        total=$((total + n))
+    done
+    echo "$total"
+}
+
+# copy_place DIRECTORY PATH: copies the system disk's PATH to DIRECTORY on the
+# disk: a volume whole, with owners, modes, links, extended attributes and
+# times; of etc and pinned the regular files only, which is all they hold.
+copy_place() {
+    local dir=$1 path=$2
+    [ -d "$path" ] || return 0
+    case $dir in
+        volumes/*)
+            install -d -m 0700 "$mnt/volumes" || return 1
+            cp -a -- "$path" "$mnt/$dir" || return 1
+            ;;
+        *)
+            install -d -m 0700 "$mnt/$dir" || return 1
+            find "$path" -mindepth 1 -maxdepth 1 ! -type f -printf "$path/%f is not a regular file and is not moved\n" >&2
+            find "$path" -mindepth 1 -maxdepth 1 -type f -exec cp -p -t "$mnt/$dir" -- {} + || return 1
+            ;;
+    esac
+}
+
+# same_place DIRECTORY PATH: whether DIRECTORY on the disk holds what PATH
+# holds after copy_place: a volume the same tree (tree_listing), etc and
+# pinned every regular file; and every file copied the same bytes.
+same_place() {
+    local dir=$1 path=$2 f depth=(-maxdepth 1)
+    [ -d "$path" ] || return 0
+    case $dir in
+        volumes/*)
+            [ "$(tree_listing "$path")" = "$(tree_listing "$mnt/$dir")" ] || return 1
+            depth=()
+            ;;
+    esac
+    while IFS= read -r -d '' f; do
+        cmp -s -- "$path/$f" "$mnt/$dir/$f" || return 1
+    done < <(cd "$path" && find . -mindepth 1 "${depth[@]}" -type f -print0)
+}
+
+# move_failed REASON: a copy that could not be made. A disk that does not
+# answer any more is missing (E12): the services stay stopped, and the copy
+# starts over once it is back. Otherwise the move is abandoned.
+move_failed() {
+    if ! data_disk_present; then
+        undo
+        die "data disk $label is missing: it stopped answering while the data was copied onto it ($1); the copy on the system disk is unchanged, and the services stay stopped" \
+            "attach it again, then run: systemctl restart kamerplanter.target (the copy starts over)"
+    fi
+    abandon_move "$1"
+}
+
+# abandon_move REASON: the move ends without the disk: it is unmounted and
+# closed, no longer set up (its record and stored key deleted, E14), and the
+# services start from the unchanged system copy.
+abandon_move() {
+    local reason=$1 named
+    named=$(move_get NAMED)
+    bound=()
+    if mountpoint -q "$mnt"; then umount "$mnt" || die "the $label disk could not be unmounted after its move failed ($reason)"; fi
+    mounted_now=0
+    if [ -b "$mapper" ]; then cryptsetup close "$mapper_name" || die "$mapper could not be closed after the move failed ($reason)"; fi
+    opened_now=0
+    rm -f -- "$record"
+    sync "$records"
+    move_advance abandon FAILED="$(now)" REASON="$reason" IGNORED_NAME="$named"
+    log_event move-failed "the move onto ${named:-the data disk} stopped: $reason; the data disk is not set up, and the services start from the copy on the system disk, which is unchanged"
+    forget_key
+    report "the data stays on the system disk: the move onto the data disk ${named:-} failed ($reason)" \
+        "free or name another disk; the same naming is used again only once it was removed for a start (see: /usr/libexec/kamerplanter/disks status)"
+}
+
+# move_in: the copy of a move (state copying), after the disk is mounted and
+# before anything is bound. Empties the disk's locations and the release
+# marker, then copies, compares and syncs; records the move as moved. Fails
+# when the move is abandoned instead (abandon_move): then nothing is placed.
+move_in() {
+    local place dir path running entry need free
+    running=$(services_running)
+    if [ -n "$running" ]; then
+        undo
+        die "the data cannot be moved onto the $label disk while ${running% } run" \
+            "run: systemctl restart $unit (it stops the services, moves the data, and starts them again), or reboot"
+    fi
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        if mountpoint -q "$path"; then
+            undo
+            die "$path is a mount point; the copy on the system disk cannot be read there and is not moved"
+        fi
+    done
+    # A copy left by a reset, or an earlier move onto this disk, starts over:
+    # everything at the top of the disk but lost+found goes, the release
+    # marker too.
+    if [ -n "$(top_entries "$mnt")" ]; then
+        log_event move-restarted "the copy left on the disk by an interrupted or an earlier move is removed; the copy starts over from the system disk"
+    fi
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        rm -rf -- "${mnt:?}/$entry" || { move_failed "the copy left on the disk could not be removed"; return 1; }
+    done < <(top_entries "$mnt")
+    sync -f "$mnt" || { move_failed "the disk could not be synced"; return 1; }
+    need=$(move_bytes) || { undo; die "the size of the data on the system disk could not be determined; nothing is moved"; }
+    # Room for the copy, and 10 % and 32 MiB more for the databases to go on.
+    need=$((need * 11 / 10 + 32 * 1024 * 1024))
+    free=$(($(stat -f -c '%a * %S' "$mnt")))
+    if [ "$free" -lt "$need" ]; then
+        abandon_move "the $label disk has $free bytes free, $need are needed"
+        return 1
+    fi
+    echo "copying the data of the system disk onto the $label disk"
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        copy_place "$dir" "$path" || { move_failed "$path could not be copied"; return 1; }
+    done
+    sync -f "$mnt" || { move_failed "the copy could not be synced"; return 1; }
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        same_place "$dir" "$path" || { move_failed "the copy of $path differs from the original"; return 1; }
+    done
+    move_advance copied MOVED="$(now)"
+    log_event move-copied "the data of the system disk is on the disk, compared and synced; the services start from it, and the copy on the system disk is kept until they passed the health check and UPDATE_BACKUP_KEEP_DAYS have passed"
+    first_use=1
+}
+
+# fall_back: the services failed the health check from the disk after a move
+# (state falling-back): the disk is unbound, unmounted and closed if it is
+# not yet, and no longer set up; its stored key is deleted (forget_key in
+# cmd_start, E14). The services then start from the copy on the system disk,
+# which the binds kept unchanged.
+fall_back() {
+    local i dir path reason named
+    for ((i = ${#data_disk_places[@]} - 1; i >= 0; i--)); do
+        read -r dir path <<<"${data_disk_places[i]}"
+        while bound_from "$dir" "$path"; do
+            umount "$path" || die "$path could not be unbound to return to the copy on the system disk"
+        done
+    done
+    if mountpoint -q "$mnt"; then umount "$mnt" || die "$mnt could not be unmounted to return to the copy on the system disk"; fi
+    if [ -b "$mapper" ]; then cryptsetup close "$mapper_name" || die "$mapper could not be closed to return to the copy on the system disk"; fi
+    reason=$(move_get REASON)
+    named=$(move_get NAMED)
+    rm -f -- "$record"
+    sync "$records"
+    move_advance returned FAILED="$(now)" IGNORED_NAME="$named"
+    log_event move-fallback "returned to the copy on the system disk, since the services failed the health check from the data disk: ${reason:-no reason recorded}; the data disk ${named:-} is not set up any more, and is not used again until it is named anew"
+}
+
+# ignore_naming: a start with the naming of a move that failed: the disk is
+# not used, the services start from the system disk.
+ignore_naming() {
+    local why
+    why=$(move_get REASON)
+    echo "$name is not used as data disk: the move onto it failed on $(move_get FAILED) (${why:-no reason recorded}); the data stays on the system disk" >&2
+    report "data disk $name is not used: the move onto it failed (${why:-no reason recorded}); the services run from the system disk" \
+        "to move onto it again, remove the naming ($key or the credential $cred) and reboot, then name it again"
+}
+
+# lift_naming: a start without any naming after a failed move: the naming of
+# that move counts as withdrawn, so naming a disk again moves from the start.
+# A move recorded as begun on a disk that never got set up ends.
+lift_naming() {
+    case $(move_get STATE) in
+        failed)
+            [ -n "$(move_get IGNORED_NAME)" ] || return 0
+            move_write IGNORED_NAME=
+            log_event move-naming-withdrawn "a disk named again is moved onto from the start"
+            ;;
+        copying)
+            move_advance abandon FAILED="$(now)" REASON="the naming was withdrawn before the copy began"
+            log_event move-failed "the naming was withdrawn before the copy began; the data stays on the system disk"
+            ;;
+    esac
+}
+
+# request_check: after a move, the health check of the services from the disk
+# (kamerplanter-update health), also when this unit runs again at runtime,
+# where nothing else starts it. At boot it is queued already.
+request_check() {
+    [ -d /run/systemd/system ] || return 0
+    systemctl start --no-block kamerplanter-update-health.service ||
+        echo "the health check after the move could not be started; it runs at the next boot" >&2
+}
+
+# cmd_move EVENT [REASON]: the result of the health check after a move,
+# reported by kamerplanter-update health. healthy: the move is verified.
+# unhealthy: the services return to the system copy, by a restart of this
+# unit (fall_back), which stops and starts the services that require it.
+# missing: the disk does not answer, which is no failed start (E11, E12); the
+# restart finds it missing and keeps the services stopped until it is back.
+cmd_move() {
+    role_vars data
+    exec 9>"$lock"
+    flock 9
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    local event=${1-} reason=${2:-no reason given}
+    if [ "$(move_get STATE)" != moved ]; then
+        echo "no move awaits its health check"
+        return 0
+    fi
+    case $event in
+        healthy)
+            move_advance healthy VERIFIED="$(now)"
+            log_event move-healthy "the services passed the health check from the data disk; the copy on the system disk is deleted once UPDATE_BACKUP_KEEP_DAYS have passed"
+            ;;
+        unhealthy)
+            move_advance unhealthy REASON="$reason"
+            log_event move-unhealthy "the services failed the health check from the data disk: $reason; returning to the copy on the system disk"
+            restart_unit
+            ;;
+        missing)
+            log_event move-disk-missing "the data disk stopped answering before the services passed the health check ($reason); that is no failed start: no return to the system copy, the services stay stopped until the disk is back"
+            restart_unit
+            ;;
+        *) usage ;;
+    esac
+}
+
+restart_unit() {
+    [ -d /run/systemd/system ] || return 0
+    systemctl restart --no-block "$unit" || echo "$unit could not be restarted; run: systemctl restart $unit kamerplanter.target" >&2
+}
+
+# cmd_cleanup DAYS: once the services passed the health check from the disk
+# DAYS days ago (UPDATE_BACKUP_KEEP_DAYS, passed by the update tool), deletes
+# the copy of the moved data on the system disk: underneath the binds, and
+# /etc/kamerplanter in every installed deployment, then records it. Only with
+# the disk in place and answering: a missing disk keeps the copy. Run in a
+# mount namespace of its own (clean_underneath), where the binds are taken
+# away so the system disk shows; the system is not touched by that.
+cmd_cleanup() {
+    role_vars data
+    local days=${1-} verified epoch out rc=0
+    [[ $days =~ ^[1-9][0-9]*$ ]] || usage
+    exec 9>"$lock"
+    flock -w 60 9 || { echo "the disk service is busy; the copy on the system disk is deleted at a later run"; return 0; }
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    [ "$(move_get STATE)" = verified ] || return 0
+    verified=$(move_get VERIFIED)
+    epoch=$(date -d "$verified" +%s 2>/dev/null) || epoch=
+    if ! cleanup_due "$epoch" "$days" "$(date +%s)"; then
+        echo "the copy on the system disk of the moved data is kept until ${epoch:+$(date -u -d "@$((epoch + days * 86400))" +%FT%TZ)}"
+        return 0
+    fi
+    if ! data_disk_placed || ! data_disk_present; then
+        echo "the data disk $label is not in place; the copy on the system disk of the moved data is kept" >&2
+        return 0
+    fi
+    out=$(unshare --mount --propagation private -- "$self" clean-underneath 2>&1) || rc=$?
+    if [ "$rc" != 0 ]; then
+        log_event move-cleanup-error "the copy on the system disk could not be deleted completely: ${out##*$'\n'}; tried again at the next run"
+        return 1
+    fi
+    move_advance cleaned CLEANED="$(now)"
+    log_event move-cleaned "deleted the copy of the moved data on the system disk, $days days after the services passed the health check from the data disk: ${out//$'\n'/, }"
+}
+
+# clean_underneath: in a mount namespace of its own (cmd_cleanup). Takes the
+# binds away there, checks that each path is on the system disk then, and
+# empties it; then empties /etc/kamerplanter in every installed deployment,
+# with /sysroot writable in this namespace only (it is read-only on the
+# system). Prints what it emptied, or nothing was left.
+cmd_clean_underneath() {
+    role_vars data
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    if [ "$(move_get STATE)" != verified ] || ! mountpoint -q "$mnt"; then
+        echo "no verified move with the disk mounted" >&2
+        exit 1
+    fi
+    local place dir path d emptied=() left
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        while mountpoint -q "$path"; do umount "$path" || { echo "$path could not be unbound here" >&2; exit 1; }; done
+        [ -d "$path" ] || continue
+        if [ "$(stat -c %d "$path")" = "$(stat -c %d "$mnt")" ]; then echo "$path is on the data disk still" >&2; exit 1; fi
+        if [ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+            empty_dir "$path" || { echo "$path could not be emptied" >&2; exit 1; }
+            emptied+=("$path")
+        fi
+    done
+    if [ -d "$deployments" ]; then
+        if mountpoint -q /sysroot && [[ ,$(findmnt -rno OPTIONS -M /sysroot | tail -n1), == *,ro,* ]]; then
+            mount -o remount,rw /sysroot 2>/dev/null || mount -o remount,bind,rw /sysroot ||
+                { echo "/sysroot could not be made writable" >&2; exit 1; }
+        fi
+        for d in "$deployments"/*/deploy/*/etc/kamerplanter; do
+            [ -d "$d" ] && [ ! -L "$d" ] || continue
+            if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+                empty_dir "$d" || { echo "$d could not be emptied" >&2; exit 1; }
+                emptied+=("$d")
+            fi
+        done
+    fi
+    sync
+    left=$(for d in "${emptied[@]}"; do find "$d" -mindepth 1 -maxdepth 1 -print -quit; done)
+    if [ -n "$left" ]; then echo "$left is left" >&2; exit 1; fi
+    if [ ${#emptied[@]} -eq 0 ]; then echo "nothing was left of it"; else printf '%s\n' "${emptied[@]}"; fi
+}
+
+# empty_dir DIR: deletes everything in DIR, DIR stays (a bind is made onto
+# it); the files directly in it are overwritten first where the file system
+# allows (the secrets, the pins).
+empty_dir() {
+    find "$1" -mindepth 1 -maxdepth 1 -type f -exec shred -u -- {} + 2>/dev/null || true
+    find "$1" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || return 1
+}
+
+# move_status: the lines of `disks status` about a move.
+move_status() {
+    local state keep due verified
+    state=$(move_get STATE)
+    case $state in
+        copying) echo "  move from the system disk: copying since $(move_get STARTED); until it is complete the system disk is in use" ;;
+        moved) echo "  moved from the system disk on $(move_get MOVED); the health check from the disk is pending, the copy on the system disk is kept" ;;
+        verified)
+            load "$defaults" "$user"
+            keep=$(get UPDATE_BACKUP_KEEP_DAYS)
+            [[ $keep =~ ^[1-9][0-9]*$ ]] || keep=7
+            verified=$(move_get VERIFIED)
+            due=$(date -u -d "@$(($(date -d "$verified" +%s 2>/dev/null || echo 0) + keep * 86400))" +%FT%TZ)
+            echo "  moved from the system disk on $(move_get MOVED), healthy from the disk since $verified; the copy on the system disk is deleted after $due"
+            ;;
+        cleaned) echo "  moved from the system disk on $(move_get MOVED), healthy from the disk since $(move_get VERIFIED); the copy on the system disk was deleted on $(move_get CLEANED)" ;;
+        falling-back) echo "  the services failed the health check from the disk ($(move_get REASON)); returning to the copy on the system disk" ;;
+        failed)
+            echo "  a move onto $(move_get NAMED) failed on $(move_get FAILED): $(move_get REASON); the data is on the system disk"
+            if [ -n "$(move_get IGNORED_NAME)" ]; then echo "  $(move_get IGNORED_NAME) is not used until it is named anew"; fi
+            ;;
+    esac
+}
+
 cmd_start() {
     role_vars "${1-}" || usage
     exec 9>"$lock"
@@ -1104,6 +1657,8 @@ cmd_start() {
     . /usr/lib/kamerplanter/env.sh
     naming
     first_use=0 mounted_now=0 opened_now=0 bound=() new_dirs=() created=() used_key=
+    # E11: the services failed the health check after a move.
+    if [ "$role" = data ] && [ "$(move_get STATE)" = falling-back ]; then fall_back; fi
     # E14: a stored key goes with the encrypted disk it unlocks.
     if [ ! -e "$record" ] || ! encrypted "$record"; then forget_key; fi
     supplied_keys
@@ -1111,18 +1666,27 @@ cmd_start() {
         if [ -n "$conflict" ]; then echo "$conflict; both are ignored while a $role disk is set up" >&2; fi
         find_and_mount
     elif [ -n "$name" ]; then
+        if [ "$role" = data ] && naming_ignored "$(move_get STATE)" "$(move_get IGNORED_NAME)" "$name"; then
+            ignore_naming
+            return 0
+        fi
         set_up
     else
         if [ ${#supplied[@]} -gt 0 ]; then
             echo "a key is supplied for the $role disk ($(key_origin "${supplied[0]}")), but no $role disk is named; it is not used" >&2
         fi
+        if [ "$role" = data ]; then lift_naming; fi
         clear_report
         echo "no $role disk is set up or named"
         return 0
     fi
     if [ "$role" = data ]; then
+        # The disk's locations are bound only once a move into them is
+        # complete (E11).
+        if [ "$(move_get STATE)" = copying ]; then move_in || return 0; fi
         place
         refresh_window
+        if [ "$(move_get STATE)" = moved ]; then request_check; fi
     fi
 }
 
@@ -1171,6 +1735,7 @@ cmd_status() {
         role_vars "$r"
         if [ ! -e "$record" ]; then
             echo "$role disk: not set up"
+            if [ "$role" = data ]; then move_status; fi
             continue
         fi
         load "$record"
@@ -1192,6 +1757,7 @@ cmd_status() {
             fi
         fi
         [ "$role" = data ] || continue
+        move_status
         # Kept by the update tool (E13); see kamerplanter-update status.
         if mountpoint -q "$mnt"; then
             local release
@@ -1210,13 +1776,16 @@ cmd_status() {
     done
 }
 
-usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 main() {
     case ${1-} in
         start) shift; cmd_start "$@" ;;
         stop) shift; cmd_stop "$@" ;;
         status) cmd_status ;;
+        move) shift; cmd_move "$@" ;;
+        cleanup) shift; cmd_cleanup "$@" ;;
+        clean-underneath) cmd_clean_underneath ;;
         *) usage ;;
     esac
 }

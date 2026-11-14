@@ -19,6 +19,17 @@ Documentation=file:///usr/libexec/kamerplanter/disks
 # than the one the generator read at boot, it runs `systemctl daemon-reload`
 # so the maintenance window follows it.
 #
+# A disk named on an appliance whose system disk holds data already receives
+# that data first (spec/distribution-requirements/ E11): it is copied onto the
+# disk, compared and synced before anything is bound, and the copy on the
+# system disk is kept, underneath the binds, until the services have passed
+# the health check from the disk (kamerplanter-update-health.service, which
+# this unit starts after a move) and UPDATE_BACKUP_KEEP_DAYS have passed.
+# When that check fails, it restarts this unit, which returns to the system
+# copy and no longer uses the disk. To move without a reboot, run:
+# systemctl restart kamerplanter-data-disk.service (it stops the services
+# that require it first, and starts them again after).
+#
 # An encrypted data disk is opened as /dev/mapper/kamerplanter-data with the
 # key stored on the system disk or supplied as the credential
 # kamerplanter.data-disk-key (spec/distribution-requirements/ E14). When the

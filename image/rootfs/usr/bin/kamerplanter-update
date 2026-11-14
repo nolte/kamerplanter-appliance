@@ -24,7 +24,10 @@
 #            the services stopped on a data disk a newer release has used
 #   health   after the services start: decide whether a new version is
 #            healthy, and roll it back when it is not; raise the release
-#            marker of the data disk once the services are healthy
+#            marker of the data disk once the services are healthy; after
+#            the data was moved onto a data disk, decide whether the
+#            services are healthy from it, and return to the copy on the
+#            system disk when they are not
 #
 # State in /var/lib/kamerplanter/update/:
 #   good        digest of the last version that passed its health check
@@ -56,6 +59,8 @@ data_volumes=(arangodb_data valkey_data)
 defaults=/usr/share/kamerplanter/kamerplanter.env
 user=/etc/kamerplanter/kamerplanter.env
 issue=/run/issue.d/50-kamerplanter.issue
+# The disk service, which keeps the record of a move onto the data disk.
+disks_tool=/usr/libexec/kamerplanter/disks
 # The console message of a refused data disk (release_check); before the
 # general one, after those of the disk service (40-kamerplanter-*-disk.issue).
 release_issue=/run/issue.d/45-kamerplanter-release.issue
@@ -322,9 +327,29 @@ cmd_status() {
                   | {disk: .[0], running: .[1], time: .[2]}))
             }')
     fi
+    # The move of the system disk's data onto the data disk (E11), when one
+    # is recorded.
+    local move=null
+    if [ -f "$data_disk_move" ]; then
+        local verified due=''
+        verified=$(data_disk_move_field VERIFIED)
+        if [ -n "$verified" ] && verified=$(date -d "$verified" +%s 2>/dev/null); then
+            due=$(date -u -d "@$((verified + $(count UPDATE_BACKUP_KEEP_DAYS 7) * 86400))" +%FT%TZ)
+        fi
+        move=$(jq -n --arg state "$(data_disk_move_field STATE)" --arg disk "$(data_disk_move_field NAMED)" \
+            --arg started "$(data_disk_move_field STARTED)" --arg moved "$(data_disk_move_field MOVED)" \
+            --arg verified "$(data_disk_move_field VERIFIED)" --arg cleaned "$(data_disk_move_field CLEANED)" \
+            --arg failed "$(data_disk_move_field FAILED)" --arg reason "$(data_disk_move_field REASON)" \
+            --arg ignored "$(data_disk_move_field IGNORED_NAME)" --arg due "$due" '
+            def n: if . == "" then null else . end;
+            {state: ($state | n), disk: ($disk | n), started: ($started | n), moved: ($moved | n),
+             healthy: ($verified | n), systemCopyDeletedAfter: (if $state == "verified" then ($due | n) else null end),
+             systemCopyDeleted: ($cleaned | n), failed: ($failed | n), reason: ($reason | n),
+             namingIgnored: ($ignored | n)}')
+    fi
     doc=$(host | jq --arg window "$(next_window)" --arg postponed "$(postponed_until || true)" \
         --arg pending "$(pending)" --rawfile failed <(cat "$state/failed" 2>/dev/null || true) \
-        --argjson disk "$disk" \
+        --argjson disk "$disk" --argjson move "$move" \
         --slurpfile log <(tail -n 20 "$state/log.jsonl" 2>/dev/null || true) '
         def slot(s): .status[s].image // null | if . == null then null else
             {version, digest: .imageDigest, image: .image.image, timestamp} end;
@@ -336,6 +361,7 @@ cmd_status() {
           checking: (if $pending == "" then null else ($pending | split(" ") | {from: .[0], to: .[1]}) end),
           failed: ($failed | split("\n") | map(select(. != ""))),
           dataDisk: $disk,
+          dataDiskMove: $move,
           record: $log
         }')
     if [ "$json" = 1 ]; then
@@ -360,6 +386,15 @@ cmd_status() {
             + (if .dataDisk.refused then "; newer than the running release, the services stay stopped" else "" end),
             (.dataDisk.allowedDowngrades[] | "  allowed:      \(.running) on the disk of \(.disk) (\(.time))")
          else empty end),
+        (.dataDiskMove // empty | "Data disk move: " + (
+            if .state == "copying" then "copying onto \(.disk) since \(.started); the system disk is in use until it is complete"
+            elif .state == "moved" then "moved on \(.moved); the health check from the data disk is pending, the copy on the system disk is kept"
+            elif .state == "verified" then "moved on \(.moved), healthy since \(.healthy); the copy on the system disk is deleted after \(.systemCopyDeletedAfter // "the keeping period")"
+            elif .state == "cleaned" then "moved on \(.moved), healthy since \(.healthy); the copy on the system disk was deleted on \(.systemCopyDeleted)"
+            elif .state == "falling-back" then "unhealthy from the data disk (\(.reason)); returning to the copy on the system disk"
+            elif .state == "failed" then "onto \(.disk) failed on \(.failed): \(.reason); the data is on the system disk"
+                + (if .namingIgnored then "; \(.namingIgnored) is not used until it is named anew" else "" end)
+            else .state end)),
         "",
         "Recent events:",
         (.record[] | "  \(.time)  \(.event)  \(.result)  \(.detail)")' <<<"$doc"
@@ -638,9 +673,13 @@ cmd_health() {
     read -r from to phase <<<"$(pending)" || true
     booted=$(slot booted digest)
     if ! { [ "${phase-}" = checking ] && [ "$booted" = "$to" ]; }; then
+        check_move || return 0
         mark_when_healthy
         return 0
     fi
+    # A move onto the data disk and an update on the same boot are decided
+    # by this one check. When it fails, the update is rolled back, not the
+    # move: the previous version checks the move again on its boot.
     if ! problem=$(wait_healthy); then
         log health failed "$problem; returning to the previous version" "$from" "$to"
         bootc rollback --apply
@@ -649,6 +688,9 @@ cmd_health() {
     echo "$to" >"$state/good"
     rm -f "$state/pending"
     log health ok "$(slot booted version) is healthy" "$from" "$to"
+    if [ "$(data_disk_move_field STATE)" = moved ]; then
+        "$disks_tool" move healthy || log health error "the move onto the data disk kp-data could not be recorded as healthy; it is checked again at the next boot"
+    fi
     raise_marker
     cleanup
     write_issue || true
@@ -667,6 +709,32 @@ wait_healthy() {
         fi
         sleep 10
     done
+}
+
+# check_move: after the data was moved onto the data disk
+# (spec/distribution-requirements/ E11), the health check of the services
+# from it, the same check and time budget as for an update (wait_healthy).
+# Healthy: the disk service records the move as verified, and the copy on the
+# system disk is deleted once UPDATE_BACKUP_KEEP_DAYS have passed (cleanup).
+# Not healthy: the disk service returns to the copy on the system disk (a
+# restart of kamerplanter-data-disk.service, which restarts the services as
+# well), unless the disk no longer answers: a missing disk is no failed start,
+# and its services stay stopped until it is back (E12). Fails when the
+# services are being returned or stopped: nothing else is to be checked then.
+check_move() {
+    [ "$(data_disk_move_field STATE)" = moved ] && data_disk_placed || return 0
+    local problem
+    if problem=$(wait_healthy); then
+        "$disks_tool" move healthy ||
+            log health error "the move onto the data disk kp-data could not be recorded as healthy; it is checked again at the next boot"
+        return 0
+    fi
+    if ! data_disk_present; then
+        "$disks_tool" move missing "$problem" || true
+    else
+        "$disks_tool" move unhealthy "$problem" || true
+    fi
+    return 1
 }
 
 # mark_when_healthy: raises the marker of the data disk once the services of
@@ -711,7 +779,13 @@ check_health() {
 }
 
 # Backups older than UPDATE_BACKUP_KEEP_DAYS are deleted; a manual rollback
-# needs one, so it is possible only within that period (spec D4).
+# needs one, so it is possible only within that period (spec D4). The same
+# period after the services passed the health check from a data disk the
+# data was moved onto, the disk service deletes the copy of that data on the
+# system disk (spec/distribution-requirements/ E11), and records it in
+# /var/lib/kamerplanter/disks/log.jsonl. Run daily by
+# kamerplanter-update-fetch.service, also when nothing could be fetched, and
+# after a healthy update.
 cleanup() {
     local keep dir
     keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
@@ -722,6 +796,10 @@ cleanup() {
             log cleanup ok "deleted the pre-update backup of $(short "$(basename "$dir")")"
         fi
     done
+    if [ "$(data_disk_move_field STATE)" = verified ]; then
+        "$disks_tool" cleanup "$keep" ||
+            log cleanup error "the copy on the system disk of the data moved onto the data disk kp-data could not be deleted; it is tried again at the next run (see /var/lib/kamerplanter/disks/log.jsonl)"
+    fi
 }
 
 case ${1-status} in
@@ -730,7 +808,16 @@ case ${1-status} in
 esac
 case ${1-status} in
     status) shift || true; cmd_status "$@" ;;
-    fetch) cmd_fetch; cleanup ;;
+    fetch)
+        # The cleanup runs also when nothing could be fetched, as on an
+        # appliance without network; the fetch keeps set -e in its subshell.
+        set +e
+        (set -e; cmd_fetch)
+        rc=$?
+        set -e
+        cleanup
+        exit "$rc"
+        ;;
     apply) shift; cmd_apply "$@" ;;
     apply-now) cmd_fetch && cmd_apply --now ;;
     postpone) shift; cmd_postpone "$@" ;;
