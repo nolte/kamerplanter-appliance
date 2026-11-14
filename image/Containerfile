@@ -4,7 +4,7 @@
 # about a day, so this pin breaks once the tag is rebuilt;
 # .github/workflows/base-image-mirror.yml copies the base image into the
 # project's registry, and this line moves there once the mirror exists.
-FROM quay.io/fedora/fedora-bootc:46@sha256:b2df016fdcbcf40fd811aff8f89de1d88fa9f8a4240669daa678d3e15806e9ab
+FROM quay.io/fedora/fedora-bootc:46@sha256:88c67690217d3d8ae08cceba784322d9d46ed0d9a997fd1d1224b8f8f0a51741
 
 # The release version; bootc shows it as the version of a deployment.
 ARG VERSION=dev
