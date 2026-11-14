@@ -27,6 +27,9 @@ dnf -y -q install xorriso dosfstools mtools >/dev/null 2>&1 || say "tool install
 ssh-keygen -q -t ed25519 -N '' -f "$P/userdata_key"
 UD_KEY=$(cat "$P/userdata_key.pub")
 MARK=MARKERSECRET0123456789abcdef0123456789abcd
+# Runs to execute; the first spike run completed C1, Q1 and A.
+RUNS=${RUNS:-C2 A B D}
+want() { [[ " $RUNS " == *" $1 "* ]]; }
 
 seed() {  # seed DIR HOSTNAME INSTANCE [static]
     mkdir -p "$1"
@@ -55,7 +58,7 @@ ethernets:
     match:
       name: "e*"
     dhcp4: false
-    addresses: [10.0.2.15/24]
+    addresses: [10.0.2.15/24, 10.0.2.50/24]  # .15 keeps the QEMU port forward working
     routes:
       - to: default
         via: 10.0.2.2
@@ -74,6 +77,8 @@ echo "--- ds-identify"; cat /run/cloud-init/ds-identify.log 2>/dev/null | grep -
 echo "--- schema"; cloud-init schema --system 2>&1 | tail -5
 echo "--- addresses"; ip -4 -o addr show scope global; ip route | head -3
 nmcli -g NAME,TYPE,DEVICE con show --active 2>/dev/null; for c in $(nmcli -g UUID con show --active 2>/dev/null); do echo "$c method=$(nmcli -g ipv4.method con show "$c")"; done
+echo "--- NM keyfiles"; ls -l /etc/NetworkManager/system-connections/ 2>&1; grep -hE "^(id|method|address1)=" /etc/NetworkManager/system-connections/* 2>/dev/null
+echo "--- cloud-init network log"; grep -iE "network|render|netplan|NetworkManager" /var/log/cloud-init.log 2>/dev/null | grep -viE "url|metadata" | tail -12
 echo "--- root authorized_keys"; wc -l /root/.ssh/authorized_keys 2>&1; grep -c spike-userdata /root/.ssh/authorized_keys 2>/dev/null || true
 echo "--- default user"; getent passwd fedora cloud-user 2>&1 | head
 echo "--- write_files target"; ls -l /etc/kamerplanter/provisioning.env 2>&1
@@ -82,11 +87,13 @@ EOS
 }
 
 ########## Run C: no provisioning source, then seed files on the disk
+if want C2; then
 say "C1 no source (DHCP, cloud-init idle?)"
 new_overlay "$P/c.qcow2"
 start_vm spikeC bios virtio-scsi virtio off "$P/c.qcow2"
 up
 report_common
+if want Q1; then
 say "Q1 image: packages, config, units"
 run <<'EOS'
 comm -13 /usr/share/kamerplanter/spike-rpms-before /usr/share/kamerplanter/spike-rpms-after | tr '\n' ' '; echo
@@ -101,17 +108,22 @@ echo "--- ordering vs kamerplanter-config"; systemd-analyze critical-chain kamer
 systemd-analyze verify cloud-init.service cloud-config.service kamerplanter-config.service 2>&1 | head -5
 echo "--- hetzner/openstack detection in ds-identify"; grep -nE 'dscheck_Hetzner|dscheck_OpenStack' -A8 /usr/lib/cloud-init/ds-identify 2>/dev/null | grep -iE 'hetzner|openstack|dmi|product|vendor|chassis' | head -12
 EOS
+fi
 say "C2 seed files under /var/lib/cloud/seed/nocloud, clean, reboot"
 seed "$P/seed-c" kp-spike-c spike-c
 guest "mkdir -p /var/lib/cloud/seed/nocloud && cat >/var/lib/cloud/seed/nocloud/meta-data" <"$P/seed-c/meta-data"
 guest "cat >/var/lib/cloud/seed/nocloud/user-data" <"$P/seed-c/user-data"
 guest "cloud-init clean --logs >/dev/null 2>&1; true"
+say "C2 seed dir before reboot"; guest "ls -la /var/lib/cloud/seed/nocloud/; findmnt -no SOURCE,FSTYPE,OPTIONS /var/lib/cloud" >>"$LOG" 2>&1
 reboot_vm
+say "C2 seed dir after reboot, full ds-identify log"; guest "ls -la /var/lib/cloud/seed/nocloud/; cat /run/cloud-init/ds-identify.log" >>"$LOG" 2>&1
 report_common
 stop_vm
+fi
 
 ########## Run A: CIDATA ISO with static IPv4
-say "A1 NoCloud ISO (CIDATA), static IPv4 10.0.2.15, user-data key, kamerplanter key, secret marker"
+if want A; then
+say "A1 NoCloud ISO (CIDATA), static IPv4 10.0.2.15+.50 (manual, not dynamic), user-data key, kamerplanter key, secret marker"
 seed "$P/seed-a" kp-spike-a spike-a static
 xorriso -as mkisofs -quiet -V CIDATA -J -r -o "$P/seed-a.iso" "$P/seed-a" >/dev/null 2>&1 || say "xorriso failed"
 EXTRA=(-drive "file=$P/seed-a.iso,media=cdrom,readonly=on")
@@ -145,7 +157,7 @@ run <<'EOS'
 rpm -q nftables 2>&1
 ip addr add 169.254.169.254/32 dev lo
 mkdir -p /tmp/md && echo ok >/tmp/md/index.html
-(cd /tmp/md && nohup python3 -m http.server 80 --bind 169.254.169.254 >/dev/null 2>&1 &)
+(cd /tmp/md && setsid nohup python3 -m http.server 80 --bind 169.254.169.254 </dev/null >/dev/null 2>&1 &)
 sleep 2
 curl -s -m 3 -o /dev/null -w 'before: root %{http_code}\n' http://169.254.169.254/
 nft -f - <<'NFT' && echo "nft rules loaded"
@@ -160,11 +172,13 @@ runuser -u nobody -- curl -s -m 3 -o /dev/null -w 'after: nobody %{http_code}\n'
 podman --storage-opt=additionalimagestore=/usr/lib/bootc/storage exec backend python3 -c "import urllib.request;print('after: container', urllib.request.urlopen('http://169.254.169.254/',timeout=3).status)" 2>&1 | tail -1
 EOS
 stop_vm
+fi
 
 ########## Run B: seed URL via SMBIOS serial, plus a systemd credential
+if want B; then
 say "B1 seed URL via SMBIOS serial, credential kamerplanter.secret.JWT_SECRET_KEY"
 seed "$P/seed-b" kp-spike-b spike-b
-(cd "$P/seed-b" && nohup python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &)
+(cd "$P/seed-b" && setsid nohup python3 -m http.server 8099 --bind 127.0.0.1 </dev/null >/dev/null 2>&1 &)
 sleep 1
 EXTRA=(-smbios "type=1,serial=ds=nocloud;s=http://10.0.2.2:8099/"
        -smbios "type=11,value=io.systemd.credential:kamerplanter.secret.JWT_SECRET_KEY=CREDMARKER0123456789abcdef0123456789abcd")
@@ -178,8 +192,10 @@ systemd-run --wait --pipe -q -p ImportCredential='kamerplanter.secret.*' sh -c '
 echo "journal hits for credential value: $(journalctl -b --no-pager | grep -c CREDMARKER)"
 EOS
 stop_vm
+fi
 
 ########## Run D: vfat CIDATA drive
+if want D; then
 say "D1 NoCloud vfat drive (CIDATA)"
 seed "$P/seed-d" kp-spike-d spike-d
 truncate -s 4M "$P/seed-d.img" && mkfs.vfat -n CIDATA "$P/seed-d.img" >/dev/null && mcopy -i "$P/seed-d.img" "$P/seed-d/user-data" "$P/seed-d/meta-data" ::/ || say "vfat build failed"
@@ -189,5 +205,6 @@ start_vm spikeD bios virtio-scsi virtio off "$P/d.qcow2"
 up
 report_common
 stop_vm
+fi
 say "DONE"
 chmod -R a+rX .build/spike
