@@ -1,0 +1,12 @@
+# Spike for issue #17 (P1): the image under test plus cloud-init.
+ARG BASE=localhost/kamerplanter-appliance:poc
+FROM ${BASE}
+RUN rpm -qa --qf '%{NAME}\n' | sort >/usr/share/kamerplanter/spike-rpms-before \
+    && dnf -y install cloud-init && dnf clean all \
+    && rpm -qa --qf '%{NAME}\n' | sort >/usr/share/kamerplanter/spike-rpms-after
+RUN mkdir -p /etc/cloud/cloud.cfg.d && printf '%s\n' \
+        'datasource_list: [ NoCloud, Hetzner, OpenStack, None ]' \
+        'disable_root: false' \
+        'ssh_pwauth: false' \
+        >/etc/cloud/cloud.cfg.d/50-kamerplanter-spike.cfg
+RUN bootc container lint

@@ -1,0 +1,58 @@
+name: spike-provisioning
+
+# Temporary feasibility spike for issue #17 (P1): cloud-init in the bootc
+# image, NoCloud sources, secret copies, ordering, metadata restriction,
+# systemd credentials. Runs only on pushes to the experiment branch; the
+# branch is deleted after the spike.
+
+on:
+  push:
+    branches: [exp/provisioning-spike]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-provisioning
+  cancel-in-progress: true
+
+jobs:
+  spike:
+    name: spike-provisioning
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Enable KVM for the runner user
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Build the tool container
+        run: docker build -t kamerplanter-appliance-tools:poc -f build/tools.Containerfile build
+
+      - name: Build the system image and the cloud-init variant
+        run: |
+          set -euo pipefail
+          build/in-tools.sh podman build -t localhost/kamerplanter-appliance:poc image
+          build/in-tools.sh podman build -t localhost/kamerplanter-appliance:spike \
+            -f tests/spike/Containerfile.cloud-init tests/spike 2>&1 | tee spike-build.log
+          build/in-tools.sh sh -c 'podman image inspect localhost/kamerplanter-appliance:poc localhost/kamerplanter-appliance:spike --format "{{.Id}} {{.Size}}"'
+
+      - name: Build the disk image from the variant
+        run: build/in-tools.sh build/disk.sh localhost/kamerplanter-appliance:spike
+
+      - name: Run the spike
+        run: build/in-tools.sh tests/spike/provisioning-spike.sh
+
+      - name: Print the spike log
+        if: always()
+        run: |
+          sudo chmod -R a+rX .build || true
+          grep -iE 'lint|warn|error|Checks' spike-build.log | tail -15 || true
+          cat .build/spike/log.txt || true
