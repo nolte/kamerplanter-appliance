@@ -62,7 +62,7 @@ Self-consistency (`k = 2`) lowered `c_d` before Q3, Q4 and Q10: for "NFS", "form
 
 ### Life cycle
 
-- **R8** — WHEN a freshly installed appliance finds an existing data disk, it SHALL use the configuration, secrets and data on it and SHALL NOT generate new secrets.
+- **R8** — WHEN a freshly installed appliance is given a data disk named explicitly (as in R1), it SHALL use the configuration, secrets and data on it, bind to the disk's UUID, and SHALL NOT generate new secrets for keys the disk holds; it SHALL NOT adopt an unnamed disk only because it carries the label `kp-data`.
   - _dimension_: `functional` · _status_: `confirmed` · _source_: issue body; Q1 "die flexibilität sind die hauptgründe"
 - **R9** — WHEN a data disk is named on an appliance that already holds data on its system disk, the appliance SHALL stop the services, move data, configuration, secrets and pins onto the data disk, and continue from the data disk.
   - _dimension_: `functional` · _status_: `confirmed` · _source_: Q5 "a"
@@ -77,7 +77,7 @@ Self-consistency (`k = 2`) lowered `c_d` before Q3, Q4 and Q10: for "NFS", "form
 
 - **R13** — The data disk MAY be encrypted with LUKS; encryption SHALL be optional.
   - _dimension_: `non_functional` · _status_: `confirmed` · _source_: Q12 "b"
-- **R14** — The key of an encrypted data disk SHALL always come from the provisioner (configuration, Terraform, systemd credential); the appliance SHALL NOT generate it. The appliance SHALL keep a provisioned key on the system disk or in the TPM to unlock the disk on later boots.
+- **R14** — The key of an encrypted data disk SHALL always come from the provisioner, as a systemd credential or a dedicated file on the system disk, never in the user file; the appliance SHALL NOT generate it. The appliance SHALL keep a provisioned key on the system disk or in the TPM to unlock the disk on later boots.
   - _dimension_: `actors` · _status_: `confirmed` (local keeping: assumption confirmed by teach-back Q14) · _source_: Q13 "b"
 
 ### Pre-update backup (spec/update-and-rollback/ D2–D5)
@@ -99,6 +99,11 @@ Self-consistency (`k = 2`) lowered `c_d` before Q3, Q4 and Q10: for "NFS", "form
 ## Revisions
 
 - **2026-11-14, labels:** ext4 file system labels hold at most 16 characters (xfs: 12); `mkfs.ext4` silently truncated `kamerplanter-data` to `kamerplanter-dat` in the P1 spike. The maintainer chose `kp-data` and `kp-backup` (fit ext4 and xfs). R1, R2, R11 and R15 updated; status stays `confirmed` (operator decision).
+
+- **2026-11-14, security review (security-requirements-reviewer on the P2 specs):** the maintainer decided (1) a fresh appliance adopts only an explicitly named data disk and binds it to its UUID (R8 revised; label-only adoption let a prepared stick inject secrets and data); (2) the LUKS key comes only as a credential or a system-side file, never in the user file, which moves onto the disk (R14 revised); (3) with an encrypted data disk, the pre-update backup goes only to an equally protected location (R20 added). Status `confirmed` (operator decisions).
+
+- **R20** — WHILE the data disk is encrypted, the appliance SHALL write the pre-update backup only to an equally protected location: an encrypted backup disk, the encrypted data disk, or the system disk when the key is kept there; otherwise it SHALL postpone the update.
+  - _dimension_: `non_functional` · _status_: `confirmed` · _source_: security review decision 2026-11-14 ("Nur gleich geschützt")
 
 ## Surviving assumptions / open risks
 

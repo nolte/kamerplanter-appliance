@@ -95,7 +95,7 @@ Leser: Maintainer, die die Appliance bauen und veröffentlichen, Reviewer, die e
 - **D6 MUSS [MUST]** Mindestwerte für CPU, Arbeitsspeicher und Speicherplatz je Zielklasse veröffentlichen, gestützt auf Messungen.
 - **D7 MUSS [MUST]** die Core-Dienste ohne GPU ausführen.
 - **D8 MUSS [MUST]** auf privater Hardware nach einem abrupten Stromausfall ohne manuelle Reparatur den Betrieb wieder aufnehmen.
-- **D9 MUSS [MUST]** in der Installationsdokumentation sagen, dass ein Datenträger auf einem Wechselmedium die erzeugten Secrets und die Datenbank trägt, sodass ein unverschlüsselter Stick oder eine unverschlüsselte Platte, die das Haus verlässt, sie preisgibt.
+- **D9 MUSS [MUST]** in der Installationsdokumentation sagen, dass ein Datenträger auf einem Wechselmedium die erzeugten Secrets und die Datenbank trägt, sodass ein unverschlüsselter Stick oder eine unverschlüsselte Platte, die das Haus verlässt, sie preisgibt. Sie **MUSS [MUST]** außerdem sagen, dass ein Schlüssel auf der Systemplatte nur gegen den Verlust des Datenträgers allein schützt, nicht gegen den der ganzen Maschine; dass ein Sicherungs-Datenträger eine vollständige Kopie der Datenbank hält; dass eine zweite Platte einer gehosteten VM beim Anbieter liegt; dass gelöschte Dateien auf dem Medium wiederherstellbar bleiben können; und wie man einen Datenträger oder Sicherungs-Datenträger einrichtet, erkennt und stilllegt.
 
 ### E. Einrichtung je Umgebung
 

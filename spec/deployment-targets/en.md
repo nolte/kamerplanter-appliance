@@ -95,7 +95,7 @@ Readers: maintainers who build and release the appliance, reviewers who decide w
 - **D6 MUST** publish minimum CPU, memory, and storage per target class, based on measurement.
 - **D7 MUST** run the core services without a GPU.
 - **D8 MUST** return to service after an abrupt power loss on private hardware without manual repair.
-- **D9 MUST** state in the installation documentation that a data disk on removable media carries the generated secrets and the database, so that an unencrypted stick or disk that leaves the premises exposes them.
+- **D9 MUST** state in the installation documentation that a data disk on removable media carries the generated secrets and the database, so that an unencrypted stick or disk that leaves the premises exposes them. It MUST also state that a key kept on the system disk protects only against the loss of the data disk alone, not of the whole machine; that a backup disk holds a full copy of the database; that a second disk of a hosted VM is stored by the provider; that deleted files may remain recoverable on the medium; and how to set up, recognise, and retire a data disk or a backup disk.
 
 ### E. Setup per environment
 
