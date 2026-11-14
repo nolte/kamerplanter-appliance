@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks the decisions of the disk service (image/rootfs/usr/libexec/kamerplanter/disks)
-# and the naming and placement checks, the release comparison and the release
+# Checks the decisions of the disk service (image/rootfs/usr/libexec/kamerplanter/disks),
+# its key checks (E14), and the naming and placement checks, the release comparison and the release
 # marker decisions of the shared parser (image/rootfs/usr/lib/kamerplanter/env.sh)
 # on fake input and in temporary directories. Needs no root, no disk and no VM.
 #
@@ -69,30 +69,85 @@ expect "backup disk found by its own label" "ok /dev/sde" \
 expect "label without UUID" "foreign /dev/sdf none" "$(printf 'DEVNAME=/dev/sdf\nLABEL=kp-data\n' | classify kp-data "$uuid")"
 
 # --- set-up of a named disk (E7, E10) ---
-expect "blank disk is formatted" format "$(setup_action kp-data '' '' '' 0 0)"
-expect "blank disk, forced, is formatted" format "$(setup_action kp-data '' '' '' 1 0)"
-expect "own label on ext4 is adopted" adopt "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 0 0 ext4)"
-expect "own label on ext4 is adopted, also when forced" adopt "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 1 0 ext4)"
+expect "blank disk is formatted" format "$(setup_action kp-data '' '' '' 0 0 0)"
+expect "blank disk, forced, is formatted" format "$(setup_action kp-data '' '' '' 1 0 0)"
+expect "own label on ext4 is adopted" adopt "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 0 0 0 ext4)"
+expect "own label on ext4 is adopted, also when forced" adopt "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 1 0 0 ext4)"
 expect "foreign file system is refused, naming it" \
     "refuse it carries xfs; it is formatted only when the naming forces it" \
-    "$(setup_action kp-data xfs '' '' 0 0 xfs)"
+    "$(setup_action kp-data xfs '' '' 0 0 0 xfs)"
 expect "partition table is refused, naming every signature" \
     "refuse it carries gpt, PMBR, ntfs on /dev/sdb1; it is formatted only when the naming forces it" \
-    "$(setup_action kp-data '' '' '' 0 0 gpt PMBR 'ntfs on /dev/sdb1')"
-expect "foreign file system, forced, is wiped" wipe "$(setup_action kp-data xfs '' '' 1 0 xfs)"
+    "$(setup_action kp-data '' '' '' 0 0 0 gpt PMBR 'ntfs on /dev/sdb1')"
+expect "foreign file system, forced, is wiped" wipe "$(setup_action kp-data xfs '' '' 1 0 0 xfs)"
 expect "a force applies once to its path" \
     "refuse it carries vfat, and the forced format of this path was used already" \
-    "$(setup_action kp-data vfat '' '' 1 1 vfat)"
+    "$(setup_action kp-data vfat '' '' 1 1 0 vfat)"
 expect "the other label is never formatted, even forced" \
     "refuse it carries the label kp-backup on ext4, and is never formatted again" \
-    "$(setup_action kp-data ext4 kp-backup 'it carries the label kp-backup on ext4' 1 0 ext4)"
+    "$(setup_action kp-data ext4 kp-backup 'it carries the label kp-backup on ext4' 1 0 0 ext4)"
 expect "own label on another file system is never formatted" \
     "refuse it carries the label kp-data on xfs, and is never formatted again" \
-    "$(setup_action kp-data xfs kp-data 'it carries the label kp-data on xfs' 1 0 xfs)"
+    "$(setup_action kp-data xfs kp-data 'it carries the label kp-data on xfs' 1 0 0 xfs)"
 expect "a partition with the label is never formatted, even forced" \
     "refuse its partition /dev/sdb1 carries the label kp-data, and is never formatted again" \
-    "$(setup_action kp-data '' '' 'its partition /dev/sdb1 carries the label kp-data' 1 0 gpt PMBR 'ext4 on /dev/sdb1')"
-expect "backup disk adopts kp-backup" adopt "$(setup_action kp-backup ext4 kp-backup 'it carries the label kp-backup on ext4' 0 0 ext4)"
+    "$(setup_action kp-data '' '' 'its partition /dev/sdb1 carries the label kp-data' 1 0 0 gpt PMBR 'ext4 on /dev/sdb1')"
+expect "backup disk adopts kp-backup" adopt "$(setup_action kp-backup ext4 kp-backup 'it carries the label kp-backup on ext4' 0 0 0 ext4)"
+
+# --- encryption (E14, E16) ---
+luks=$'DEVNAME=/dev/sdb\nVERSION=2\nUUID=dd9c4f97-77b2-4ef6-8266-7607ede0420e\nLABEL=kp-data\nTYPE=crypto_LUKS\nUSAGE=crypto\n'
+inner=$'DEVNAME=/dev/mapper/kamerplanter-data\nLABEL=kp-data\nUUID=4d0441f2-c494-4652-b5ca-7ac746f1efcb\nBLOCK_SIZE=4096\nTYPE=ext4\n'
+luks_id=dd9c4f97-77b2-4ef6-8266-7607ede0420e
+expect "encrypted disk found by its header label" "ok /dev/sdb" "$(printf '%s\n%s' "$system" "$luks" | classify kp-data "$luks_id")"
+expect "opened container skipped: header label counts once" "ok /dev/sdb" \
+    "$(printf '%s\n%s\n%s' "$system" "$luks" "$inner" | classify kp-data "$luks_id" /dev/mapper/kamerplanter-data /dev/dm-0)"
+expect "opened container skipped by its kernel name too" "ok /dev/sdb" \
+    "$(printf '%s\n%s\n%s' "$system" "$luks" "${inner/mapper\/kamerplanter-data/dm-0}" | classify kp-data "$luks_id" /dev/mapper/kamerplanter-data /dev/dm-0)"
+expect "opened container not skipped: duplicate" "duplicate /dev/sdb /dev/mapper/kamerplanter-data" \
+    "$(printf '%s\n%s\n%s' "$system" "$luks" "$inner" | classify kp-data "$luks_id")"
+expect "skipping the container does not hide an unencrypted clone" "duplicate /dev/sdb /dev/sdc" \
+    "$(printf '%s\n%s\n%s\n%s' "$system" "$luks" "$inner" "$clone" | classify kp-data "$luks_id" /dev/mapper/kamerplanter-data)"
+expect "set up encrypted, only an unencrypted disk present" "foreign /dev/sdc 99999999-8888-7777-6666-555555555555" \
+    "$(printf '%s\n%s' "$system" "$clone" | classify kp-data "$luks_id" /dev/mapper/kamerplanter-data)"
+expect "skip list matches whole device names only" "duplicate /dev/sdb /dev/mapper/kamerplanter-data" \
+    "$(printf '%s\n%s\n%s' "$system" "$luks" "$inner" | classify kp-data "$luks_id" /dev/mapper/kamerplanter)"
+
+expect "blank disk with a key is formatted (encrypted)" format "$(setup_action kp-data '' '' '' 0 0 1)"
+expect "foreign file system with a key, forced, is wiped (then encrypted)" wipe "$(setup_action kp-data xfs '' '' 1 0 1 xfs)"
+expect "foreign file system with a key, not forced, is refused" \
+    "refuse it carries xfs; it is formatted only when the naming forces it" "$(setup_action kp-data xfs '' '' 0 0 1 xfs)"
+expect "a key for a disk set up unencrypted is refused" \
+    "refuse it carries kp-data unencrypted, and a key is supplied for it: a disk is encrypted only when it is formatted" \
+    "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 0 0 1 ext4)"
+expect "a key for a disk set up unencrypted is refused, also when forced" \
+    "refuse it carries kp-data unencrypted, and a key is supplied for it: a disk is encrypted only when it is formatted" \
+    "$(setup_action kp-data ext4 kp-data 'it carries the label kp-data on ext4' 1 0 1 ext4)"
+expect "encrypted disk with a key is unlocked and adopted" unlock \
+    "$(setup_action kp-data crypto_LUKS kp-data 'it carries the label kp-data on crypto_LUKS' 0 0 1 crypto_LUKS)"
+expect "encrypted disk without a key is refused" \
+    "refuse it carries kp-data encrypted (LUKS), and no key is supplied for it" \
+    "$(setup_action kp-data crypto_LUKS kp-data 'it carries the label kp-data on crypto_LUKS' 1 0 0 crypto_LUKS)"
+expect "encrypted disk of the other role is never formatted" \
+    "refuse it carries the label kp-backup on crypto_LUKS, and is never formatted again" \
+    "$(setup_action kp-data crypto_LUKS kp-backup 'it carries the label kp-backup on crypto_LUKS' 1 0 1 crypto_LUKS)"
+expect "unlabelled LUKS container is foreign" \
+    "refuse it carries crypto_LUKS; it is formatted only when the naming forces it" \
+    "$(setup_action kp-data crypto_LUKS '' '' 0 0 1 crypto_LUKS)"
+
+expect "key of 31 bytes refused" "it is shorter than 32 bytes" "$(key_size_problem 31)"
+expect "key of 32 bytes accepted" "" "$(key_size_problem 32)"
+expect "key of 8192 bytes accepted" "" "$(key_size_problem 8192)"
+expect "key of 8193 bytes refused" "it is longer than 8192 bytes" "$(key_size_problem 8193)"
+expect "empty key refused" "it is shorter than 32 bytes" "$(key_size_problem 0)"
+
+expect "LUKS2 UUID from the mapping" dd9c4f97-77b2-4ef6-8266-7607ede0420e \
+    "$(luks_uuid CRYPT-LUKS2-dd9c4f9777b24ef682667607ede0420e-kamerplanter-data)"
+expect "LUKS2 UUID compares lower-case" dd9c4f97-77b2-4ef6-8266-7607ede0420e \
+    "$(luks_uuid CRYPT-LUKS2-DD9C4F9777B24EF682667607EDE0420E-kamerplanter-data)"
+expect "LUKS1 mapping is no LUKS2 container" "" "$(luks_uuid CRYPT-LUKS1-dd9c4f9777b24ef682667607ede0420e-x)"
+expect "plain dm-crypt mapping is none" "" "$(luks_uuid CRYPT-PLAIN-kamerplanter-data)"
+expect "LVM mapping is none" "" "$(luks_uuid LVM-abcdef)"
+expect "no mapping is none" "" "$(luks_uuid '')"
 
 # --- local disks only (E15) ---
 expect "virtio disk is local" "" "$(remote_kind vdb '' /sys/devices/pci0000:00/0000:00:05.0/virtio2/block/vdb)"
@@ -151,6 +206,32 @@ held "database data on the system disk" "data in /var/lib/containers/storage/vol
     "mkdir -p $vol/arangodb_data/_data && touch $vol/arangodb_data/_data/ENGINE"
 held "everything listed" $'/etc/kamerplanter/secrets.env\npins in /var/lib/kamerplanter/pinned\ndata in /var/lib/containers/storage/volumes/valkey_data' \
     "mkdir -p etc/kamerplanter var/lib/kamerplanter/pinned $vol/valkey_data/_data && touch etc/kamerplanter/secrets.env var/lib/kamerplanter/pinned/X $vol/valkey_data/_data/dump.rdb"
+
+# Key files (E14): metadata only; owned by root and readable by root only.
+keydir=$(mktemp -d "$work/keys.XXXXXX")
+head -c 48 /dev/zero >"$keydir/ok"; chmod 0600 "$keydir/ok"
+if [ "$(id -u)" = 0 ]; then
+    expect "key file of root, 0600" "" "$(key_file_problem "$keydir/ok")"
+    chmod 0400 "$keydir/ok"
+    expect "key file of root, 0400 (a credential)" "" "$(key_file_problem "$keydir/ok")"
+    chmod 0640 "$keydir/ok"
+    expect "key file readable by its group" "its mode 640 lets others than root read it" "$(key_file_problem "$keydir/ok")"
+else
+    expect "key file not owned by root" "it is not owned by root" "$(key_file_problem "$keydir/ok")"
+fi
+ln -s "$keydir/ok" "$keydir/link"
+expect "key file as symbolic link" "it is not a regular file" "$(key_file_problem "$keydir/link")"
+mkdir "$keydir/dir"
+expect "key file as directory" "it is not a regular file" "$(key_file_problem "$keydir/dir")"
+expect "key file missing" "it is not a regular file" "$(key_file_problem "$keydir/none")"
+printf 'LABEL=kp-data\nTYPE=ext4\nUUID=x\nENCRYPTION=luks2\n' >"$keydir/enc.env"
+printf 'LABEL=kp-data\nTYPE=ext4\nUUID=x\nENCRYPTION=none\n' >"$keydir/plain.env"
+printf 'LABEL=kp-data\nTYPE=ext4\nUUID=x\n' >"$keydir/p3.env"
+yesno_enc() { if encrypted "$1"; then echo yes; else echo no; fi; }
+expect "record of an encrypted disk" yes "$(yesno_enc "$keydir/enc.env")"
+expect "record of an unencrypted disk" no "$(yesno_enc "$keydir/plain.env")"
+expect "record written before encryption existed" no "$(yesno_enc "$keydir/p3.env")"
+expect "no record" no "$(yesno_enc "$keydir/none.env")"
 
 # The maintenance window: reloaded only when the disk's user file changes it.
 window_generator=$work/generator

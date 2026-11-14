@@ -6,7 +6,12 @@ Documentation=file:///usr/libexec/kamerplanter/disks
 # fail it (the backup goes to the next location); a label on more than one
 # device or under another UUID does, and keeps the services stopped
 # (spec/distribution-requirements/ E8). After the data disk, so that two
-# set-ups never run at once.
+# set-ups never run at once, and so that it knows whether the data disk is
+# encrypted: then a backup disk is set up only encrypted, and one set up
+# unencrypted is not used (E16). An encrypted backup disk is opened as
+# /dev/mapper/kamerplanter-backup with the key stored on the system disk or
+# supplied as the credential kamerplanter.backup-disk-key (E14), and
+# unmounted and closed when the unit stops (see kamerplanter-data-disk.service).
 DefaultDependencies=no
 After=local-fs.target systemd-udev-trigger.service kamerplanter-data-disk.service
 Conflicts=shutdown.target
@@ -16,10 +21,12 @@ Before=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/kamerplanter/disks start backup
+ExecStop=/usr/libexec/kamerplanter/disks stop backup
 ImportCredential=kamerplanter.data-disk
 ImportCredential=kamerplanter.data-disk-force
 ImportCredential=kamerplanter.backup-disk
 ImportCredential=kamerplanter.backup-disk-force
+ImportCredential=kamerplanter.backup-disk-key
 TimeoutStartSec=infinity
 
 [Install]

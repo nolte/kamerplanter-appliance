@@ -18,6 +18,15 @@ Documentation=file:///usr/libexec/kamerplanter/disks
 # only after this unit. When the disk's user file sets another UPDATE_WINDOW
 # than the one the generator read at boot, it runs `systemctl daemon-reload`
 # so the maintenance window follows it.
+#
+# An encrypted data disk is opened as /dev/mapper/kamerplanter-data with the
+# key stored on the system disk or supplied as the credential
+# kamerplanter.data-disk-key (spec/distribution-requirements/ E14). When the
+# unit stops, after every unit that uses the disk, it unbinds, unmounts and
+# closes the disk, in that order. The mount units systemd makes for these
+# mounts are ordered before local-fs.target, and this unit after it, so at
+# shutdown this unit stops first and finds them all still in place; it must
+# not be ordered before those mount units, which would be a cycle.
 DefaultDependencies=no
 After=local-fs.target systemd-udev-trigger.service
 Conflicts=shutdown.target
@@ -27,12 +36,15 @@ Before=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/kamerplanter/disks start data
+ExecStop=/usr/libexec/kamerplanter/disks stop data
 # The provisioner may name the disks as system credentials; both are read, so
 # one disk is never named as data disk and as backup disk.
 ImportCredential=kamerplanter.data-disk
 ImportCredential=kamerplanter.data-disk-force
 ImportCredential=kamerplanter.backup-disk
 ImportCredential=kamerplanter.backup-disk-force
+# The key of an encrypted data disk; only this unit reads it.
+ImportCredential=kamerplanter.data-disk-key
 # Formatting and checking a large disk take as long as they take.
 TimeoutStartSec=infinity
 
