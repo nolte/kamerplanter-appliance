@@ -11,6 +11,10 @@
 #   /etc/kamerplanter/secrets.env             generated here, once per key
 #   /etc/kamerplanter/kamerplanter.env        the user's own values
 #
+# With a data disk, /etc/kamerplanter and /var/lib/kamerplanter/pinned are
+# bound from it by kamerplanter-data-disk.service
+# (/usr/libexec/kamerplanter/disks): the paths stay, the files live on the disk.
+#
 # The merged result is written to /run/kamerplanter/, and the container units
 # read only those files, so what this script checks is exactly what the
 # services receive. The layers are parsed by /usr/lib/kamerplanter/env.sh, the
@@ -55,12 +59,15 @@ replace() {
 . /usr/lib/kamerplanter/env.sh
 digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
 
-# A data disk that is set up but not mounted is never replaced by the system
-# disk: nothing is generated or written (spec/distribution-requirements/
-# E12). kamerplanter-config.service requires kamerplanter-data-disk.service,
-# which mounts it; this holds however configure is started.
-if [ -e /var/lib/kamerplanter/disks/data.env ] && ! mountpoint -q /var/mnt/kamerplanter-data; then
-    echo "data disk kp-data is missing; the services stay stopped and nothing is generated." >&2
+# A data disk that is set up but not mounted, or whose locations are not all
+# bound from it, is never replaced by the system disk: nothing is generated or
+# written (spec/distribution-requirements/ E12), so no secret and no pin lands
+# on the system disk underneath /etc/kamerplanter or $pins.
+# kamerplanter-config.service requires kamerplanter-data-disk.service, which
+# mounts the disk and binds its locations; this holds however configure is
+# started.
+if ! data_disk_placed; then
+    echo "data disk kp-data is missing or not in place; the services stay stopped and nothing is generated." >&2
     echo "Attach it, then run: systemctl restart kamerplanter.target (details: systemctl status kamerplanter-data-disk.service)" >&2
     exit 1
 fi

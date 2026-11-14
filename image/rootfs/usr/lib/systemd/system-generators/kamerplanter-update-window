@@ -3,7 +3,10 @@
 # time) in the defaults and the user's file, later wins. Runs at boot and on
 # `systemctl daemon-reload`. A missing file or an invalid value falls back to
 # the default, so the timer always has a window; the configuration check
-# (kamerplanter-config.service) reports an invalid value.
+# (kamerplanter-config.service) reports an invalid value. At boot it runs
+# before any disk is mounted: with a data disk it reads the user file of the
+# system disk, and kamerplanter-data-disk.service reloads systemd once the
+# disk's user file is in place and sets another window.
 set -euo pipefail
 dir=${1:?usage: kamerplanter-update-window <normal-dir> [...]}
 default=03:00

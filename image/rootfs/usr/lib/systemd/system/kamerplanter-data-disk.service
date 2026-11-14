@@ -10,6 +10,14 @@ Documentation=file:///usr/libexec/kamerplanter/disks
 # the disk is back, `systemctl restart kamerplanter.target` runs it again.
 # Not part of kamerplanter.target, so restarting the target does not restart
 # the units that require this one.
+#
+# With a data disk, it also binds the disk's locations onto
+# /etc/kamerplanter, /var/lib/kamerplanter/pinned and the two database
+# volumes, so the configuration, the secrets, the pins and the data live on
+# the disk (E9); Podman creates the volumes (arangodb.volume, valkey.volume)
+# only after this unit. When the disk's user file sets another UPDATE_WINDOW
+# than the one the generator read at boot, it runs `systemctl daemon-reload`
+# so the maintenance window follows it.
 DefaultDependencies=no
 After=local-fs.target systemd-udev-trigger.service
 Conflicts=shutdown.target

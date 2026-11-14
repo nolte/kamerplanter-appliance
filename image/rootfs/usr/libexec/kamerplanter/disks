@@ -38,6 +38,18 @@
 # another UUID, and when a check fails; the console says why
 # (/run/issue.d/40-kamerplanter-ROLE-disk.issue). A missing backup disk is
 # reported only: the pre-update backup then goes to the next location.
+#
+# Content of the data disk (E9). Once mounted, its directories etc, pinned,
+# volumes/arangodb_data and volumes/valkey_data are bound onto
+# /etc/kamerplanter, /var/lib/kamerplanter/pinned and the two Podman volumes
+# in /var/lib/containers/storage/volumes/ (data_disk_places in
+# /usr/lib/kamerplanter/env.sh), so every reader keeps its paths. A location
+# the disk lacks is created; a new etc starts with the user file of the
+# system disk. Owner and modes are enforced (root, 0700, files 0600). The
+# disk is refused when a location is a symbolic link, or a file in etc or
+# pinned is hard-linked or special. The SELinux labels follow the bound
+# paths. When anything fails, the binds made are undone and the disk is
+# unmounted again, so configure finds no location to write to.
 set -euo pipefail
 umask 077
 
@@ -45,6 +57,9 @@ records=/var/lib/kamerplanter/disks
 defaults=/usr/share/kamerplanter/kamerplanter.env
 user=/etc/kamerplanter/kamerplanter.env
 lock=/run/kamerplanter-disks.lock
+# The maintenance window generator and the drop-in it wrote at boot.
+window_generator=/usr/lib/systemd/system-generators/kamerplanter-update-window
+window_conf=/run/systemd/generator/kamerplanter-update-apply.timer.d/50-window.conf
 # Seconds a set-up disk, or a named one, gets to appear: USB disks take a moment.
 wait_seconds=30
 
@@ -125,6 +140,84 @@ remote_kind() {
     case $3 in
         */session[0-9]*/* | */nvme-fabrics/*) echo "$1 is attached over the network"; return ;;
     esac
+}
+
+# shown NAME: NAME with every character that is not printable replaced, for
+# messages about names found on a disk.
+shown() { printf '%s' "${1//[^[:print:]]/?}"; }
+
+# layout_problem ROOT: why the data disk mounted at ROOT is not used (E9),
+# empty when it is fine. Refused are a location of data_disk_places, or a
+# directory on the way to one, that is a symbolic link or no directory; an
+# entry of etc or pinned that is not a regular file, or a regular file with
+# more than one link (a hard link elsewhere on the disk, such as into a volume
+# a container writes to); and a _data of a volume that is a symbolic link or
+# no directory, which Podman would follow. A missing location is fine: it is
+# created. Reads only.
+layout_problem() {
+    local root=$1 place dir path d part parts type links entry
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        d=
+        IFS=/ read -ra parts <<<"$dir"
+        for part in "${parts[@]}"; do
+            d=${d:+$d/}$part
+            if [ -L "$root/$d" ]; then echo "$d is a symbolic link"; return; fi
+            if [ -e "$root/$d" ] && [ ! -d "$root/$d" ]; then echo "$d is not a directory"; return; fi
+        done
+        [ -d "$root/$dir" ] || continue
+        case $dir in
+            volumes/*)
+                if [ -L "$root/$dir/_data" ]; then echo "$dir/_data is a symbolic link"; return; fi
+                if [ -e "$root/$dir/_data" ] && [ ! -d "$root/$dir/_data" ]; then echo "$dir/_data is not a directory"; return; fi
+                ;;
+            *)
+                while IFS=' ' read -r -d '' type links entry; do
+                    entry=$dir/$(shown "${entry##*/}")
+                    case $type in
+                        f) [ "$links" = 1 ] || { echo "$entry has $links hard links"; return; } ;;
+                        l) echo "$entry is a symbolic link"; return ;;
+                        d) echo "$entry is a directory"; return ;;
+                        *) echo "$entry is a device or other special file"; return ;;
+                    esac
+                done < <(find "$root/$dir" -mindepth 1 -maxdepth 1 -printf '%y %n %p\0')
+                ;;
+        esac
+    done
+}
+
+# system_data ROOT: what the system disk under ROOT (/ on the appliance)
+# holds of the state that belongs on the data disk, one line each: the
+# secrets, pins, or data in a database volume. The user file is not counted:
+# the image ships it. Moving such state onto a data disk
+# (spec/distribution-requirements/ E11) is not part of this release, so a
+# named disk is not set up while the system disk holds any.
+system_data() {
+    local root=${1%/} place dir path
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        case $dir in
+            etc) if [ -e "$root$path/secrets.env" ]; then echo "$path/secrets.env"; fi ;;
+            pinned) if [ -n "$(find "$root$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then echo "pins in $path"; fi ;;
+            volumes/*) if [ -n "$(find "$root$path/_data" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then echo "data in $path"; fi ;;
+        esac
+    done
+}
+
+# window_stale: whether the maintenance window the generator writes now
+# differs from the drop-in it wrote at boot. At boot it ran before the data
+# disk was mounted and read the user file underneath /etc/kamerplanter, not
+# the one on the disk. Not stale when the generator fails now: a reload would
+# not help then either.
+window_stale() {
+    local tmp rc=1
+    tmp=$(mktemp -d)
+    if "$window_generator" "$tmp" >/dev/null 2>&1 &&
+        ! cmp -s -- "$tmp/kamerplanter-update-apply.timer.d/50-window.conf" "$window_conf"; then
+        rc=0
+    fi
+    rm -rf -- "$tmp"
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -356,6 +449,7 @@ mount_disk() {
     [ -d /var/mnt ] || install -d -m 0755 /var/mnt
     install -d -m 0700 "$mnt"
     mount -t ext4 -o nosuid,nodev,noexec "$dev" "$mnt" || die "the $label disk $dev could not be mounted at $mnt"
+    mounted_now=1
     chown root:root "$mnt"
     chmod 0700 "$mnt"
     clear_report
@@ -420,6 +514,13 @@ set_up() {
     disk_path_ok "$name" ||
         die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $name" \
             "name the disk by one of those paths (ls -l /dev/disk/by-id/), then run: systemctl restart kamerplanter.target"
+    if [ "$role" = data ]; then
+        local held
+        held=$(system_data /)
+        [ -z "$held" ] ||
+            die "$name is not set up as data disk: the system disk holds Kamerplanter data already (${held//$'\n'/, }), which this release does not move onto a data disk" \
+                "remove the naming ($key or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
+    fi
     deadline=$((SECONDS + wait_seconds))
     udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
     until [ -e "$name" ]; do
@@ -491,7 +592,150 @@ set_up() {
     else
         log_event formatted "$name ($dev) as ext4, file system UUID $uuid"
     fi
+    first_use=1
     mount_disk "$dev" "$uuid"
+}
+
+# undo: takes back the binds and the mount this run made, so that a failure
+# leaves no location half in place; then the unit fails (die).
+undo() {
+    local i
+    for ((i = ${#bound[@]} - 1; i >= 0; i--)); do
+        umount "${bound[i]}" || echo "${bound[i]} could not be unmounted" >&2
+    done
+    bound=()
+    if [ "$mounted_now" = 1 ]; then
+        umount "$mnt" || echo "$mnt could not be unmounted" >&2
+        mounted_now=0
+    fi
+}
+
+# lay_out: creates the locations the disk lacks and enforces root as owner,
+# 0700 for the locations and 0600 for the files in etc and pinned (E9). A new
+# etc starts with the user file of the system disk, so settings made before
+# the first start (spec/distribution-requirements/ D11) stay in effect.
+# Sets created to the locations it created.
+lay_out() {
+    local place dir path d part parts new
+    created=()
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        d='' new=0
+        IFS=/ read -ra parts <<<"$dir"
+        for part in "${parts[@]}"; do
+            d=${d:+$d/}$part
+            if [ ! -e "$mnt/$d" ]; then
+                mkdir -m 0700 "$mnt/$d" || return 1
+                if [ "$d" = "$dir" ]; then created+=("$dir") new=1; fi
+            fi
+            chown root:root "$mnt/$d" && chmod 0700 "$mnt/$d" || return 1
+        done
+        case $dir in volumes/*) continue ;; esac
+        if [ "$dir" = etc ] && [ "$new" = 1 ] &&
+            [ -f "$path/kamerplanter.env" ] && [ ! -L "$path/kamerplanter.env" ] && ! mountpoint -q "$path"; then
+            install -m 0600 -o root -g root "$path/kamerplanter.env" "$mnt/etc/kamerplanter.env" || return 1
+        fi
+        find "$mnt/$dir" -mindepth 1 -maxdepth 1 -type f -exec chown root:root {} + -exec chmod 0600 {} + || return 1
+    done
+    sync -f "$mnt"
+}
+
+# bind_places: binds every location onto its path. A path bound from the disk
+# already (the unit restarted) stays as it is; a path with anything else
+# mounted on it is refused. Sets bound to the paths bound here and new_dirs
+# to the directories created on the system disk to bind onto.
+bind_places() {
+    local place dir path at d
+    bound=() new_dirs=()
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        if bound_from "$dir" "$path"; then continue; fi
+        if mountpoint -q "$path"; then
+            at=$(findmnt -rnvo SOURCE -M "$path" | tail -n1)
+            why="$path is mounted from ${at:-elsewhere} already"
+            return 1
+        fi
+        if [ ! -d "$path" ]; then
+            d=$path
+            while [ ! -e "$d" ]; do new_dirs+=("$d"); d=${d%/*}; done
+            mkdir -p "$path" || { why="$path could not be created"; return 1; }
+        fi
+        mount --bind "$mnt/$dir" "$path" || { why="$mnt/$dir could not be bound onto $path"; return 1; }
+        bound+=("$path")
+    done
+}
+
+# relabel: gives the locations the SELinux labels of the paths they are bound
+# onto, by restorecon on those paths: etc_t for /etc/kamerplanter, var_lib_t
+# for the pins, container_var_lib_t for a volume and container_file_t for its
+# _data, as for the same paths on the system disk. A newly formatted disk
+# carries no labels, and a context= mount option would give etc and the
+# volumes one label. restorecon keeps a customizable type such as
+# container_file_t, which Podman gives a volume it creates, and works the
+# same on an adopted disk. A volume is relabelled throughout only when the
+# disk is new to this appliance (first_use): a database holds many files;
+# otherwise only the volume and its _data.
+relabel() {
+    selinuxenabled 2>/dev/null || return 0
+    local place dir path paths=("$mnt") deep=()
+    for place in "${data_disk_places[@]}"; do
+        read -r dir path <<<"$place"
+        case $dir in
+            volumes/*)
+                if [ "$first_use" = 1 ]; then
+                    deep+=("$path")
+                else
+                    paths+=("$path")
+                    if [ -d "$path/_data" ]; then paths+=("$path/_data"); fi
+                fi
+                ;;
+            *) deep+=("$path") ;;
+        esac
+    done
+    restorecon "${paths[@]}" ${new_dirs[@]+"${new_dirs[@]}"} || { why="restorecon failed"; return 1; }
+    restorecon -R "${deep[@]}" || { why="restorecon -R failed"; return 1; }
+}
+
+# place: puts the data disk's locations in place (lay_out, bind_places,
+# relabel); on any failure takes back what it did, and the unit fails.
+place() {
+    local problem why=
+    problem=$(layout_problem "$mnt")
+    if [ -n "$problem" ]; then
+        undo
+        die "the $label disk is not used: $problem" \
+            "remove or replace it on the disk, then run: systemctl restart kamerplanter.target"
+    fi
+    if ! lay_out; then
+        undo
+        die "the locations on the $label disk could not be created or given owner and modes"
+    fi
+    if ! bind_places || ! relabel; then
+        undo
+        die "the locations of the $label disk could not be put in place: $why"
+    fi
+    if [ ${#created[@]} -gt 0 ]; then log_event created "${created[*]} on the disk"; fi
+    if [ ${#bound[@]} -gt 0 ]; then echo "bound from the $label disk: ${bound[*]}"; fi
+}
+
+# refresh_window: brings UPDATE_WINDOW from the user file on the data disk
+# into effect. The generator runs at boot, before any disk is mounted, and on
+# daemon-reload; systemd reads a drop-in for the timer only then, so a runtime
+# drop-in would need the same reload. It is reloaded only when the window
+# differs (the first boot with the disk, or UPDATE_WINDOW changed on it), and
+# from here, before any unit ordered after this one starts. A reload while
+# the boot is in progress is safe: it is a request to PID 1 that does not wait
+# for this unit, queued jobs survive it, and systemd itself reloads during
+# early boot (systemd-sysext.service). A failed reload leaves the window read
+# at boot until the next reload; the services start all the same.
+refresh_window() {
+    [ -d /run/systemd/system ] || return 0
+    window_stale || return 0
+    if timeout 120 systemctl daemon-reload; then
+        echo "maintenance window taken from the user file on the $label disk"
+    else
+        echo "the maintenance window of the user file on the $label disk is not in effect: systemctl daemon-reload failed" >&2
+    fi
 }
 
 cmd_start() {
@@ -501,6 +745,7 @@ cmd_start() {
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
     naming
+    first_use=0 mounted_now=0 bound=() new_dirs=() created=()
     if [ -e "$record" ]; then
         if [ -n "$conflict" ]; then echo "$conflict; both are ignored while a $role disk is set up" >&2; fi
         find_and_mount
@@ -509,6 +754,11 @@ cmd_start() {
     else
         clear_report
         echo "no $role disk is set up or named"
+        return 0
+    fi
+    if [ "$role" = data ]; then
+        place
+        refresh_window
     fi
 }
 
@@ -528,6 +778,16 @@ cmd_status() {
         else
             echo "$role disk: $label, UUID $(get UUID), not mounted (see: systemctl status $unit)"
         fi
+        [ "$role" = data ] || continue
+        local place dir path
+        for place in "${data_disk_places[@]}"; do
+            read -r dir path <<<"$place"
+            if mountpoint -q "$mnt" && bound_from "$dir" "$path"; then
+                echo "  $path: on the disk ($dir)"
+            else
+                echo "  $path: not bound from the disk"
+            fi
+        done
     done
 }
 

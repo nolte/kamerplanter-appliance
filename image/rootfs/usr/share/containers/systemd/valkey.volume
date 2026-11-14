@@ -1,2 +1,11 @@
+[Unit]
+# With a data disk, kamerplanter-data-disk.service binds the volume's
+# directory from it (/usr/libexec/kamerplanter/disks). Podman creates the
+# volume only after that, so its _data is made on the disk and not on the
+# system disk underneath. Without a data disk that unit does nothing, and
+# this only orders the two.
+Requires=kamerplanter-data-disk.service
+After=kamerplanter-data-disk.service
+
 [Volume]
 VolumeName=valkey_data

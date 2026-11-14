@@ -32,7 +32,12 @@
 set -euo pipefail
 umask 077
 
+# The update state stays on the system disk, also with a data disk
+# (spec/update-and-rollback/ D9).
 state=/var/lib/kamerplanter/update
+# With a data disk, each volume directory below is bound from it
+# (/usr/libexec/kamerplanter/disks), and /etc/kamerplanter as well; the paths
+# stay the same.
 volumes=/var/lib/containers/storage/volumes
 # Named volumes of the Quadlet units (image/rootfs/usr/share/containers/systemd/*.volume).
 data_volumes=(arangodb_data valkey_data)
@@ -120,13 +125,20 @@ space_ok() {
 
 # copy_volumes SRC_DIR DST_DIR; fails on the first volume that does not copy
 # completely. Checked explicitly, because callers test it in a condition,
-# where set -e does not apply.
+# where set -e does not apply. A destination bound from the data disk is a
+# mount point: it stays, and only what it holds is replaced, on the disk.
 copy_volumes() {
     local name
     for name in "${data_volumes[@]}"; do
         [ -d "$1/$name" ] || continue
-        rm -rf "${2:?}/$name" || return 1
-        cp -a --reflink=auto "$1/$name" "$2/$name" || return 1
+        if mountpoint -q "$2/$name"; then
+            find "$2/$name" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || return 1
+            cp -a --reflink=auto "$1/$name/." "$2/$name/" || return 1
+            sync -f "$2/$name" || return 1
+        else
+            rm -rf "${2:?}/$name" || return 1
+            cp -a --reflink=auto "$1/$name" "$2/$name" || return 1
+        fi
     done
     sync -f "$2" || return 1
 }
@@ -334,6 +346,10 @@ EOF
 
 # Before the databases start, on every boot.
 cmd_guard() {
+    # The unit requires kamerplanter-data-disk.service; this holds however the
+    # guard is started: no backup or restore on the system disk underneath a
+    # volume of a data disk that is not in place.
+    data_disk_placed || die "the data disk kp-data is missing or not in place; no backup or restore (see: systemctl status kamerplanter-data-disk.service)"
     install -d -m 0700 "$state" "$state/backup"
     local booted good from to phase
     booted=$(slot booted digest)
