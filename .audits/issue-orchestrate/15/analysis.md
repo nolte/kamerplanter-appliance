@@ -315,3 +315,4 @@ Commit order: P1 (no commit) → P2 → P3 → P4 → P6 → P7 → P5 → P8 �
 <!-- <YYYY-MM-DD> P<k> dispatched to <subagent_type> — <result one-liner> -->
 2026-11-14 plan approved by the operator, Q1–Q4 defaults accepted.
 2026-11-14 P1 done by the generalist (spike on GitHub Actions, run 43605692183): bind mounts for `/etc/kamerplanter`, pins and volumes; daemon-reload after the mount for the window; ext4; toolset complete; adoption works.
+2026-11-14 P2 done via the `nolte-shared:spec` skill (run in the orchestrating session): distribution-requirements E2/E5 amended, E6–E15 added with acceptance criteria and a Context paragraph from the P1 spike; deployment-targets D3 widened, D9 added, NFS non-goal; update-and-rollback A7, D8, D9 added, D2/D5 amended, open question on the update state after a system replacement. en/de drift check clean; not yet committed.

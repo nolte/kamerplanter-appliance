@@ -55,6 +55,7 @@ Leser: Maintainer, die die Appliance bauen und veröffentlichen, Reviewer, die e
 - Andere Architekturen als x86_64.
 - Eine Garantie für jeden Hosting-Anbieter, Hypervisor oder Einplatinenrechner am Markt.
 - Dimensionierung für die optionalen Dienste (`vectordb`, `ollama`, `timescaledb`).
+- Ein Netzwerk-Dateisystem wie NFS als Datenort; es kann später ein eigenes Thema werden.
 
 ## Anforderungen
 
@@ -88,12 +89,13 @@ Leser: Maintainer, die die Appliance bauen und veröffentlichen, Reviewer, die e
 
 - **D1 MUSS [MUST]** auf gehosteten und privaten VMs mit den virtuellen Geräten laufen, die die Referenzplattformen standardmäßig zuweisen.
 - **D2 MUSS [MUST]** auf x86_64-Mini-PCs mit kabelgebundenem Ethernet und internem SATA- oder NVMe-Speicher laufen.
-- **D3 SOLLTE [SHOULD]** erlauben, dass der Datenort auf einem anderen Speichergerät liegt als das System.
+- **D3 SOLLTE [SHOULD]** erlauben, dass der Datenort auf einem anderen Speichergerät liegt als das System: auf VMs einer zweiten virtuellen Platte, auf privater Hardware einem zweiten internen Laufwerk, einer USB-Platte oder einem USB-Stick, wie `spec/distribution-requirements/` E6 bis E15 es festlegen.
 - **D4 MUSS [MUST]** allein mit kabelgebundenem Ethernet arbeiten.
 - **D5 KANN [MAY]** WLAN auf privater Hardware unterstützen.
 - **D6 MUSS [MUST]** Mindestwerte für CPU, Arbeitsspeicher und Speicherplatz je Zielklasse veröffentlichen, gestützt auf Messungen.
 - **D7 MUSS [MUST]** die Core-Dienste ohne GPU ausführen.
 - **D8 MUSS [MUST]** auf privater Hardware nach einem abrupten Stromausfall ohne manuelle Reparatur den Betrieb wieder aufnehmen.
+- **D9 MUSS [MUST]** in der Installationsdokumentation sagen, dass ein Datenträger auf einem Wechselmedium die erzeugten Secrets und die Datenbank trägt, sodass ein unverschlüsselter Stick oder eine unverschlüsselte Platte, die das Haus verlässt, sie preisgibt.
 
 ### E. Einrichtung je Umgebung
 
@@ -159,6 +161,7 @@ Die Kriterien fassen mehrere Anforderungen zusammen; jede Anforderung bleibt fü
 - [ ] Das Image bezieht seine Adresse per DHCP, übernimmt Hostname und SSH-Schlüssel, wo das Ziel Provisionierungsdaten liefert, und schließt die Ersteinrichtung auf einer Proxmox-VE-VM ohne cloud-init-Laufwerk ab (H5, H6, H7).
 - [ ] Das Image passt auf den kleinsten Servertyp jedes gehosteten Referenzziels und nutzt nach dem ersten Boot die ganze Platte (H8).
 - [ ] Kein Installationsweg stützt sich auf ein Image, das der Hersteller innerhalb eines Anbieters veröffentlicht hat (H9).
+- [ ] Auf einer VM und auf einem Mini-PC lässt sich der Datenort auf ein zweites Gerät einer in D3 genannten Art legen, und die Installationsdokumentation nennt das Risiko von Wechselmedien (D3, D9).
 
 ## Referenzen
 

@@ -52,6 +52,7 @@ Leser: der Maintainer, der Updates umsetzt und veröffentlicht, und die Autoren 
 - **A4 MUSS [MUST]** ein Update nur vorwärts gehen lassen; ein Release, das älter ist als das laufende, wird nie angeboten.
 - **A5 MUSS [MUST]** eine Appliance von jedem unterstützten Release direkt auf das neueste aktualisieren lassen, ohne Zwischen-Releases, die der Self-Hoster der Reihe nach installieren muss.
 - **A6 MUSS [MUST]** für jedes Release dokumentieren, ob sein Update Daten so ändert, dass ein Rollback es ohne Wiederherstellen einer Sicherung nicht rückgängig machen kann.
+- **A7 MUSS [MUST]** A4 auch über Datenträger hinweg anwenden: Eine Appliance startet die Dienste nicht auf einem Datenträger, den ein neueres Release benutzt hat, wie `spec/distribution-requirements/` E13 es verlangt.
 
 ### B. Erkennen und Herunterladen
 
@@ -78,12 +79,14 @@ Leser: der Maintainer, der Updates umsetzt und veröffentlicht, und die Autoren 
 ### D. Daten während eines Updates
 
 - **D1 MUSS [MUST]** alle persistenten Daten, die Konfiguration des Nutzers und die erzeugten Geheimnisse über ein Update und über einen Rollback hinweg erhalten.
-- **D2 MUSS [MUST]** vor dem ersten Start einer neuen Version eine konsistente Sicherung jeder Datenbank anlegen, die die neue Version migrieren kann, aufgenommen bei angehaltenen Diensten.
+- **D2 MUSS [MUST]** vor dem ersten Start einer neuen Version eine konsistente Sicherung jeder Datenbank anlegen, die die neue Version migrieren kann, aufgenommen bei angehaltenen Diensten, am Sicherungsort aus D8.
 - **D3 MUSS [MUST]** diese Sicherung wiederherstellen, wenn die Appliance von einer Version zurückrollt, die bereits gegen die Daten gestartet ist; ein Rollback lässt die vorherige Version nie auf Daten laufen, die die neuere migriert hat.
 - **D4 MUSS [MUST]** die Sicherung aus D2 behalten, bis die neue Version ihre Gesundheitsprüfung bestanden hat und einen festgelegten Zeitraum ohne Rollback gelaufen ist, und sie danach löschen.
-- **D5 MUSS [MUST]** die Aktivierung eines Updates verweigern, wenn am Speicherort der Daten der Platz für die Sicherung aus D2 fehlt, und den Grund melden.
+- **D5 MUSS [MUST]** die Aktivierung eines Updates verweigern, wenn an keinem Sicherungsort aus D8 Platz für die Sicherung aus D2 ist, und den Grund melden.
 - **D6 MUSS [MUST]** dem Self-Hoster in der Dokumentation und im Protokoll des Rollbacks aus D3 mitteilen, dass Daten, die zwischen Update und Rollback geschrieben wurden, mit der Wiederherstellung verloren gehen.
 - **D7 MUSS [MUST]** jedes Geheimnis erzeugen, das eine neue Version zusätzlich braucht, und jedes vorhandene behalten, wie `spec/distribution-requirements/` D9 und D10 verlangen.
+- **D8 MUSS [MUST]** die Sicherung aus D2 auf den Sicherungs-Datenträger schreiben, wenn einer eingerichtet ist (`spec/distribution-requirements/` E7), sonst auf den Datenträger, wenn einer eingerichtet ist (dort E6), sonst auf die Systemplatte; fehlt der bevorzugte Ort oder reicht sein Platz nicht, **MUSS [MUST]** sie den nächsten in dieser Reihenfolge nutzen und protokollieren, welchen Ort sie genutzt hat und warum.
+- **D9 MUSS [MUST]** den Update-Zustand, also das Protokoll aus E5, die nie wieder angewendeten Releases und die letzte gesunde Version, auf der Systemplatte halten und nie auf einem Datenträger.
 
 ### E. Gesundheitsprüfung und automatischer Rollback
 
@@ -137,6 +140,8 @@ Die Kriterien fassen mehrere Anforderungen zusammen; jede Anforderung bleibt fü
 - [ ] Ein Release, das nie gesund wird, verursacht höchstens die angegebene Zahl von Rollback-Versuchen und wird nicht erneut versucht (E3, E4).
 - [ ] Ein Update, dessen erster Start wegen Migrationen länger als üblich, aber innerhalb seines Zeitbudgets dauert, wird nicht zurückgerollt (E6).
 - [ ] Bei zu wenig freiem Platz für die Sicherung wird das Update nicht aktiviert, und der Grund wird festgehalten (D5).
+- [ ] Mit eingerichtetem Sicherungs-Datenträger wird die Sicherung dort abgelegt; fehlt er oder ist er voll, wird der nächste Ort aus D8 genutzt und das Protokoll nennt ihn (D8).
+- [ ] Ein älteres Release startet die Dienste nicht auf einem Datenträger, den ein neueres Release benutzt hat (A7).
 - [ ] Ein manueller Rollback mit dem dokumentierten Kommando stellt das vorherige Release und seine Daten wieder her, und das gescheiterte Release wird nicht erneut versucht (F1, F2, F4).
 - [ ] Die Konsole zeigt laufende Version, bereitgelegte Version und nächstes Fenster; das dokumentierte Kommando liefert dasselbe in maschinenlesbarer Form (G1, G2).
 - [ ] Die Release Notes jedes Releases nennen Kamerplanter-Version, Basis-Version, Konfigurationsänderungen und ob ein Rollback eine Wiederherstellung braucht (A6, G3).
@@ -158,6 +163,7 @@ Die Kriterien fassen mehrere Anforderungen zusammen; jede Anforderung bleibt fü
 - **Eine Version, die den Userspace nicht erreicht.** E2 deckt auch eine Version ab, die nicht bootet. Die Prüfung des Prototyps läuft im Userspace, und ohne Boot-Zähler in der GRUB-Konfiguration kehrt nichts von einem hängenden Kernel zurück. In Frage kommen das GRUB-Snippet von greenboot-rs in der statischen Konfiguration von bootupd oder ein eigener Boot-Zähler von bootc.
 - **Wann die vorherige Version als entbehrlich gilt.** D4 behält die Sicherung nach einem erfolgreichen Update für „einen festgelegten Zeitraum“. Ein Tag, eine Woche oder bis zum nächsten Update sind alle denkbar; abzuwägen ist Plattenplatz gegen die Möglichkeit, einen späten Fehler zu bemerken.
 - **Vorab-Laden der Container-Images.** B4 braucht die neuen Kamerplanter-Images vor dem Neustart im lokalen Speicher. bootcs logisch gebundene Images leisten das [R6], ihre Unterstützung im Installer-Weg ist laut der Distributionssichtung aber eingeschränkt; ob sie mit den Units der Appliance funktionieren, ist nicht festgestellt.
+- **Update-Zustand nach einem Systemaustausch.** D9 hält den Update-Zustand auf der Systemplatte, deshalb beginnt eine mit vorhandenem Datenträger neu aufgesetzte Appliance mit leerem Protokoll und leerer Liste der nie wieder angewendeten Releases. A7 hält ein älteres Release weiterhin fern, aber ein Release, das auf dem vorigen System gescheitert ist, kann noch einmal versucht werden. Ob diese Liste mit dem Datenträger wandern soll, ist offen.
 - **Standard-Wartungsfenster und Zeitzone.** C2 legt das Standardfenster in die Nacht der Zeitzone der Appliance, aber die Appliance hat noch keinen Einrichtungsschritt, der nach einer Zeitzone fragt.
 - **Wie der Self-Hoster von einem gescheiterten Update erfährt.** G4 verlangt einen Weg ohne Anmeldung. Die Web-UI gehört zu Kamerplanter, eine Meldung dort braucht also Unterstützung im Hauptprojekt; eine Benachrichtigung braucht einen eingerichteten Kanal. Beides ist offen.
 - **Unterstützungszeitraum und Reaktionszeit bei Sicherheitslücken.** H1 und H3 brauchen konkrete Zahlen. Sie hängen von der Kapazität des Maintainers und vom Rhythmus der Basis-Distribution ab; solange die Basis Fedora Rawhide ist, ist kein stabiles Versprechen möglich.

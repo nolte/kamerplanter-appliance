@@ -55,6 +55,7 @@ Readers: maintainers who build and release the appliance, reviewers who decide w
 - Architectures other than x86_64.
 - A guarantee for every hosting provider, hypervisor, or single-board computer on the market.
 - Sizing for the optional services (`vectordb`, `ollama`, `timescaledb`).
+- A network file system such as NFS as the data location; it may become a topic of its own later.
 
 ## Requirements
 
@@ -88,12 +89,13 @@ Readers: maintainers who build and release the appliance, reviewers who decide w
 
 - **D1 MUST** run on hosted and private VMs with the virtual devices that the reference platforms assign by default.
 - **D2 MUST** run on x86_64 mini PCs with wired Ethernet and internal SATA or NVMe storage.
-- **D3 SHOULD** allow the data location to reside on a different storage device than the system.
+- **D3 SHOULD** allow the data location to reside on a different storage device than the system: a second virtual disk on VMs, and a second internal drive, a USB disk, or a USB stick on private hardware, as `spec/distribution-requirements/` E6 to E15 define.
 - **D4 MUST** operate with wired Ethernet alone.
 - **D5 MAY** support Wi-Fi on private hardware.
 - **D6 MUST** publish minimum CPU, memory, and storage per target class, based on measurement.
 - **D7 MUST** run the core services without a GPU.
 - **D8 MUST** return to service after an abrupt power loss on private hardware without manual repair.
+- **D9 MUST** state in the installation documentation that a data disk on removable media carries the generated secrets and the database, so that an unencrypted stick or disk that leaves the premises exposes them.
 
 ### E. Setup per environment
 
@@ -159,6 +161,7 @@ The criteria roll several requirements together; every requirement stays normati
 - [ ] The image obtains its address through DHCP, applies hostname and SSH key where the target supplies provisioning data, and completes first-boot setup on a Proxmox VE VM without a cloud-init drive (H5, H6, H7).
 - [ ] The image fits the smallest server type of each hosted reference target and uses the whole disk after first boot (H8).
 - [ ] No installation path relies on an image published by the vendor inside a provider (H9).
+- [ ] On a VM and on a mini PC the data location can be put on a second device of a kind D3 names, and the installation documentation states the risk of removable media (D3, D9).
 
 ## References
 

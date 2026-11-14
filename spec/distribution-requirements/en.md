@@ -28,6 +28,8 @@ Established on 2026-11-12 by a review of the candidates' own documentation, pack
 
 Established on 2026-11-13 from the upstream documentation (`docs/de/deployment/konfigurationsmatrix.md`, `docs/de/reference/environment-variables.md`, `docs/de/deployment/backup-restore.md` in a working copy of `nolte/kamerplanter`) and from the first prototype runs: with `DEBUG=false` the backend refuses to start without `JWT_SECRET_KEY`, `ARANGODB_PASSWORD`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`, while the upstream `.env.example` names only the database password and the two salts, and the release Compose file passes neither `JWT_SECRET_KEY` nor `FERNET_KEY`. The upstream documentation states that `ERASURE_TOMBSTONE_SALT` must never change and that data encrypted with `FERNET_KEY` and deletion records depend on these values after a restore. A probe with the pinned ArangoDB image showed that it takes `ARANGO_ROOT_PASSWORD` only when the database is first created: after a restart with another value, the old password still logs in and the new one is refused.
 
+Established on 2026-11-14 by a feasibility spike for an optional data disk (a VM booted from the prototype's disk image with a second disk attached, on a GitHub-hosted runner with KVM): bind mounts from the data disk onto `/etc/kamerplanter`, `/var/lib/kamerplanter/pinned`, and the two database volume directories keep working across a new deployment that runs the ostree `/etc` merge and across a rollback; content written after the move stays on the data disk and is not copied into the `/etc` of any deployment on the system disk; a fresh appliance given the same disk uses its secrets and data unchanged. ext4 file system labels hold at most 16 characters and xfs labels 12, so the labels are `kp-data` and `kp-backup`. The base image ships `mkfs.ext4`, `cryptsetup`, `systemd-cryptenroll`, and the TPM2 tools.
+
 Unestablished: everything the acceptance criteria demand of a prototype, in particular boot and rollback under legacy BIOS, the drivers actually present in the initial RAM disk, behaviour on power loss, and the footprint. For openSUSE, the licence, trademark, and lifetime pages could not be fetched, and parts of the MicroOS findings come from a third-party mirror of its image description.
 
 Boundaries: application behaviour belongs to `nolte/kamerplanter`. Where the appliance runs, and what differs between those places, is owned by `spec/deployment-targets/`. The build pipeline, the update channel and release process, and the first-boot setup interface are subjects of their own specs, which do not exist yet. This spec states only what the distribution has to make possible for them.
@@ -108,10 +110,20 @@ Readers: maintainers who select the base distribution and build the appliance, a
 ### E. State and data
 
 - **E1 MUST** keep all persistent state in a location separate from the system image, untouched by updates and rollbacks.
-- **E2 MUST** make the set of persistent locations enumerable, so that everything outside it can be discarded and reproduced.
+- **E2 MUST** make the set of persistent locations enumerable, so that everything outside it can be discarded and reproduced. With a data disk (E6), the locations on it belong to that set.
 - **E3 MUST** let the data location grow to the available space, at first boot and after a virtual disk is enlarged, without reinstalling.
 - **E4 SHOULD** support consistent backups through hypervisor snapshots on virtualised targets, including a filesystem freeze through a guest agent.
-- **E5 MUST** keep the generated secrets in the persistent state and name them in the backup guidance, since data restored without them loses its encrypted fields and deletion records.
+- **E5 MUST** keep the generated secrets in the persistent state, on the data disk of E6 when one is set up and on the system disk otherwise, and name them in the backup guidance, since data restored without them loses its encrypted fields and deletion records.
+- **E6 MAY** keep the persistent state on an optional, separate local data disk: a second virtual disk, a second internal drive, a USB disk, or a USB stick. Without a data disk the persistent state stays on the system disk as before.
+- **E7 MUST** format a disk as data disk (ext4, label `kp-data`) or as backup disk (label `kp-backup`, see `spec/update-and-rollback/` D8) only when it is named explicitly by a `/dev/disk/by-*` path, as a setting or as the system credential of the same name at first start, and MUST refuse a named disk that carries another file system or partition table, naming the signature found, unless the naming explicitly forces the format.
+- **E8 MUST** find a set-up data disk by its label, never by its device name, and mount it before any service that reads the configuration or the data starts.
+- **E9 MUST**, while a data disk is mounted, keep on it the database volumes, the user file, the generated secrets, and the records of the values that must stay constant (D12); the update state of `spec/update-and-rollback/` stays on the system disk.
+- **E10 MUST**, when a freshly installed appliance finds a data disk, use the configuration, secrets, and data on it and generate no secret.
+- **E11 MUST**, when a data disk is named on an appliance that holds data on its system disk, stop the services, move the data, configuration, secrets, and records of E9 onto the disk, and continue from it; it MUST keep the copy on the system disk until the appliance has started healthy from the data disk and the keeping period of the update backup has passed, and return to that copy when the start from the data disk fails.
+- **E12 MUST** keep the services stopped and report that the disk `kp-data` is missing when a data disk is set up but absent at boot, and MUST NOT generate any secret in that state.
+- **E13 MUST** record on the data disk the highest release that has used it, keep the services stopped with both releases named when the running release is older, and offer one documented command that overrides this deliberately; a development build counts as older than any release.
+- **E14 MAY** encrypt the data disk and the backup disk with LUKS2. The key MUST come from the provisioner, as a setting or a system credential, and MUST NOT be generated by the appliance; the appliance MUST keep it on the system disk readable by root only or in the TPM to unlock later boots, and MUST NOT write it to the data disk, the journal, or the update record.
+- **E15 MUST NOT** use a network file system as data location.
 
 ### F. Footprint
 
@@ -203,6 +215,13 @@ Each criterion is checked on a prototype of the candidate. The criteria roll sev
 - [ ] A value set in the user file reaches the services after a restart, wins over the generated value, and is still in effect after an update and after a rollback (D11).
 - [ ] An invalid value in the user file, also on an indented line, and a changed value of a setting that must stay constant, keep the services stopped with a message naming the value (D12).
 - [ ] The backup guidance names the generated secrets, and a restore with them brings back encrypted fields (E5).
+- [ ] A disk named at first start becomes the data disk with label `kp-data`; an unnamed disk and a named disk carrying another file system stay untouched (E7).
+- [ ] With a data disk, the database volumes, the user file, the generated secrets, and the records of D12 are on it; attached under another device name it is still found; the update state stays on the system disk (E8, E9).
+- [ ] A fresh installation of the same release given the same data disk keeps data, logins, and encrypted fields and generates no secret (E10).
+- [ ] An appliance with data on its system disk moves onto a newly named data disk and keeps data, logins, and encrypted fields; a failed start from the disk returns it to the copy on the system disk (E11).
+- [ ] Without the set-up data disk the services stay stopped and no secret is generated; once the disk is back the services start (E12).
+- [ ] An older release keeps the services stopped on a data disk that a newer release used, and the documented override command starts them (E13).
+- [ ] An encrypted data disk opens on later boots without user action, and its key appears neither on the disk nor in the journal (E14).
 - [ ] The component list of the release contains no graphical system, no desktop environment, and no development toolchain, and no service runs that the appliance does not use (F1, F2, F3, F4, F5).
 - [ ] Idle memory use, installed size, and boot time are recorded for the candidate (F6).
 - [ ] Support lifecycle, advisory process, and redistribution terms are documented with their sources (G6, I1, I2, I3).

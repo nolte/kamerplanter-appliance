@@ -52,6 +52,7 @@ Readers: the maintainer, who implements and releases updates, and the authors of
 - **A4 MUST** let an update move only forward; a release older than the running one is never offered.
 - **A5 MUST** let an appliance update directly from any supported release to the newest one, without intermediate releases that the self-hoster has to install in order.
 - **A6 MUST** document for every release whether its update changes data in a way that a rollback cannot undo without restoring a backup.
+- **A7 MUST** apply A4 across data disks: an appliance does not start the services on a data disk that a newer release has used, as `spec/distribution-requirements/` E13 requires.
 
 ### B. Discovery and download
 
@@ -78,12 +79,14 @@ Readers: the maintainer, who implements and releases updates, and the authors of
 ### D. Data during an update
 
 - **D1 MUST** keep all persistent data, the user configuration, and the generated secrets across an update and across a rollback.
-- **D2 MUST**, before the first start of a new version, record a consistent backup of every database the new version may migrate, taken with the services stopped.
+- **D2 MUST**, before the first start of a new version, record a consistent backup of every database the new version may migrate, taken with the services stopped, in the backup location of D8.
 - **D3 MUST** restore that backup when the appliance rolls back from a version that has already started against the data; a rollback never runs the previous version on data migrated by the newer one.
 - **D4 MUST** keep the backup of D2 until the new version has passed its health check and run without a rollback for a defined period, and delete it afterwards.
-- **D5 MUST** refuse to activate an update when the data location lacks space for the backup of D2, and report why.
+- **D5 MUST** refuse to activate an update when no backup location of D8 has space for the backup of D2, and report why.
 - **D6 MUST** tell the self-hoster that data written between the update and a rollback is lost with the restore, in the documentation and in the record of D3's rollback.
 - **D7 MUST** generate every secret a new version newly requires and keep every existing one, as `spec/distribution-requirements/` D9 and D10 require.
+- **D8 MUST** write the backup of D2 to the backup disk when one is set up (`spec/distribution-requirements/` E7), otherwise to the data disk when one is set up (E6 there), otherwise to the system disk; when the preferred location is missing or lacks space, it MUST use the next one in that order and record which location it used and why.
+- **D9 MUST** keep the update state, that is the record of E5, the releases never applied again, and the last healthy version, on the system disk and never on a data disk.
 
 ### E. Health check and automatic rollback
 
@@ -137,6 +140,8 @@ The criteria roll several requirements together; every requirement stays normati
 - [ ] A release that never becomes healthy causes at most the stated number of rollback attempts and is not tried again (E3, E4).
 - [ ] An update whose first start takes longer than usual because of migrations, but within its time budget, is not rolled back (E6).
 - [ ] With too little free space for the backup, the update is not activated and the reason is recorded (D5).
+- [ ] With a backup disk set up, the backup is written there; with the backup disk missing or full, the next location of D8 is used and the record names it (D8).
+- [ ] An older release does not start the services on a data disk that a newer release has used (A7).
 - [ ] A manual rollback with the documented command restores the previous release and its data, and the failed release is not retried (F1, F2, F4).
 - [ ] The console shows running version, staged version, and next window; the documented command returns the same in machine-readable form (G1, G2).
 - [ ] The release notes of each release state Kamerplanter version, base version, configuration changes, and whether a rollback needs a restore (A6, G3).
@@ -158,6 +163,7 @@ The criteria roll several requirements together; every requirement stays normati
 - **A version that does not reach user space.** E2 also covers a version that fails to boot. The prototype's check runs in user space, and without a boot counter in the GRUB configuration nothing returns from a kernel that hangs. Adding greenboot-rs's GRUB snippet to bootupd's static configuration, or a boot counter of bootc's own, are the candidates.
 - **When the previous version is considered safe to drop.** D4 keeps the backup for "a defined period" after a successful update. A day, a week, or until the next update are all plausible; the trade-off is disk space against the chance to notice a late failure.
 - **Pre-fetching the container images.** B4 needs the new Kamerplanter images in local storage before the reboot. bootc's logically bound images do this [R6], but their support in the installer path is limited according to the distribution review; whether they work with the appliance's units is unestablished.
+- **Update state after a system replacement.** D9 keeps the update state on the system disk, so an appliance rebuilt with an existing data disk starts with an empty record and an empty list of releases never applied again. A7 still keeps an older release away, but a release that failed on the previous system can be tried once more. Whether that list should travel with the data disk is undecided.
 - **Default maintenance window and time zone.** C2 places the default window at night in the appliance's time zone, but the appliance has no setup step that asks for a time zone yet.
 - **How the self-hoster is told about a failed update.** G4 asks for a way that needs no login. The web UI belongs to Kamerplanter, so a message there needs upstream support; a notification needs a configured channel. Both are undecided.
 - **Support period and security response time.** H1 and H3 need concrete numbers. They depend on the maintainer's capacity and on the cadence of the base distribution; while the base is Fedora Rawhide, no stable promise is possible.
