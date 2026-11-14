@@ -6,11 +6,24 @@
 # project's registry, and this line moves there once the mirror exists.
 FROM quay.io/fedora/fedora-bootc:46@sha256:88c67690217d3d8ae08cceba784322d9d46ed0d9a997fd1d1224b8f8f0a51741
 
-# The release version; bootc shows it as the version of a deployment.
+# OCI labels (spec/project/dockerfile-best-practices/ in nolte/claude-shared).
+# VERSION is the release version; bootc shows it as the version of a
+# deployment. REVISION is the commit the image is built from and CREATED that
+# commit's time, not the build time, so a rebuild of a commit labels alike.
+# The build workflow and `task image:build` pass all three.
 ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=1970-01-01T00:00:00Z
 LABEL org.opencontainers.image.title="Kamerplanter appliance" \
+      org.opencontainers.image.description="Bootable, self-updating appliance that runs the self-hosted plant-management app Kamerplanter on a single machine" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.source="https://github.com/nolte/kamerplanter-appliance"
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}" \
+      org.opencontainers.image.source="https://github.com/nolte/kamerplanter-appliance" \
+      org.opencontainers.image.url="https://github.com/nolte/kamerplanter-appliance" \
+      org.opencontainers.image.documentation="https://nolte.github.io/kamerplanter-appliance/" \
+      org.opencontainers.image.vendor="Kamerplanter" \
+      org.opencontainers.image.licenses="MIT"
 
 COPY rootfs/ /
 
