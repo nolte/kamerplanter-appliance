@@ -35,15 +35,27 @@
 #               yet), checking (TO booted, data backed up under FROM, health
 #               not decided) or manual (rollback from TO to FROM requested)
 #   failed      digests that failed and are never applied again
-#   backup/D/   the volumes as they were when D was left
+#   backup/D/   on the system disk: the volumes as they were when D was left
+#   backups/D   where the backup of D is (LOCATION, and the UUID of its
+#               disk), its checksum (SHA256), when it was taken (TAKEN), and
+#               since when its deletion waits for its disk (DELETE_PENDING)
 #   log.jsonl   one JSON object per event
 #   postpone    epoch seconds until which no update is activated
 #   downgrades  "DISK RUNNING TIME" per allow-downgrade: the running release
 #               may use a data disk whose marker holds the newer DISK
 #
-# On the data disk, when one is set up, only the release marker "release"
-# (/usr/lib/kamerplanter/env.sh, data_disk_marker); a copy of it is part of
-# every backup/D/ (data-disk-release).
+# The pre-update backup of D goes to the first location that may take it and
+# has space for it (spec/update-and-rollback/ D8): update-backup/D/ on the
+# backup disk, else update-backup/D/ at the top of the data disk, else
+# backup/D/ above (backup_locations in /usr/lib/kamerplanter/env.sh). With an
+# encrypted data disk, only an encrypted backup disk, the data disk, or the
+# system disk while the key of the data disk is kept on it count. Wherever
+# the backup is, backups/D says so and holds the checksum verified before it
+# is restored (D10).
+#
+# On the data disk, when one is set up, the release marker "release"
+# (/usr/lib/kamerplanter/env.sh, data_disk_marker), and the backups written
+# to it; a copy of the marker is part of every backup (data-disk-release).
 set -euo pipefail
 umask 077
 
@@ -64,6 +76,15 @@ disks_tool=/usr/libexec/kamerplanter/disks
 # The console message of a refused data disk (release_check); before the
 # general one, after those of the disk service (40-kamerplanter-*-disk.issue).
 release_issue=/run/issue.d/45-kamerplanter-release.issue
+# The console message of a backup that is not restored (restore_refused).
+restore_issue=/run/issue.d/45-kamerplanter-restore.issue
+# The records of the pre-update backups, one per version left (backups/D).
+backups=$state/backups
+# The record of the backup disk, and the key of an encrypted data disk as the
+# disk service keeps it on the system disk (spec/distribution-requirements/
+# E8, E14).
+backup_disk_record=/var/lib/kamerplanter/disks/backup.env
+data_disk_key=/var/lib/kamerplanter/disks/keys/data.key
 
 die() { echo "kamerplanter-update: $*" >&2; exit 1; }
 
@@ -80,13 +101,16 @@ count() {
     if [[ $value =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
 }
 
-log() {  # log EVENT RESULT DETAIL [FROM] [TO]
+log() {  # log EVENT RESULT DETAIL [FROM] [TO] [JSON]; JSON, an object, is added
     install -d -m 0700 "$state"
+    local extra=${6-}
+    [ -n "$extra" ] || extra='{}'
     jq -cn --arg time "$(date -u +%FT%TZ)" --arg event "$1" --arg result "$2" \
-        --arg detail "$3" --arg from "${4-}" --arg to "${5-}" \
+        --arg detail "$3" --arg from "${4-}" --arg to "${5-}" --argjson extra "$extra" \
         '{time: $time, event: $event, result: $result, detail: $detail}
          + (if $from != "" then {from: $from} else {} end)
-         + (if $to != "" then {to: $to} else {} end)' >>"$state/log.jsonl"
+         + (if $to != "" then {to: $to} else {} end)
+         + $extra' >>"$state/log.jsonl"
     echo "$1: $2: $3" >&2
 }
 
@@ -120,13 +144,288 @@ volume_bytes() {
     echo "$total"
 }
 
-# A backup needs room for a copy of the volumes plus a margin of 10 % and
-# 512 MiB for the database to keep working (spec D5).
-space_ok() {
-    local need free
-    need=$(($(volume_bytes) * 11 / 10 + 512 * 1024 * 1024))
-    free=$(($(stat -f -c '%a * %S' /var)))
-    [ "$free" -ge "$need" ] || { echo "$free bytes free in /var, $need needed for the pre-update backup"; return 1; }
+# ---------------------------------------------------------------------------
+# The pre-update backup and where it is (spec/update-and-rollback/ D2, D4,
+# D5, D8, D10). The locations, their order, the protection rule and the space
+# rule are in /usr/lib/kamerplanter/env.sh (backup_locations, backup_refusal,
+# space_problem, restore_problem); tests/unit/backup.sh checks them. Here the
+# update tool finds what each location is like now, and acts on it.
+
+# location_uuid LOCATION: the identity recorded for the disk of LOCATION, in
+# lower case; empty for the system disk or a disk not set up.
+location_uuid() {
+    local uuid=
+    case $1 in
+        backup-disk) uuid=$(record_field UUID "$backup_disk_record") ;;
+        data-disk) uuid=$(record_field UUID "$data_disk_record") ;;
+    esac
+    printf '%s' "${uuid,,}"
+}
+
+# location_state LOCATION: ok, not-set-up, missing, foreign or moving, as
+# backup_refusal takes it. A disk counts only mounted under the identity
+# recorded for it (spec/distribution-requirements/ E8), and answering.
+location_state() {
+    case $1 in
+        system-disk) echo ok ;;
+        backup-disk)
+            if [ ! -e "$backup_disk_record" ]; then
+                echo not-set-up
+            elif ! mount_present "$backup_disk_mount"; then
+                echo missing
+            elif [ "$(mounted_uuid "$backup_disk_mount")" != "$(location_uuid backup-disk)" ]; then
+                echo foreign
+            else
+                echo ok
+            fi
+            ;;
+        data-disk)
+            if [ ! -e "$data_disk_record" ]; then
+                echo not-set-up
+            elif ! data_disk_placed || ! data_disk_present; then
+                echo missing
+            elif [ "$(mounted_uuid "$data_disk_mount")" != "$(location_uuid data-disk)" ]; then
+                echo foreign
+            else
+                case $(data_disk_move_field STATE) in
+                    copying | moved | falling-back) echo moving ;;
+                    *) echo ok ;;
+                esac
+            fi
+            ;;
+        *) echo unknown ;;
+    esac
+}
+
+# record_encrypted RECORD: whether the disk of RECORD was set up encrypted.
+record_encrypted() { [ "$(record_field ENCRYPTION "$1")" = luks2 ]; }
+
+# data_encrypted: 1 when the data disk is set up encrypted, else 0.
+data_encrypted() {
+    if [ -e "$data_disk_record" ] && record_encrypted "$data_disk_record"; then echo 1; else echo 0; fi
+}
+
+# protected LOCATION: 1 when LOCATION is protected as an encrypted data disk
+# requires (D8, spec/distribution-requirements/ E16), else 0. The data disk
+# protects itself. The system disk counts when the key of the data disk is
+# kept on it (E14): the key is never sealed in the TPM, so whoever holds the
+# system disk can open the data disk anyway, and a backup there adds nothing
+# they could not read; without the key there, an unencrypted copy would.
+protected() {
+    case $1 in
+        backup-disk) if record_encrypted "$backup_disk_record"; then echo 1; else echo 0; fi ;;
+        data-disk) data_encrypted ;;
+        system-disk) if [ -f "$data_disk_key" ] && [ ! -L "$data_disk_key" ]; then echo 1; else echo 0; fi ;;
+        *) echo 0 ;;
+    esac
+}
+
+free_bytes() { echo $(($(stat -f -c '%a * %S' "$1"))); }
+
+# assess: what each location of backup_locations is like for a backup of the
+# volumes now, in that order: sets at_state and at_reason (empty when the
+# location may take the backup and has space for it).
+assess() {
+    local loc need encrypted reason fs
+    need=$(backup_need "$(volume_bytes)")
+    encrypted=$(data_encrypted)
+    at_state=() at_reason=()
+    for loc in "${backup_locations[@]}"; do
+        at_state+=("$(location_state "$loc")")
+        reason=$(backup_refusal "$loc" "${at_state[-1]}" "$encrypted" "$(protected "$loc")")
+        if [ -z "$reason" ]; then
+            fs=$(backup_fs "$loc")
+            reason=$(space_problem "$(free_bytes "$fs")" "$need" "$fs")
+        fi
+        at_reason+=("$reason")
+    done
+}
+
+# refusals: after assess (and the attempts that changed at_reason), sets
+# refused_at to the locations that are set up and do not take the backup, as
+# LOCATION REASON pairs for backup_summary, and skipped_json to every
+# location skipped, with its reason, for the update record.
+refusals() {
+    local i
+    refused_at=() skipped_json='[]'
+    for i in "${!backup_locations[@]}"; do
+        [ -n "${at_reason[i]}" ] || continue
+        skipped_json=$(jq -c --arg l "${backup_locations[i]}" --arg r "${at_reason[i]}" \
+            '. + [{location: $l, reason: $r}]' <<<"$skipped_json")
+        [ "${at_state[i]}" = not-set-up ] || refused_at+=("${backup_locations[i]}" "${at_reason[i]}")
+    done
+}
+
+# backup_possible: whether some location takes a backup of the volumes now
+# (D5); prints why not when none does.
+backup_possible() {
+    assess
+    backup_first "${at_reason[@]}" >/dev/null && return 0
+    refusals
+    backup_summary "${refused_at[@]}"
+    return 1
+}
+
+# backup_checksum DIR: the SHA-256 of a backup (D10): of the type, mode,
+# owner, path and link target of everything in DIR, and of the content of
+# every file. Fails when anything cannot be read.
+backup_checksum() {
+    local sum
+    sum=$(
+        {
+            (cd -- "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p -> %l\n' | LC_ALL=C sort) &&
+                (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum --)
+        } | sha256sum
+    ) || return 1
+    printf '%s' "${sum%% *}"
+}
+
+# write_record FILE KEY=VALUE...: sets the KEYs in the record FILE, the other
+# lines kept, durably: a reader sees the old or the new record.
+write_record() {
+    local file=$1 tmp pair keys=()
+    shift
+    for pair in "$@"; do keys+=("${pair%%=*}"); done
+    install -d -m 0700 "$(dirname "$file")" || return 1
+    tmp=$(mktemp "$file.XXXXXX") || return 1
+    if {
+        if [ -f "$file" ]; then grep -v -E "^($(IFS='|'; echo "${keys[*]}"))=" -- "$file" || true; fi
+        for pair in "$@"; do printf '%s\n' "${pair//$'\n'/ }"; done
+    } >"$tmp" && sync "$tmp" && mv -fT -- "$tmp" "$file" && sync -f "$(dirname "$file")"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+}
+
+# backup_dir D: the directory of the recorded backup of D; empty without a
+# record naming a known location.
+backup_dir() {
+    local base
+    base=$(backup_base "$(record_field LOCATION "$backups/$1")") || return 0
+    printf '%s/%s' "$base" "$1"
+}
+
+# readable D: why the recorded backup of D cannot be read now; empty when it
+# can (restore_problem, for the location and the disk the record names).
+readable() {
+    local rec=$backups/$1 loc
+    loc=$(record_field LOCATION "$rec")
+    backup_base "$loc" >/dev/null || { echo "its record names no known location (${loc:-none})"; return; }
+    restore_problem "$loc" "$(location_state "$loc")" "$(record_field UUID "$rec")" "$(location_uuid "$loc")"
+}
+
+# backup_problem D: why the recorded backup of D is not restored: it cannot
+# be read, its directory is gone, or it does not match its checksum (D10);
+# empty when it may be restored.
+backup_problem() {
+    local problem dir sum where
+    problem=$(readable "$1")
+    if [ -n "$problem" ]; then echo "$problem"; return; fi
+    dir=$(backup_dir "$1")
+    where=$(backup_where "$(record_field LOCATION "$backups/$1")")
+    [ -d "$dir" ] || { echo "it is recorded on $where, but $dir is not there"; return; }
+    if ! sum=$(backup_checksum "$dir"); then
+        echo "it cannot be read completely on $where ($dir)"
+        return
+    fi
+    [ "$sum" = "$(record_field SHA256 "$backups/$1")" ] ||
+        echo "it does not match the checksum recorded when it was taken; it was changed or damaged on $where ($dir)"
+}
+
+# forget_backup D: before a new backup of D, the earlier one is deleted with
+# its record. When its disk is missing, only the record goes; cleanup deletes
+# the backup left there once that disk is back and the keeping period is over.
+forget_backup() {
+    local dir
+    [ -e "$backups/$1" ] || return 0
+    dir=$(backup_dir "$1")
+    if [ -n "$dir" ] && [ -z "$(readable "$1")" ]; then rm -rf -- "${dir:?}" || return 1; fi
+    rm -f -- "${backups:?}/${1:?}"
+}
+
+# write_backup LOCATION D TO: the volumes and the marker copy into the backup
+# of D at LOCATION, its checksum, then its record; fails, and leaves nothing
+# of it behind, when any of that cannot be written.
+write_backup() {
+    local base dir sum
+    base=$(backup_base "$1") || return 1
+    dir=$base/${2:?}
+    if install -d -m 0700 "$base" && rm -rf -- "${dir:?}" && install -d -m 0700 "$dir" &&
+        copy_volumes "$volumes" "$dir" && backup_marker "$dir" && sum=$(backup_checksum "$dir") &&
+        sync -f "$dir" &&
+        write_record "$backups/$2" LOCATION="$1" UUID="$(location_uuid "$1")" SHA256="$sum" \
+            TAKEN="$(date -u +%FT%TZ)" TO="$3"; then
+        return 0
+    fi
+    rm -rf -- "${dir:?}"
+    rm -f -- "${backups:?}/${2:?}"
+    return 1
+}
+
+# take_backup D TO: the pre-update backup of the volumes, left by D for TO,
+# at the first location that takes it (D8): a location that is refused, has
+# no space, or cannot be written to is skipped for the next one. Records the
+# location used and why the others were skipped. When none takes it, sets
+# backup_failure to why, and fails.
+take_backup() {
+    local i where='' detail=''
+    backup_failure=
+    forget_backup "$1" || { backup_failure="the earlier backup of $(short "$1") could not be deleted"; return 1; }
+    assess
+    for i in "${!backup_locations[@]}"; do
+        [ -z "${at_reason[i]}" ] || continue
+        if write_backup "${backup_locations[i]}" "$1" "$2"; then
+            where=${backup_locations[i]}
+            break
+        fi
+        at_reason[i]="the data could not be copied for the pre-update backup"
+    done
+    refusals
+    if [ -z "$where" ]; then
+        backup_failure=$(backup_summary "${refused_at[@]}")
+        return 1
+    fi
+    for ((i = 0; i < ${#refused_at[@]}; i += 2)); do
+        detail+="; not on $(backup_where "${refused_at[i]}"): ${refused_at[i + 1]}"
+    done
+    log update backup "data backed up before the first start of $(slot booted version) on $(backup_where "$where")$detail" \
+        "$1" "$2" "$(jq -cn --arg l "$where" --argjson s "$skipped_json" '{location: $l, skipped: $s}')"
+}
+
+# restore_refused D TO PROBLEM: the backup of D is not restored. The services
+# stay stopped (the guard fails), and the journal, the update record and the
+# console say why. The pending record stays, so the guard tries again when
+# it runs next.
+restore_refused() {
+    local message hint
+    message="the data backup from before the update to $(short "$2") cannot be restored: $3; the services stay stopped, so that $(slot booted version) does not run on data the newer release may have changed"
+    case $3 in
+        *"does not match the checksum"* | *"cannot be read completely"* | *"is not there"* | *"no known location"*)
+            hint="the backup is damaged or gone; restore the data by hand from another backup (see: kamerplanter-update status)"
+            ;;
+        *)
+            hint="make the disk available again under the identity it was set up with, then reboot (or run: systemctl restart kamerplanter-backup-disk.service kamerplanter.target)"
+            ;;
+    esac
+    log rollback refused "$message" "$2" "$1"
+    echo "$hint" >&2
+    install -d -m 0755 /run/issue.d
+    {
+        echo "Kamerplanter: $message"
+        echo "  $hint"
+        echo "  details: systemctl status kamerplanter-update-guard.service"
+        echo
+    } >"$restore_issue.tmp"
+    chmod 0644 "$restore_issue.tmp"
+    mv "$restore_issue.tmp" "$restore_issue"
+    agetty --reload >/dev/null 2>&1 || true
+}
+clear_restore_issue() {
+    if [ -e "$restore_issue" ]; then
+        rm -f "$restore_issue"
+        agetty --reload >/dev/null 2>&1 || true
+    fi
 }
 
 # copy_volumes SRC_DIR DST_DIR; fails on the first volume that does not copy
@@ -347,9 +646,11 @@ cmd_status() {
              systemCopyDeleted: ($cleaned | n), failed: ($failed | n), reason: ($reason | n),
              namingIgnored: ($ignored | n)}')
     fi
+    local backups_json
+    backups_json=$(backup_list)
     doc=$(host | jq --arg window "$(next_window)" --arg postponed "$(postponed_until || true)" \
         --arg pending "$(pending)" --rawfile failed <(cat "$state/failed" 2>/dev/null || true) \
-        --argjson disk "$disk" --argjson move "$move" \
+        --argjson disk "$disk" --argjson move "$move" --argjson backups "$backups_json" \
         --slurpfile log <(tail -n 20 "$state/log.jsonl" 2>/dev/null || true) '
         def slot(s): .status[s].image // null | if . == null then null else
             {version, digest: .imageDigest, image: .image.image, timestamp} end;
@@ -362,6 +663,7 @@ cmd_status() {
           failed: ($failed | split("\n") | map(select(. != ""))),
           dataDisk: $disk,
           dataDiskMove: $move,
+          backups: $backups,
           record: $log
         }')
     if [ "$json" = 1 ]; then
@@ -395,9 +697,52 @@ cmd_status() {
             elif .state == "failed" then "onto \(.disk) failed on \(.failed): \(.reason); the data is on the system disk"
                 + (if .namingIgnored then "; \(.namingIgnored) is not used until it is named anew" else "" end)
             else .state end)),
+        (.backups[] | "Backup:         of \(.of[7:19]) on " + (
+            if .location == "backup-disk" then "the backup disk kp-backup"
+            elif .location == "data-disk" then "the data disk kp-data"
+            else "the system disk" end)
+            + (if .taken then ", taken \(.taken)" else "" end)
+            + (if .checksum then "" else ", without a checksum" end)
+            + (if .deletionPending then "; due for deletion since \(.deletionPending), which waits: \(.problem // "the disk is not available")"
+               elif .problem then "; cannot be read now: \(.problem)"
+               elif .deleteAfter then "; deleted after \(.deleteAfter)"
+               else "" end)),
         "",
         "Recent events:",
         (.record[] | "  \(.time)  \(.event)  \(.result)  \(.detail)")' <<<"$doc"
+}
+
+# backup_list: the pre-update backups as JSON for cmd_status: those the
+# records name, wherever they are, whether they can be read now, when they
+# are deleted, and whether a deletion waits for their disk (D10); and the
+# backups on the system disk no record names, taken by a release that kept
+# none.
+backup_list() {
+    local list='[]' rec d keep taken epoch after problem pending_since dir
+    keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
+    for rec in "$backups"/*; do
+        [ -f "$rec" ] || continue
+        d=${rec##*/}
+        taken=$(record_field TAKEN "$rec")
+        after=''
+        if epoch=$(date -d "$taken" +%s 2>/dev/null); then after=$(date -u -d "@$((epoch + keep * 86400))" +%FT%TZ); fi
+        problem=$(readable "$d")
+        pending_since=$(record_field DELETE_PENDING "$rec")
+        list=$(jq -c --arg of "$d" --arg location "$(record_field LOCATION "$rec")" --arg disk "$(record_field UUID "$rec")" \
+            --arg taken "$taken" --arg after "$after" --arg problem "$problem" --arg pending "$pending_since" '
+            def n: if . == "" then null else . end;
+            . + [{of: $of, location: $location, disk: ($disk | n), taken: ($taken | n), checksum: true,
+                  deleteAfter: ($after | n), problem: ($problem | n), deletionPending: ($pending | n)}]' <<<"$list")
+    done
+    for dir in "$state"/backup/*/; do
+        [ -d "$dir" ] || continue
+        d=$(basename "$dir")
+        [ "$(record_field LOCATION "$backups/$d")" != system-disk ] || continue
+        list=$(jq -c --arg of "$d" --arg taken "$(date -u -r "$dir" +%FT%TZ)" '
+            . + [{of: $of, location: "system-disk", disk: null, taken: $taken, checksum: false,
+                  deleteAfter: null, problem: null, deletionPending: null}]' <<<"$list")
+    done
+    printf '%s' "$list"
 }
 
 cmd_fetch() {
@@ -473,7 +818,9 @@ cmd_apply() {
         log apply refused "the staged $(slot staged version) is not newer than the running $(slot booted version)" "$booted" "$staged"
         return 1
     fi
-    if ! reason=$(space_ok); then
+    # D5: some location of D8 must take the backup; the guard chooses it
+    # again on the activating boot, when the disks may have changed.
+    if ! reason=$(backup_possible); then
         log apply refused "$reason" "$booted" "$staged"
         return 1
     fi
@@ -510,8 +857,14 @@ cmd_rollback() {
     previous=$(slot rollback digest)
     [ -n "$previous" ] || die "there is no previous version to return to"
     failed "$previous" && die "the previous version $(short "$previous") failed its own update and cannot be returned to"
-    [ -d "$state/backup/$previous" ] ||
+    local problem
+    if [ -e "$backups/$previous" ]; then
+        problem=$(backup_problem "$previous")
+        [ -z "$problem" ] ||
+            die "the data backup from before the update cannot be restored for $(short "$previous"): $problem; returning would run it on data it may not read"
+    elif [ ! -d "$state/backup/$previous" ]; then
         die "no data backup from before the update exists for $(short "$previous"); returning would run it on data it may not read"
+    fi
     [ -z "$(pending)" ] || die "an update is being checked; wait for its result"
     cat >&2 <<EOF
 Returning to $(slot rollback version) ($(short "$previous")).
@@ -590,7 +943,7 @@ cmd_guard() {
     # guard is started: no backup or restore on the system disk underneath a
     # volume of a data disk that is not in place.
     data_disk_placed || die "the data disk kp-data is missing or not in place; no backup or restore (see: systemctl status kamerplanter-data-disk.service)"
-    install -d -m 0700 "$state" "$state/backup"
+    install -d -m 0700 "$state" "$state/backup" "$backups"
     local booted good from to phase
     booted=$(slot booted digest)
     [ -n "$booted" ] || { echo "not booted from a bootc image"; return 0; }
@@ -610,13 +963,31 @@ cmd_guard() {
     elif [ -n "${from-}" ] && [ "$booted" = "$from" ]; then
         # Back on the version the data was backed up under: the update was
         # rolled back, automatically or by hand, so its data goes back too.
-        local detail="the data was not backed up and is unchanged"
-        if [ -d "$state/backup/$from" ]; then
+        local detail="the data was not backed up and is unchanged" source='' problem
+        if [ -e "$backups/$from" ]; then
+            # Recorded: restored only from the location and the disk the
+            # record names, and only when it matches its checksum (D10). A
+            # backup on a disk that is missing is no reason to start on the
+            # data as it is: the services stay stopped until it is back.
+            problem=$(backup_problem "$from")
+            if [ -n "$problem" ]; then
+                restore_refused "$from" "$to" "$problem"
+                write_issue || true
+                return 1
+            fi
+            source=$(backup_dir "$from")
+            detail="data restored from $(backup_where "$(record_field LOCATION "$backups/$from")") to the state before the update; changes made since then are lost"
+        elif [ -d "$state/backup/$from" ]; then
+            # Taken by a release that kept no record: on the system disk,
+            # without a checksum.
+            source=$state/backup/$from
+            detail="data restored to the state before the update; changes made since then are lost"
+        fi
+        if [ -n "$source" ]; then
             # On failure the services stay stopped (they require this unit)
             # and the next boot restores again.
-            { copy_volumes "$state/backup/$from" "$volumes" && restore_marker "$state/backup/$from"; } ||
+            { copy_volumes "$source" "$volumes" && restore_marker "$source"; } ||
                 { log rollback error "the data could not be restored; the services stay stopped" "$to" "$from"; return 1; }
-            detail="data restored to the state before the update; changes made since then are lost"
         fi
         echo "$to" >>"$state/failed"
         echo "$booted" >"$state/good"
@@ -633,27 +1004,19 @@ cmd_guard() {
         # the previous version. The release itself is not at fault, so it is
         # not marked as failed and is tried again once the backup can be made.
         from=$good
-        local reason=
-        if ! reason=$(space_ok); then
-            :
-        elif ! { install -d -m 0700 "$state/backup/$from" && copy_volumes "$volumes" "$state/backup/$from" &&
-            backup_marker "$state/backup/$from"; }; then
-            reason="the data could not be copied for the pre-update backup"
-        fi
-        if [ -n "$reason" ]; then
-            rm -rf "${state:?}/backup/$from"
+        if ! take_backup "$from" "$booted"; then
             rm -f "$state/pending"
-            log guard refused "$reason; returning to the previous version" "$from" "$booted"
+            log guard refused "$backup_failure; returning to the previous version" "$from" "$booted"
             bootc rollback --apply
             return 1
         fi
         printf '%s %s checking\n' "$from" "$booted" >"$state/pending"
         sync "$state/pending"
-        log update backup "data backed up before the first start of $(slot booted version)" "$from" "$booted"
     elif [ -n "${from-}" ]; then
         rm -f "$state/pending"
         log guard cleared "the activation of $(short "$to") did not take place" "$from" "$to"
     fi
+    clear_restore_issue
     # After the restore above, so a rollback runs on the marker it restored.
     # On the first boot of a new version the backup is taken already; a
     # refusal then fails its health check, which returns to the previous one.
@@ -682,6 +1045,13 @@ cmd_health() {
     # move: the previous version checks the move again on its boot.
     if ! problem=$(wait_healthy); then
         log health failed "$problem; returning to the previous version" "$from" "$to"
+        # The return happens all the same (E2); the previous version then
+        # keeps its services stopped until the backup can be restored.
+        local unreadable=''
+        if [ -e "$backups/$from" ]; then unreadable=$(readable "$from"); fi
+        if [ -n "$unreadable" ]; then
+            log health warning "the data backup from before the update cannot be restored now: $unreadable; after the return the services stay stopped until it can be" "$from" "$to"
+        fi
         bootc rollback --apply
         return 1
     fi
@@ -786,15 +1156,57 @@ check_health() {
 # /var/lib/kamerplanter/disks/log.jsonl. Run daily by
 # kamerplanter-update-fetch.service, also when nothing could be fetched, and
 # after a healthy update.
+#
+# A backup is deleted where its record says it is (D4): once the period from
+# the time it was taken is over, with its record. When its disk is missing
+# then, it is kept, the deletion is recorded as pending (status shows it),
+# and done once the disk is back (D10). The backup of the version an update
+# being checked or a requested rollback returns to is never deleted. A backup
+# no record names (taken by a release that kept none, or left by a backup
+# that did not complete) is deleted at any location that is available, once
+# its directory is older than that period.
 cleanup() {
-    local keep dir
+    local keep now protect rec d loc epoch problem dir base
     keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
-    for dir in "$state"/backup/*/; do
-        [ -d "$dir" ] || continue
-        if [ -n "$(find "$dir" -maxdepth 0 -mtime "+$((keep - 1))")" ]; then
-            rm -rf "$dir"
-            log cleanup ok "deleted the pre-update backup of $(short "$(basename "$dir")")"
+    now=$(date +%s)
+    read -r protect _ <<<"$(pending)" || true
+    for rec in "$backups"/*; do
+        [ -f "$rec" ] || continue
+        d=${rec##*/}
+        [ "$d" != "${protect-}" ] || continue
+        epoch=$(date -d "$(record_field TAKEN "$rec")" +%s 2>/dev/null) || epoch=
+        cleanup_due "$epoch" "$keep" "$now" || continue
+        loc=$(record_field LOCATION "$rec")
+        problem=$(readable "$d")
+        if [ -n "$problem" ]; then
+            if [ -z "$(record_field DELETE_PENDING "$rec")" ]; then
+                write_record "$rec" DELETE_PENDING="$(date -u +%FT%TZ)" || true
+                log cleanup pending "the pre-update backup of $(short "$d") is due for deletion, but $problem; it is deleted once that disk is back"
+            fi
+            continue
         fi
+        dir=$(backup_dir "$d")
+        if rm -rf -- "${dir:?}" && rm -f -- "$rec"; then
+            log cleanup ok "deleted the pre-update backup of $(short "$d") from $(backup_where "$loc")"
+        else
+            log cleanup error "the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be deleted; it is tried again at the next run"
+        fi
+    done
+    for loc in "${backup_locations[@]}"; do
+        [ "$(location_state "$loc")" = ok ] || continue
+        base=$(backup_base "$loc")
+        for dir in "$base"/*/; do
+            [ -d "$dir" ] || continue
+            d=$(basename "$dir")
+            [ "$d" != "${protect-}" ] || continue
+            [ "$(record_field LOCATION "$backups/$d")" != "$loc" ] || continue
+            [ -n "$(find "$dir" -maxdepth 0 -mtime "+$((keep - 1))")" ] || continue
+            if rm -rf -- "${dir:?}"; then
+                log cleanup ok "deleted the pre-update backup of $(short "$d") from $(backup_where "$loc")"
+            else
+                log cleanup error "the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be deleted; it is tried again at the next run"
+            fi
+        done
     done
     if [ "$(data_disk_move_field STATE)" = verified ]; then
         "$disks_tool" cleanup "$keep" ||

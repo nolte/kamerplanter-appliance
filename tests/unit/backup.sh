@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Checks the decisions about the pre-update backup in the shared parser
+# (image/rootfs/usr/lib/kamerplanter/env.sh): the locations and their order,
+# the protection rule with an encrypted data disk, the space rule, the reason
+# recorded when no location takes the backup, and whether a recorded backup
+# can be read for a restore (spec/update-and-rollback/ D5, D8, D10;
+# spec/distribution-requirements/ E8, E16). On fake input; needs no root, no
+# disk and no VM.
+#
+# Usage: tests/unit/backup.sh
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+# shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+. "$root/image/rootfs/usr/lib/kamerplanter/env.sh"
+set +e
+
+failures=0
+expect() {  # expect NAME EXPECTED ACTUAL
+    if [ "$2" = "$3" ]; then
+        printf 'ok    %s\n' "$1"
+    else
+        printf 'FAIL  %s\n      expected: %s\n      actual:   %s\n' "$1" "$2" "$3"
+        failures=$((failures + 1))
+    fi
+}
+
+# --- the locations and where their backups are (D8, R7) ---
+expect "order: backup disk, data disk, system disk" "backup-disk data-disk system-disk" "${backup_locations[*]}"
+expect "system disk: the directory the update tool always used" /var/lib/kamerplanter/update/backup "$(backup_base system-disk)"
+expect "backup disk: below its mount point" /var/mnt/kamerplanter-backup/update-backup "$(backup_base backup-disk)"
+expect "data disk: at the top of the disk" "$data_disk_mount/update-backup" "$(backup_base data-disk)"
+expect "unknown location has no base" fails "$(backup_base nowhere || echo fails)"
+inside=none
+base=$(backup_base data-disk)
+for place in "${data_disk_places[@]}"; do
+    read -r dir path <<<"$place"
+    case $base/ in "$data_disk_mount/$dir"/*) inside=$dir ;; esac
+    case $data_disk_mount/$dir/ in "$base"/*) inside=$dir ;; esac
+done
+expect "data disk: the backups are in no location of data_disk_places (E9)" none "$inside"
+expect "data disk: the backups are not the release marker" yes "$([ "$base" != "$data_disk_marker" ] && [ "${data_disk_marker#"$base"/}" = "$data_disk_marker" ] && echo yes)"
+expect "data disk: the backups are not in /etc/kamerplanter or a volume" yes \
+    "$(case $base in /etc/kamerplanter* | /var/lib/containers/*) echo no ;; *) echo yes ;; esac)"
+expect "space of the system disk is that of /var" /var "$(backup_fs system-disk)"
+expect "space of the backup disk is that of its mount" /var/mnt/kamerplanter-backup "$(backup_fs backup-disk)"
+expect "space of the data disk is that of its mount" "$data_disk_mount" "$(backup_fs data-disk)"
+
+# --- space (D5): the same margin at every location ---
+expect "need: nothing to copy still needs 512 MiB" 536870912 "$(backup_need 0)"
+expect "need: copy plus 10 % plus 512 MiB" $((1000000000 + 100000000 + 536870912)) "$(backup_need 1000000000)"
+expect "space: enough" "" "$(space_problem 2000 1000 /var)"
+expect "space: exactly enough" "" "$(space_problem 1000 1000 /var)"
+expect "space: short, as without any disk" "999 bytes free in /var, 1000 needed for the pre-update backup" "$(space_problem 999 1000 /var)"
+expect "space: short on a disk names its mount" "5 bytes free in /var/mnt/kamerplanter-backup, 9 needed for the pre-update backup" \
+    "$(space_problem 5 9 /var/mnt/kamerplanter-backup)"
+
+# --- whether a location may take the backup (D8, E8, E16) ---
+expect "system disk, data disk unencrypted" "" "$(backup_refusal system-disk ok 0 0)"
+expect "backup disk present" "" "$(backup_refusal backup-disk ok 0 0)"
+expect "backup disk not set up" "no backup disk kp-backup is set up" "$(backup_refusal backup-disk not-set-up 0 0)"
+expect "data disk not set up" "no data disk kp-data is set up" "$(backup_refusal data-disk not-set-up 0 0)"
+expect "backup disk missing" "the backup disk kp-backup is missing or not mounted" "$(backup_refusal backup-disk missing 0 0)"
+expect "backup disk under another identity" "the backup disk kp-backup is mounted under another identity than the one it was set up with" \
+    "$(backup_refusal backup-disk foreign 0 0)"
+expect "data disk while a move onto it is unverified" "the move onto the data disk kp-data is not verified yet" "$(backup_refusal data-disk moving 0 1)"
+expect "parity: encrypted data, unencrypted backup disk" "the data disk kp-data is encrypted, and the backup disk kp-backup is not" \
+    "$(backup_refusal backup-disk ok 1 0)"
+expect "parity: told also when that backup disk is missing" "the data disk kp-data is encrypted, and the backup disk kp-backup is not" \
+    "$(backup_refusal backup-disk missing 1 0)"
+expect "parity: encrypted data, encrypted backup disk" "" "$(backup_refusal backup-disk ok 1 1)"
+expect "parity: encrypted backup disk with an unencrypted data disk" "" "$(backup_refusal backup-disk ok 0 1)"
+expect "parity: encrypted data disk takes its own backup" "" "$(backup_refusal data-disk ok 1 1)"
+expect "parity: system disk with the key kept on it" "" "$(backup_refusal system-disk ok 1 1)"
+expect "parity: system disk without the key on it" "the data disk kp-data is encrypted, and its key is not kept on the system disk" \
+    "$(backup_refusal system-disk ok 1 0)"
+expect "parity: an encrypted, missing backup disk is missing" "the backup disk kp-backup is missing or not mounted" \
+    "$(backup_refusal backup-disk missing 1 1)"
+
+# --- the choice: refusal, then space, in the order of D8 ---
+# decide BACKUP_STATE DATA_STATE DATA_ENC BACKUP_PROT SYSTEM_PROT FREE_BACKUP
+# FREE_DATA FREE_SYSTEM NEED: as the update tool's assess and backup_first.
+decide() {
+    local states=("$1" "$2" ok) prot=("$4" "$3" "$5") free=("$6" "$7" "$8") reasons=() i r
+    for i in 0 1 2; do
+        r=$(backup_refusal "${backup_locations[i]}" "${states[i]}" "$3" "${prot[i]}")
+        [ -n "$r" ] || r=$(space_problem "${free[i]}" "$9" "$(backup_fs "${backup_locations[i]}")")
+        reasons+=("$r")
+    done
+    backup_first "${reasons[@]}" || echo none
+}
+expect "choice: no extra disk: the system disk" system-disk "$(decide not-set-up not-set-up 0 0 0 0 0 100 50)"
+expect "choice: no extra disk, too little space: none" none "$(decide not-set-up not-set-up 0 0 0 0 0 49 50)"
+expect "choice: backup disk present: the backup disk" backup-disk "$(decide ok ok 0 0 0 100 100 100 50)"
+expect "choice: backup disk full: the data disk" data-disk "$(decide ok ok 0 0 0 10 100 100 50)"
+expect "choice: backup disk full, data disk full: the system disk" system-disk "$(decide ok ok 0 0 0 10 10 100 50)"
+expect "choice: every location full: none" none "$(decide ok ok 0 0 0 10 10 10 50)"
+expect "choice: backup disk missing: the data disk" data-disk "$(decide missing ok 0 0 0 0 100 100 50)"
+expect "choice: backup disk foreign: the data disk" data-disk "$(decide foreign ok 0 0 0 100 100 100 50)"
+expect "choice: backup disk only, no data disk: the backup disk" backup-disk "$(decide ok not-set-up 0 0 0 100 0 100 50)"
+expect "choice: backup disk only, full: the system disk" system-disk "$(decide ok not-set-up 0 0 0 10 0 100 50)"
+expect "choice: unverified move: past the data disk to the system disk" system-disk "$(decide not-set-up moving 0 0 0 0 100 100 50)"
+expect "choice: encrypted data, unencrypted backup disk: the data disk" data-disk "$(decide ok ok 1 0 1 100 100 100 50)"
+expect "choice: encrypted data, encrypted backup disk: the backup disk" backup-disk "$(decide ok ok 1 1 1 100 100 100 50)"
+expect "choice: encrypted data full, key on the system disk: the system disk" system-disk "$(decide ok ok 1 0 1 100 10 100 50)"
+expect "choice: encrypted data full, key not on the system disk: none" none "$(decide ok ok 1 0 0 100 10 100 50)"
+expect "choice: exactly the space needed counts" backup-disk "$(decide ok ok 0 0 0 50 0 0 50)"
+expect "first: fewer reasons than locations" none "$(backup_first x || echo none)"
+
+# --- the reason recorded when none takes it (D5) ---
+expect "summary: the system disk alone, as without any disk" "999 bytes free in /var, 1000 needed for the pre-update backup" \
+    "$(backup_summary system-disk "999 bytes free in /var, 1000 needed for the pre-update backup")"
+expect "summary: every location set up, named" \
+    "no location takes the pre-update backup: the backup disk kp-backup: it is full; the system disk: it is full too" \
+    "$(backup_summary backup-disk "it is full" system-disk "it is full too")"
+
+# --- whether a recorded backup can be read for a restore (D10, E8) ---
+id=0d8b7c52-6f3e-4b1a-9a8e-3c1f2b4d5e6f
+other=99999999-8888-7777-6666-555555555555
+expect "restore: the system disk is always there" "" "$(restore_problem system-disk ok '' '')"
+expect "restore: backup disk present under its identity" "" "$(restore_problem backup-disk ok "$id" "$id")"
+expect "restore: identity compares case-blind" "" "$(restore_problem backup-disk ok "${id^^}" "$id")"
+expect "restore: backup disk missing" "it is on the backup disk kp-backup ($id), which is missing or not mounted" \
+    "$(restore_problem backup-disk missing "$id" "$id")"
+expect "restore: backup disk retired" "it is on the backup disk kp-backup ($id), which is no longer set up" \
+    "$(restore_problem backup-disk not-set-up "$id" '')"
+expect "restore: another disk mounted as backup disk" "it is on the backup disk kp-backup ($id), but the disk mounted there has another identity" \
+    "$(restore_problem backup-disk foreign "$id" "$id")"
+expect "restore: another backup disk set up since" "it is on the backup disk kp-backup with the identity $id, but the disk set up there now is $other" \
+    "$(restore_problem backup-disk ok "$id" "$other")"
+expect "restore: no identity recorded" "it is on the data disk kp-data with the identity unknown, but the disk set up there now is $id" \
+    "$(restore_problem data-disk ok '' "$id")"
+expect "restore: data disk in place" "" "$(restore_problem data-disk ok "$id" "$id")"
+expect "restore: parity does not matter for reading" "" "$(restore_problem backup-disk ok "$id" "$id")"
+
+# --- records ---
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+printf 'LOCATION=backup-disk\nUUID=%s\nSHA256=abc\nSHA256=def\n' "$id" >"$work/rec"
+expect "record: a field" backup-disk "$(record_field LOCATION "$work/rec")"
+expect "record: the last value counts" def "$(record_field SHA256 "$work/rec")"
+expect "record: a missing field" "" "$(record_field TAKEN "$work/rec")"
+expect "record: a missing file" "" "$(record_field LOCATION "$work/none")"
+expect "record: no prefix match" "" "$(record_field LOC "$work/rec")"
+expect "luks_uuid: from a dm-crypt mapping" "$id" "$(luks_uuid "CRYPT-LUKS2-${id//-/}-kamerplanter-backup")"
+expect "luks_uuid: another mapping" "" "$(luks_uuid "LVM-abc")"
+
+if [ "$failures" -gt 0 ]; then
+    echo "$failures check(s) failed"
+    exit 1
+fi
+echo "all checks passed"

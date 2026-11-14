@@ -14,7 +14,9 @@
 # It also names the locations of the data disk (data_disk_places below),
 # which the disk service binds and every writer checks, the record of a move
 # onto the data disk (data_disk_move), and holds the release comparison and
-# the release marker of the data disk (release_version below).
+# the release marker of the data disk (release_version below), and the
+# locations of the pre-update backup with the decisions about them
+# (backup_locations below).
 declare -A cfg
 cfg_invalid=()
 load() {
@@ -95,12 +97,41 @@ data_disk_placed() {
 # pulled or failed while mounted keeps its mount, so the mount alone does not
 # tell (spec/distribution-requirements/ E11, E12: a missing disk is no failed
 # start).
-data_disk_present() {
+data_disk_present() { mount_present "$data_disk_mount"; }
+
+# mount_present MOUNT: whether the device mounted at MOUNT still answers, read
+# as data_disk_present reads it; the backup disk is checked the same way.
+mount_present() {
     local src
-    mountpoint -q -- "$data_disk_mount" || return 1
-    src=$(findmnt -rnvo SOURCE -M "$data_disk_mount" 2>/dev/null | tail -n1)
+    mountpoint -q -- "$1" || return 1
+    src=$(findmnt -rnvo SOURCE -M "$1" 2>/dev/null | tail -n1)
     [ -b "$src" ] || return 1
     dd if="$src" of=/dev/null bs=4096 count=1 iflag=direct status=none 2>/dev/null
+}
+
+# luks_uuid DM_UUID: the UUID of the LUKS2 container a dm-crypt mapping was
+# opened from, taken from the mapping's device-mapper UUID
+# (CRYPT-LUKS2-<UUID without dashes>-<NAME>); empty for any other mapping.
+luks_uuid() {
+    local re='^CRYPT-LUKS2-([0-9A-Fa-f]{32})-' h
+    [[ $1 =~ $re ]] || return 0
+    h=${BASH_REMATCH[1],,}
+    printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" "${h:16:4}" "${h:20:12}"
+}
+
+# mounted_uuid MOUNT: the identity of the disk mounted at MOUNT as the disk
+# service records it (spec/distribution-requirements/ E8): the LUKS2 UUID
+# when it is mounted from an opened container, else the UUID of its file
+# system, in lower case; empty when nothing is mounted there.
+mounted_uuid() {
+    local src k u
+    mountpoint -q -- "$1" || return 0
+    src=$(findmnt -rnvo SOURCE -M "$1" 2>/dev/null | tail -n1)
+    [ -b "$src" ] || return 0
+    k=$(lsblk -nrdo KNAME -- "$src" 2>/dev/null || true)
+    if [ -n "$k" ]; then u=$(luks_uuid "$(cat "/sys/class/block/$k/dm/uuid" 2>/dev/null || true)"); fi
+    if [ -z "${u-}" ]; then u=$(blkid -p -o value -s UUID -- "$src" 2>/dev/null || true); fi
+    printf '%s' "${u,,}"
 }
 
 # The move of an appliance's data from the system disk onto a newly named
@@ -113,10 +144,24 @@ data_disk_move=/var/lib/kamerplanter/disks/move.env
 
 # data_disk_move_field KEY [FILE]: the value of KEY in the move record; empty
 # when there is none.
-data_disk_move_field() {
-    local file=${2:-$data_disk_move}
-    [ -f "$file" ] || return 0
-    sed -n "s/^$1=//p" -- "$file" | tail -n1
+data_disk_move_field() { record_field "$1" "${2:-$data_disk_move}"; }
+
+# record_field KEY FILE: the value of KEY in a record of KEY=VALUE lines (the
+# disk records, the move record, the backup records); empty when FILE or KEY
+# is missing.
+record_field() {
+    [ -f "$2" ] || return 0
+    sed -n "s/^$1=//p" -- "$2" | tail -n1
+}
+
+# cleanup_due SINCE DAYS NOW: whether something kept for DAYS days
+# (UPDATE_BACKUP_KEEP_DAYS) from SINCE may be deleted at NOW, all in epoch
+# seconds: the system disk's copy of data moved onto the data disk, from the
+# time the services passed the health check from it, and a pre-update backup,
+# from the time it was taken. A time that is not a number is never due.
+cleanup_due() {
+    [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || return 1
+    [ "$3" -ge $(($1 + $2 * 86400)) ]
 }
 
 # Releases (spec/update-and-rollback/ A4, A7). One comparison serves the
@@ -197,4 +242,148 @@ marker_raises() {
 downgrade_allowed() {
     [ -f "$3" ] || return 1
     awk -v m="$1" -v r="$2" '$1 == m && $2 == r { found = 1 } END { exit !found }' "$3"
+}
+
+# ---------------------------------------------------------------------------
+# Where the pre-update backup goes (spec/update-and-rollback/ D2, D5, D8,
+# D10). The update tool (/usr/bin/kamerplanter-update) takes it, restores
+# it, and deletes it; the decisions below have no side effects, and
+# tests/unit/backup.sh checks them.
+#
+# The locations, in the order of D8: the backup disk, the data disk, the
+# system disk. A backup of the version D is the directory D below the
+# location's base (backup_base): the volumes of data_volumes in the update
+# tool, and a copy of the release marker of the data disk (data-disk-release).
+# On the data disk the base lies at the top of the disk, outside every
+# location of data_disk_places and beside the release marker, so a backup is
+# never part of /etc/kamerplanter or a volume; on the system disk it is the
+# directory the update tool always used. Where each backup is, and its
+# checksum, is recorded in the update state on the system disk
+# (spec/update-and-rollback/ D9, D10).
+backup_disk_mount=/var/mnt/kamerplanter-backup
+backup_locations=(backup-disk data-disk system-disk)
+
+# backup_first REASON...: the first location of backup_locations whose
+# REASON, given in that order, is empty, the one that takes the backup;
+# fails when every location has a reason not to.
+backup_first() {
+    local i=0 loc
+    for loc in "${backup_locations[@]}"; do
+        i=$((i + 1))
+        [ $i -le $# ] || return 1
+        if [ -z "${!i}" ]; then printf '%s' "$loc"; return 0; fi
+    done
+    return 1
+}
+
+# backup_base LOCATION: the directory the backups at LOCATION are kept in.
+backup_base() {
+    case $1 in
+        backup-disk) printf '%s' "$backup_disk_mount/update-backup" ;;
+        data-disk) printf '%s' "$data_disk_mount/update-backup" ;;
+        system-disk) printf '%s' /var/lib/kamerplanter/update/backup ;;
+        *) return 1 ;;
+    esac
+}
+
+# backup_fs LOCATION: the path whose file system receives a backup at
+# LOCATION, as its free space is reported.
+backup_fs() {
+    case $1 in
+        backup-disk) printf '%s' "$backup_disk_mount" ;;
+        data-disk) printf '%s' "$data_disk_mount" ;;
+        system-disk) printf '%s' /var ;;
+        *) return 1 ;;
+    esac
+}
+
+# backup_where LOCATION: LOCATION in a message.
+backup_where() {
+    case $1 in
+        backup-disk) printf 'the backup disk kp-backup' ;;
+        data-disk) printf 'the data disk kp-data' ;;
+        system-disk) printf 'the system disk' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# backup_need BYTES: the free space a backup of volumes holding BYTES needs:
+# a copy of them plus a margin of 10 % and 512 MiB (spec D5), the same at
+# every location.
+backup_need() { printf '%s' $(($1 * 11 / 10 + 512 * 1024 * 1024)); }
+
+# backup_refusal LOCATION STATE DATA_ENCRYPTED PROTECTED: why LOCATION does
+# not receive the backup; empty when it may. STATE is what the update tool
+# found there:
+#   ok          usable: the system disk; a disk set up, mounted under the
+#               identity recorded for it (E8), and answering
+#   not-set-up  no such disk is set up
+#   missing     set up, but not mounted or not answering
+#   foreign     mounted, but not under the identity recorded for it
+#   moving      the data disk, while a move onto it is not verified yet: a
+#               return to the system copy would leave the backup behind
+# DATA_ENCRYPTED is 1 when the data disk is encrypted; PROTECTED is 1 when
+# LOCATION is as well protected: an encrypted disk, or the system disk when
+# the key of the data disk is kept on it. With an encrypted data disk only
+# such a location is used (D8, spec/distribution-requirements/ E16); that
+# rule is told first, also for a disk that is missing.
+backup_refusal() {
+    local where
+    where=$(backup_where "$1")
+    case $2 in
+        not-set-up) echo "no ${where#the } is set up"; return ;;
+    esac
+    if [ "$3" = 1 ] && [ "$4" != 1 ]; then
+        case $1 in
+            system-disk) echo "the data disk kp-data is encrypted, and its key is not kept on the system disk" ;;
+            *) echo "the data disk kp-data is encrypted, and $where is not" ;;
+        esac
+        return
+    fi
+    case $2 in
+        ok) ;;
+        missing) echo "$where is missing or not mounted" ;;
+        foreign) echo "$where is mounted under another identity than the one it was set up with" ;;
+        moving) echo "the move onto $where is not verified yet" ;;
+        *) echo "$where is in an unknown state ($2)" ;;
+    esac
+}
+
+# space_problem FREE NEED FS: why a backup that needs NEED bytes does not fit
+# into the FREE bytes of the file system at FS; empty when it fits.
+space_problem() {
+    [ "$1" -ge "$2" ] || echo "$1 bytes free in $3, $2 needed for the pre-update backup"
+}
+
+# backup_summary LOCATION REASON [LOCATION REASON...]: the reason no location
+# receives the backup, from the reasons of the locations that are set up.
+# With the system disk alone it is that one reason, as without any disk.
+backup_summary() {
+    if [ $# -eq 2 ]; then printf '%s' "$2"; return; fi
+    local out=''
+    while [ $# -ge 2 ]; do
+        out+="${out:+; }$(backup_where "$1"): $2"
+        shift 2
+    done
+    printf 'no location takes the pre-update backup: %s' "$out"
+}
+
+# restore_problem LOCATION STATE RECORDED CURRENT: why a backup recorded at
+# LOCATION cannot be read now; empty when it can. STATE is as for
+# backup_refusal; RECORDED is the identity of the disk the backup was written
+# to, CURRENT the identity of the disk set up for LOCATION now (both empty
+# for the system disk). Protection does not matter for reading.
+restore_problem() {
+    local where
+    where=$(backup_where "$1")
+    [ "$1" = system-disk ] && return 0
+    case $2 in
+        not-set-up) echo "it is on $where ($3), which is no longer set up"; return ;;
+        missing) echo "it is on $where ($3), which is missing or not mounted"; return ;;
+        foreign) echo "it is on $where ($3), but the disk mounted there has another identity"; return ;;
+        ok | moving) ;;
+        *) echo "it is on $where, which is in an unknown state ($2)"; return ;;
+    esac
+    [ -n "$3" ] && [ "${3,,}" = "${4,,}" ] ||
+        echo "it is on $where with the identity ${3:-unknown}, but the disk set up there now is ${4:-unknown}"
 }

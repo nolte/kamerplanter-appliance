@@ -9,6 +9,11 @@ Documentation=file:///usr/bin/kamerplanter-update
 # it checks that after a rollback has restored the marker with the data.
 # `kamerplanter-update allow-downgrade` overrides it and restarts
 # kamerplanter.target, which runs this unit again.
+# It fails as well after a rollback whose backup cannot be restored: when it
+# lies on a backup disk that is missing or mounted under another identity,
+# or does not match the checksum recorded with it (spec/update-and-rollback/
+# D10). Once the disk is back, a reboot or `systemctl restart
+# kamerplanter-backup-disk.service kamerplanter.target` runs it again.
 Requires=kamerplanter-data-disk.service kamerplanter-backup-disk.service
 After=local-fs.target kamerplanter-data-disk.service kamerplanter-backup-disk.service
 DefaultDependencies=no
