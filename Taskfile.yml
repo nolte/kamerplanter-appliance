@@ -72,7 +72,19 @@ tasks:
     desc: Build the system image of the appliance
     deps: [tools:build]
     cmds:
-      - build/in-tools.sh podman build -t {{.IMAGE_REF}} image
+      # Labels and manifest annotations as in .github/workflows/disk-image.yml.
+      - >-
+        build/in-tools.sh podman build
+        --build-arg REVISION={{.REVISION}} --build-arg CREATED={{.CREATED}}
+        --annotation org.opencontainers.image.version=dev
+        --annotation org.opencontainers.image.revision={{.REVISION}}
+        --annotation org.opencontainers.image.created={{.CREATED}}
+        -t {{.IMAGE_REF}} image
+    vars:
+      REVISION:
+        sh: git rev-parse HEAD
+      CREATED:
+        sh: TZ=UTC0 git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd HEAD
 
   disk:build:
     desc: Build the raw disk image from the system image

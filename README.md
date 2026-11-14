@@ -125,3 +125,7 @@ The audiences these documents serve are listed in [`AUDIENCES.md`](AUDIENCES.md)
 - [Documentation](https://nolte.github.io/kamerplanter/)
 
 All Kamerplanter repositories, including the companions and the ones the appliance needs only indirectly, are described in [Related repositories](docs/en/references/repositories.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The packaged container images and the Fedora base keep their own licences.

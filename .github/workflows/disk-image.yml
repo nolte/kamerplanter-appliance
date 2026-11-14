@@ -125,7 +125,28 @@ jobs:
       - name: Build the system image
         env:
           VERSION: ${{ steps.meta.outputs.version }}
-        run: sudo podman build --build-arg VERSION="$VERSION" -t localhost/kamerplanter-appliance:ci image
+        run: |
+          set -euo pipefail
+          # Label the commit that is built: on a pull request that is the
+          # checked-out merge commit, not the head commit the version names.
+          revision=$(git rev-parse HEAD)
+          created=$(TZ=UTC0 git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd HEAD)
+          # The manifest inherits the base image's version and creation
+          # annotations; set them to the labels' values.
+          sudo podman build \
+            --build-arg VERSION="$VERSION" --build-arg REVISION="$revision" --build-arg CREATED="$created" \
+            --annotation org.opencontainers.image.version="$VERSION" \
+            --annotation org.opencontainers.image.revision="$revision" \
+            --annotation org.opencontainers.image.created="$created" \
+            -t localhost/kamerplanter-appliance:ci image
+          for key in version revision created; do
+            label=$(sudo podman image inspect localhost/kamerplanter-appliance:ci \
+              --format "{{index .Labels \"org.opencontainers.image.$key\"}}")
+            annotation=$(sudo podman image inspect localhost/kamerplanter-appliance:ci \
+              --format "{{index .Annotations \"org.opencontainers.image.$key\"}}")
+            [ -n "$label" ] && [ "$label" = "$annotation" ] ||
+              { echo "::error::$key: label '$label', annotation '$annotation'"; exit 1; }
+          done
 
       - name: Push and sign the system image
         id: push
