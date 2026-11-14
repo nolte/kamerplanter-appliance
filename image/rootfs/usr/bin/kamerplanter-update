@@ -42,12 +42,17 @@ issue=/run/issue.d/50-kamerplanter.issue
 
 die() { echo "kamerplanter-update: $*" >&2; exit 1; }
 
-# The last value of KEY in the defaults and the user file; the configuration
-# check (/usr/libexec/kamerplanter/configure) validates both files.
-setting() {
+# shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+. /usr/lib/kamerplanter/env.sh
+
+# count KEY DEFAULT: KEY as a whole number of at least 1 from the defaults and
+# the user file, read like the configuration check reads them; DEFAULT when
+# it is anything else, which the configuration check reports.
+count() {
     local value
-    value=$(cat "$defaults" "$user" 2>/dev/null | sed -n "s/^[[:space:]]*$1=//p" | tail -n1)
-    printf '%s' "${value:-$2}"
+    load "$defaults" "$user"
+    value=$(get "$1")
+    if [[ $value =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
 }
 
 log() {  # log EVENT RESULT DETAIL [FROM] [TO]
@@ -60,7 +65,11 @@ log() {  # log EVENT RESULT DETAIL [FROM] [TO]
     echo "$1: $2: $3" >&2
 }
 
-host() { bootc status --format json; }
+# bootc's view of the deployments, read once per command and again after
+# every change to them (refresh), not once per field.
+host_json=
+refresh() { host_json=$(bootc status --format json); }
+host() { printf '%s\n' "$host_json"; }
 # Fields of a deployment slot (booted, staged, rollback); empty when absent.
 slot() { host | jq -r --arg s "$1" --arg f "$2" '.status[$s].image // {} | (
     if $f == "digest" then .imageDigest
@@ -69,6 +78,24 @@ slot() { host | jq -r --arg s "$1" --arg f "$2" '.status[$s].image // {} | (
     elif $f == "transport" then .image.transport
     else empty end) // ""'; }
 short() { printf '%s' "${1#sha256:}" | cut -c1-12; }
+
+# Releases are versioned X.Y or X.Y.Z, optionally with a leading v (the
+# release tag); anything else is a development build.
+release_version() {
+    local v=${1#v}
+    [[ $v =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || return 1
+    printf '%s' "$v"
+}
+# forward CANDIDATE RUNNING: whether version CANDIDATE may follow RUNNING
+# (spec A4): a release only after an older release. A development build runs
+# anything after it, and is never accepted after a release.
+forward() {
+    local candidate running
+    running=$(release_version "$2") || return 0
+    candidate=$(release_version "$1") || return 1
+    [ "$candidate" != "$running" ] &&
+        [ "$(printf '%s\n%s\n' "$running" "$candidate" | sort -V | tail -n1)" = "$candidate" ]
+}
 
 failed() { [ -n "$1" ] && grep -Fqx -- "$1" "$state/failed" 2>/dev/null; }
 pending() { cat "$state/pending" 2>/dev/null || true; }
@@ -91,13 +118,17 @@ space_ok() {
     [ "$free" -ge "$need" ] || { echo "$free bytes free in /var, $need needed for the pre-update backup"; return 1; }
 }
 
-copy_volumes() {  # copy_volumes SRC_DIR DST_DIR
+# copy_volumes SRC_DIR DST_DIR; fails on the first volume that does not copy
+# completely. Checked explicitly, because callers test it in a condition,
+# where set -e does not apply.
+copy_volumes() {
     local name
     for name in "${data_volumes[@]}"; do
         [ -d "$1/$name" ] || continue
-        rm -rf "${2:?}/$name"
-        cp -a --reflink=auto "$1/$name" "$2/$name"
+        rm -rf "${2:?}/$name" || return 1
+        cp -a --reflink=auto "$1/$name" "$2/$name" || return 1
     done
+    sync -f "$2" || return 1
 }
 
 write_issue() {
@@ -179,10 +210,13 @@ cmd_fetch() {
     transport=$(slot booted transport)
     [ -n "$ref" ] || die "the booted system has no update source"
     [ "$transport" = registry ] || die "update source $ref uses transport $transport, not registry"
-    if ! remote=$(skopeo inspect --retry-times 3 --format '{{.Digest}}' "docker://$ref" 2>&1); then
-        log fetch error "cannot reach $ref: ${remote##*$'\n'}"
+    local found version
+    if ! found=$(skopeo inspect --retry-times 3 \
+        --format '{{.Digest}} {{index .Labels "org.opencontainers.image.version"}}' "docker://$ref" 2>&1); then
+        log fetch error "cannot reach $ref: ${found##*$'\n'}"
         return 1
     fi
+    read -r remote version <<<"$found" || true
     booted=$(slot booted digest)
     staged=$(slot staged digest)
     if [ "$remote" = "$booted" ] || [ "$remote" = "$staged" ]; then
@@ -194,11 +228,18 @@ cmd_fetch() {
         echo "not fetching $(short "$remote"): it failed before and is never applied again"
         return 0
     fi
+    # The label is read before the signature is checked, only to save a
+    # download; apply checks the verified version again.
+    if ! forward "${version-}" "$(slot booted version)"; then
+        log fetch refused "$ref offers ${version:-an unversioned image} ($(short "$remote")), not newer than the running $(slot booted version)" "$booted" "$remote"
+        return 1
+    fi
     local out
     if ! out=$(bootc upgrade --download-only --quiet 2>&1); then
         log fetch error "download of $(short "$remote") failed: ${out##*$'\n'}" "$booted" "$remote"
         return 1
     fi
+    refresh
     staged=$(slot staged digest)
     if [ "$staged" != "$remote" ] && failed "$staged"; then
         log fetch error "the registry moved to $(short "$staged"), which failed before" "$booted" "$staged"
@@ -225,6 +266,10 @@ cmd_apply() {
     fi
     if failed "$staged"; then
         log apply refused "$(short "$staged") failed before" "$booted" "$staged"
+        return 1
+    fi
+    if ! forward "$(slot staged version)" "$(slot booted version)"; then
+        log apply refused "the staged $(slot staged version) is not newer than the running $(slot booted version)" "$booted" "$staged"
         return 1
     fi
     if ! reason=$(space_ok); then
@@ -280,7 +325,11 @@ EOF
     printf '%s %s manual\n' "$previous" "$booted" >"$state/pending"
     sync "$state/pending"
     log rollback reboot "manual return to $(short "$previous")" "$booted" "$previous"
-    bootc rollback --apply
+    if ! bootc rollback --apply; then
+        rm -f "$state/pending"
+        log rollback error "bootc could not switch to $(short "$previous"); still running $(slot booted version)" "$booted" "$previous"
+        return 1
+    fi
 }
 
 # Before the databases start, on every boot.
@@ -306,7 +355,10 @@ cmd_guard() {
         # rolled back, automatically or by hand, so its data goes back too.
         local detail="the data was not backed up and is unchanged"
         if [ -d "$state/backup/$from" ]; then
-            copy_volumes "$state/backup/$from" "$volumes"
+            # On failure the services stay stopped (they require this unit)
+            # and the next boot restores again.
+            copy_volumes "$state/backup/$from" "$volumes" ||
+                { log rollback error "the data could not be restored; the services stay stopped" "$to" "$from"; return 1; }
             detail="data restored to the state before the update; changes made since then are lost"
         fi
         echo "$to" >>"$state/failed"
@@ -320,18 +372,23 @@ cmd_guard() {
     elif [ "$booted" != "$good" ]; then
         # First boot of a new version, before it touches the data. Without a
         # pending record it was activated outside kamerplanter-update.
+        # Without a backup the new version must not touch the data: back to
+        # the previous version. The release itself is not at fault, so it is
+        # not marked as failed and is tried again once the backup can be made.
         from=$good
-        local reason
+        local reason=
         if ! reason=$(space_ok); then
-            echo "$booted" >>"$state/failed"
+            :
+        elif ! { install -d -m 0700 "$state/backup/$from" && copy_volumes "$volumes" "$state/backup/$from"; }; then
+            reason="the data could not be copied for the pre-update backup"
+        fi
+        if [ -n "$reason" ]; then
+            rm -rf "${state:?}/backup/$from"
             rm -f "$state/pending"
             log guard refused "$reason; returning to the previous version" "$from" "$booted"
             bootc rollback --apply
             return 1
         fi
-        install -d -m 0700 "$state/backup/$from"
-        copy_volumes "$volumes" "$state/backup/$from"
-        sync -f "$state/backup/$from"
         printf '%s %s checking\n' "$from" "$booted" >"$state/pending"
         sync "$state/pending"
         log update backup "data backed up before the first start of $(slot booted version)" "$from" "$booted"
@@ -350,7 +407,7 @@ cmd_health() {
     booted=$(slot booted digest)
     [ "${phase-}" = checking ] && [ "$booted" = "$to" ] || return 0
     local budget deadline problem
-    budget=$(setting UPDATE_HEALTH_TIMEOUT 20)
+    budget=$(count UPDATE_HEALTH_TIMEOUT 20)
     deadline=$(($(date +%s) + budget * 60))
     until problem=$(check_health); do
         if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -392,7 +449,7 @@ check_health() {
 # needs one, so it is possible only within that period (spec D4).
 cleanup() {
     local keep dir
-    keep=$(setting UPDATE_BACKUP_KEEP_DAYS 7)
+    keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
     for dir in "$state"/backup/*/; do
         [ -d "$dir" ] || continue
         if [ -n "$(find "$dir" -maxdepth 0 -mtime "+$((keep - 1))")" ]; then
@@ -402,6 +459,9 @@ cleanup() {
     done
 }
 
+case ${1-status} in
+    status | fetch | apply | apply-now | rollback | guard | health | issue) refresh ;;
+esac
 case ${1-status} in
     status) shift || true; cmd_status "$@" ;;
     fetch) cmd_fetch; cleanup ;;

@@ -3,7 +3,7 @@ title: Updates und Rollback
 audience: [self-hoster]
 content_mode: explanation
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-14
 ---
 
 # Updates und Rollback
@@ -13,7 +13,7 @@ Die Appliance hält sich selbst aktuell. Du musst nichts tun, aber es hilft zu w
 ## Was geschieht
 
 1. **Jeden Tag** fragt die Appliance die Registry `ghcr.io/nolte/kamerplanter-appliance`, ob ein neues Release erschienen ist. Sie baut nur Verbindungen nach außen auf; kein Port muss offen sein.
-2. Ein neues Release wird **im Hintergrund heruntergeladen**, und seine Signatur wird gegen den Schlüssel geprüft, der in die Appliance eingebaut ist. Ein Release mit fehlender oder falscher Signatur wird verworfen. Kamerplanter läuft währenddessen weiter.
+2. Ein neues Release wird **im Hintergrund heruntergeladen**, und seine Signatur wird gegen den Schlüssel geprüft, der in die Appliance eingebaut ist. Ein Release mit fehlender oder falscher Signatur wird verworfen, ebenso ein Release, das älter ist als das laufende. Kamerplanter läuft währenddessen weiter.
 3. Im **Wartungsfenster**, standardmäßig nachts zwischen 03:00 und 03:30 Uhr in der Zeit der Appliance, startet sie einmal in das neue Release neu. Web-UI und API sind dabei einige Minuten nicht erreichbar. Alles, was das neue Release braucht, wurde vorher heruntergeladen, auch die Kamerplanter-Container; der Neustart braucht also keinen Internetzugang.
 4. Bevor das neue Release deine Daten zum ersten Mal berührt, **kopiert die Appliance die Datenbank** nach `/var/lib/kamerplanter/update/backup/`.
 5. Das neue Release hat 20 Minuten, um **gesund** zu werden: Die Konfigurationsprüfung besteht, jeder Container meldet sich gesund, und Web-UI und API antworten. Dann gilt das Update als abgeschlossen.
@@ -72,7 +72,7 @@ Trage sie in `/etc/kamerplanter/kamerplanter.env` ein:
 
 Nach einer Änderung von `UPDATE_WINDOW` führe `systemctl daemon-reload` aus. Die Zeitzone der Appliance ist UTC, solange du keine andere mit `timedatectl set-timezone` einstellst.
 
-Die Datenbank-Kopie braucht Platz: Ein Update wird nicht aktiviert, solange `/var` weniger freien Platz hat als die Datenbank plus einen Puffer; das Protokoll sagt das.
+Die Datenbank-Kopie braucht Platz: Ein Update wird nicht aktiviert, solange `/var` weniger freien Platz hat als die Datenbank plus einen Puffer; das Protokoll sagt das. Lässt sich die Kopie beim ersten Start des neuen Release trotzdem nicht anlegen, kehrt die Appliance zum vorigen Release zurück, bevor das neue die Daten berührt, und aktiviert das Update in einem späteren Fenster erneut.
 
 ## Den Zeitpunkt wählen
 

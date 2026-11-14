@@ -24,7 +24,9 @@ WORK=.build/update
 REGISTRY=registry.test:5000
 CHANNEL=$REGISTRY/kamerplanter-appliance:stable
 REGISTRY_IMAGE=docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
-HEALTH_MINUTES=8
+# A healthy release passes in about 2 minutes; the budget leaves room
+# for a slow host and bounds how long u5 and u6 wait for a broken one.
+HEALTH_MINUTES=5
 VOLUME=/var/lib/containers/storage/volumes/arangodb_data/_data
 
 mkdir -p "$WORK"
@@ -71,9 +73,16 @@ publish() {
     cat "$WORK/digest"
 }
 
+# Release versions of the variants. The image under test is a development
+# build, which any release may follow; between releases only a newer one may
+# (spec A4): wrong is newer than next, so that only its signature stops it,
+# and old is older than next.
+declare -A VARIANT_VERSION=([next]=1.1.0 [wrong]=1.2.0 [broken]=1.3.0 [old]=1.0.0)
+
 build_variant() {
     podman build --quiet -t "localhost/kamerplanter-appliance:test-$1" \
-        --build-arg BASE="$BASE" --build-arg VARIANT="$1" tests/boot/variants >/dev/null
+        --build-arg BASE="$BASE" --build-arg VARIANT="$1" --build-arg VERSION="${VARIANT_VERSION[$1]}" \
+        tests/boot/variants >/dev/null
 }
 
 # The guest reaches the registry under the same name, trusts the run's key
@@ -171,7 +180,7 @@ step_window() {
     prepare_guest
     guest "touch $VOLUME/WRITTEN_BEFORE_UPDATE"
     local variant
-    for variant in next wrong broken; do
+    for variant in next wrong broken old; do
         build_variant "$variant" || { record u2 FAIL - "build of variant $variant failed"; return 1; }
     done
     local next
@@ -182,7 +191,7 @@ step_window() {
         { fail u2 "the new release was not staged"; return 1; }
     registry_down
     local window id
-    window=$(guest "date -d '+3 min' +%H:%M")
+    window=$(guest "date -d '+2 min' +%H:%M")
     guest "echo UPDATE_WINDOW=$window >>/etc/kamerplanter/kamerplanter.env && systemctl daemon-reload"
     guest kamerplanter-update status >"$OUT/u2.status-before.txt" 2>&1
     id=$(boot_id)
@@ -211,6 +220,27 @@ step_signature() {
         record u3 PASS - "release signed with another key rejected and recorded (B3, E5)"
     else
         fail u3 "unexpected state: $(last_event)"
+    fi
+}
+
+# A correctly signed release older than the running one is not staged.
+step_forward() {
+    local next
+    next=$(cat "$WORK/next.digest")
+    if [ "$(booted_digest)" != "$next" ]; then
+        record u3-forward SKIP - "needs the healthy update of the window step"
+        return 0
+    fi
+    registry_up
+    publish localhost/kamerplanter-appliance:test-old trusted >/dev/null || { record u3-forward FAIL - "push failed"; return 1; }
+    if guest kamerplanter-update fetch >"$OUT/u3-forward.fetch.txt" 2>&1; then
+        fail u3-forward "fetch of an older release succeeded"
+    elif [ -n "$(guest "bootc status --format=json | jq -r '.status.staged.image.imageDigest // empty'")" ]; then
+        fail u3-forward "the older release was staged"
+    elif [ "$(booted_digest)" = "$next" ] && has_event fetch "not newer than the running"; then
+        record u3-forward PASS - "signed release older than the running one refused and recorded (A4)"
+    else
+        fail u3-forward "unexpected state: $(last_event)"
     fi
 }
 
@@ -306,7 +336,7 @@ step_uefi() {
 kill_vm 2>/dev/null
 : >"$RESULTS"
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(install window signature manual auto uefi)
+[ ${#steps[@]} -gt 0 ] || steps=(install window signature forward manual auto uefi)
 for step in "${steps[@]}"; do "step_$step" || break; done
 kill_vm 2>/dev/null
 registry_down

@@ -3,10 +3,14 @@
 #   VARIANT=wrong    a healthy release, signed with a key the appliance does not trust
 #   VARIANT=broken   writes into the database volume on start, as a migration
 #                    would, and never becomes healthy
+#   VARIANT=old      a healthy release with a version below the others
+# VERSION is the release version bootc reports; tests/boot/update.sh orders
+# the variants with it.
 ARG BASE=localhost/kamerplanter-appliance:poc
 FROM ${BASE}
 ARG VARIANT=next
-LABEL org.opencontainers.image.version="test-${VARIANT}"
+ARG VERSION=1.1.0
+LABEL org.opencontainers.image.version="${VERSION}"
 RUN echo "${VARIANT}" >/usr/share/kamerplanter/test-variant \
     && if [ "${VARIANT}" = broken ]; then \
         mkdir -p /usr/share/containers/systemd/kamerplanter-backend.container.d \

@@ -12,8 +12,9 @@
 #   /etc/kamerplanter/kamerplanter.env        the user's own values
 #
 # The merged result is written to /run/kamerplanter/, and the container units
-# read only those files. This script is therefore the single place that parses
-# the layers, so what it checks is exactly what the services receive.
+# read only those files, so what this script checks is exactly what the
+# services receive. The layers are parsed by /usr/lib/kamerplanter/env.sh, the
+# parser every reader of them shares.
 set -euo pipefail
 umask 077
 
@@ -50,32 +51,8 @@ replace() {
     sync "$(dirname "$1")"
 }
 
-# KEY=VALUE per line, the value taken literally. Leading whitespace, empty
-# lines and comments are skipped; any other line that is not KEY=VALUE is
-# reported when $report is set. Later files win.
-declare -A cfg
-report=1
-load() {
-    cfg=()
-    local file line number key
-    for file in "$@"; do
-        [ -e "$file" ] || continue
-        number=0
-        while IFS= read -r line || [ -n "$line" ]; do
-            number=$((number + 1))
-            line=${line%$'\r'}
-            line=${line#"${line%%[![:space:]]*}"}
-            case $line in '' | '#'*) continue ;; esac
-            key=${line%%=*}
-            if [[ $line != *=* || ! $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-                [ "$report" = 1 ] && fail "line $number of $file is not KEY=VALUE"
-                continue
-            fi
-            cfg[$key]=${line#*=}
-        done <"$file"
-    done
-}
-get() { printf '%s' "${cfg[$1]-}"; }
+# shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+. /usr/lib/kamerplanter/env.sh
 digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
 
 if [ "${1-}" = pin ]; then
@@ -101,7 +78,6 @@ install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 # A missing value is generated, except one that is already pinned: a new
 # FERNET_KEY or salt would not match the stored data, so it has to come back
 # from a backup instead.
-report=0
 load "$defaults" "$secrets" "$user"
 missing() {
     [ -z "${cfg[$1]+set}" ] || return 1
@@ -122,8 +98,8 @@ missing LOG_PSEUDONYM_SALT && generated+=("LOG_PSEUDONYM_SALT=$(hex 32)")
 if [ ${#generated[@]} -gt 0 ]; then
     { awk 1 "$secrets"; printf '%s\n' "${generated[@]}"; } | replace "$secrets"
 fi
-report=1
 load "$defaults" "$secrets" "$user"
+for line in "${cfg_invalid[@]}"; do fail "$line"; done
 
 # The ArangoDB image creates only its root user, with ARANGO_ROOT_PASSWORD.
 # The application logs in as that user, so one password serves both.

@@ -5,11 +5,11 @@ After=kamerplanter-update-guard.service kamerplanter-config.service network-onli
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-# Waits up to UPDATE_HEALTH_TIMEOUT minutes; returns at once when no update
-# is being checked.
+# Waits up to UPDATE_HEALTH_TIMEOUT minutes and returns at once when no update
+# is being checked. Type=exec counts the unit as started once the check runs,
+# so the boot (multi-user.target) does not wait for the decision.
+Type=exec
 ExecStart=/usr/bin/kamerplanter-update health
-TimeoutStartSec=infinity
 
 [Install]
 WantedBy=multi-user.target

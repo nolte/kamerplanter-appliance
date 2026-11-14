@@ -3,7 +3,7 @@ title: Updates and rollback
 audience: [self-hoster]
 content_mode: explanation
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-14
 ---
 
 # Updates and rollback
@@ -13,7 +13,7 @@ The appliance keeps itself up to date. You do not need to do anything, but it he
 ## What happens
 
 1. **Every day** the appliance asks the registry `ghcr.io/nolte/kamerplanter-appliance` whether a new release is out. It only connects outwards; no port has to be open.
-2. A new release is **downloaded in the background** and its signature is checked against the key built into the appliance. A release with a missing or wrong signature is discarded. Kamerplanter keeps running while this happens.
+2. A new release is **downloaded in the background** and its signature is checked against the key built into the appliance. A release with a missing or wrong signature is discarded, and so is a release older than the one running. Kamerplanter keeps running while this happens.
 3. In the **maintenance window**, by default at night between 03:00 and 03:30 in the appliance's time, it restarts once into the new release. The web UI and the API are unavailable for a few minutes. Everything the new release needs was downloaded beforehand, including the Kamerplanter containers, so the restart needs no internet access.
 4. Before the new release touches your data for the first time, the appliance **copies the database** to `/var/lib/kamerplanter/update/backup/`.
 5. The new release has 20 minutes to become **healthy**: the configuration check passes, every container reports healthy, and the web UI and the API answer. Then the update counts as done.
@@ -72,7 +72,7 @@ Put these into `/etc/kamerplanter/kamerplanter.env`:
 
 After changing `UPDATE_WINDOW`, run `systemctl daemon-reload`. The appliance's time zone is UTC unless you set another one with `timedatectl set-timezone`.
 
-There is room needed for the database copy: an update is not activated while `/var` has less free space than the database plus a margin; the record says so.
+There is room needed for the database copy: an update is not activated while `/var` has less free space than the database plus a margin; the record says so. If the copy still cannot be made when the new release starts for the first time, the appliance returns to the previous release before the new one touches the data, and activates the update again in a later window.
 
 ## Choosing when
 
