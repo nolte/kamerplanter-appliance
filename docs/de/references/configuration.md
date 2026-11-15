@@ -3,7 +3,7 @@ title: Konfiguration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 ---
 
 # Konfiguration
@@ -15,6 +15,8 @@ Die Kamerplanter-Einstellungen stammen aus drei Dateien. Ein Wert in einer spät
 | `/usr/share/kamerplanter/kamerplanter.env` | Standardwerte | Das Image; jedes Update ersetzt sie |
 | `/etc/kamerplanter/secrets.env` | Erzeugte Secrets | Die Appliance, einmal je Schlüssel |
 | `/etc/kamerplanter/kamerplanter.env` | Deine eigenen Werte | Du; bleibt über Updates und Rollbacks erhalten |
+
+Mit einem [Datenträger](../getting-started/data-disk.md) liegen `/etc/kamerplanter/` und `/var/lib/kamerplanter/pinned/` auf diesem; die Pfade bleiben dieselben.
 
 Jede Zeile ist `KEY=VALUE` und wird wörtlich übernommen: Anführungszeichen werden nicht entfernt, führende Leerzeichen und Zeilen mit `#` am Anfang werden übersprungen. Bei jedem Boot führt die Appliance die drei Dateien zusammen, prüft sie und schreibt das Ergebnis nach `/run/kamerplanter/`; die Dienste lesen nur dieses Ergebnis. Eine Änderung übernimmst du mit:
 
@@ -41,6 +43,17 @@ Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerp
 
 `UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT` und `UPDATE_BACKUP_KEEP_DAYS` legen fest, wann Updates aktiviert und wie sie geprüft werden; siehe [Updates und Rollback](../getting-started/updates.md#einstellungen). Die Konfigurationsprüfung lehnt ein Fenster ab, das nicht `HH:MM` ist, und eine Frist oder Aufbewahrungsdauer, die keine ganze Zahl ist.
 
+## Datenträger und Sicherungs-Datenträger
+
+| Einstellung | Standard | Bedeutung |
+|---|---|---|
+| `DATA_DISK` | leer | Der Datenträger, als Pfad unter `/dev/disk/by-id/` oder `/dev/disk/by-uuid/`; leer: keiner |
+| `DATA_DISK_FORCE` | `0` | `1` formatiert einen benannten Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmalig |
+| `BACKUP_DISK` | leer | Der Sicherungs-Datenträger, ebenso benannt |
+| `BACKUP_DISK_FORCE` | `0` | `1` formatiert einen benannten Sicherungs-Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmalig |
+
+Ein Provisioner übergibt dasselbe als System-Credentials `kamerplanter.data-disk`, `kamerplanter.data-disk-force`, `kamerplanter.backup-disk` und `kamerplanter.backup-disk-force`. Der Schlüssel einer verschlüsselten Platte ist hier nie eine Einstellung, da diese Datei auf dem Datenträger liegt: Er kommt als Credential `kamerplanter.data-disk-key` oder `kamerplanter.backup-disk-key` oder als Datei dieses Namens in `/var/lib/kamerplanter/disks/keys/`. Die Konfigurationsprüfung lehnt eine Platte ab, die über eine andere Art von Pfad benannt ist. Siehe [Datenträger und Sicherungs-Datenträger](../getting-started/data-disk.md).
+
 ## Prüfungen vor dem Start der Dienste
 
 Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplanter-config`, wenn:
@@ -63,4 +76,4 @@ Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplante
 Unmittelbar bevor ein Dienst zum ersten Mal mit einem davon startet, wird ein Hash unter `/var/lib/kamerplanter/pinned/` festgehalten: das Datenbankpasswort vor dem Start von ArangoDB, die anderen beiden vor dem Start der API. Fehlt ein solcher Wert danach in `secrets.env`, wird er nicht neu erzeugt; stelle ihn aus deinem Backup wieder her. Um einen bewusst zu ändern, erledige zuerst, was sein Grund verlangt, beim Datenbankpasswort: in der Datenbank ändern, dann `ARANGODB_PASSWORD` in deiner Datei setzen, dann `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` löschen und neu starten.
 
 !!! warning "Backups"
-    Sichere `/etc/kamerplanter/secrets.env` zusammen mit deinen Daten. Ohne den passenden `FERNET_KEY` und `ERASURE_TOMBSTONE_SALT` verlieren wiederhergestellte Daten ihre verschlüsselten Felder und Löschnachweise.
+    Sichere `/etc/kamerplanter/secrets.env` zusammen mit deinen Daten. Ohne den passenden `FERNET_KEY` und `ERASURE_TOMBSTONE_SALT` verlieren wiederhergestellte Daten ihre verschlüsselten Felder und Löschnachweise. Mit einem Datenträger liegen beide auf diesem; der Datenträger selbst ist keine Sicherung, und die Datenbank-Kopie vor einem Update auf einem Sicherungs-Datenträger enthält nur die Datenbanken, nicht die Secrets. Der Schlüssel einer verschlüsselten Platte liegt auf der Systemplatte; bewahre auch von ihm eine Kopie auf.

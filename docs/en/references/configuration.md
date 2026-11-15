@@ -3,7 +3,7 @@ title: Configuration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 ---
 
 # Configuration
@@ -15,6 +15,8 @@ The Kamerplanter settings come from three files. A value in a later file wins ov
 | `/usr/share/kamerplanter/kamerplanter.env` | Defaults | The image; replaced by every update |
 | `/etc/kamerplanter/secrets.env` | Generated secrets | The appliance, once per key |
 | `/etc/kamerplanter/kamerplanter.env` | Your own values | You; kept across updates and rollbacks |
+
+With a [data disk](../getting-started/data-disk.md), `/etc/kamerplanter/` and `/var/lib/kamerplanter/pinned/` lie on that disk; the paths stay the same.
 
 Each line is `KEY=VALUE`, taken literally: quotes are not removed, leading whitespace and lines starting with `#` are skipped. On every boot the appliance merges and checks the three files and writes the result to `/run/kamerplanter/`; the services read only that result. Apply a change with:
 
@@ -41,6 +43,17 @@ To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`,
 
 `UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT`, and `UPDATE_BACKUP_KEEP_DAYS` control when updates are activated and how they are checked; see [Updates and rollback](../getting-started/updates.md#settings). The configuration check rejects a window that is not `HH:MM` and a timeout or keeping period that is not a whole number.
 
+## Data disk and backup disk
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `DATA_DISK` | empty | The data disk, as a `/dev/disk/by-id/` or `/dev/disk/by-uuid/` path; empty: none |
+| `DATA_DISK_FORCE` | `0` | `1` formats a named data disk that carries another file system or partition table, once |
+| `BACKUP_DISK` | empty | The backup disk, named the same way |
+| `BACKUP_DISK_FORCE` | `0` | `1` formats a named backup disk that carries another file system or partition table, once |
+
+A provisioner passes the same as the system credentials `kamerplanter.data-disk`, `kamerplanter.data-disk-force`, `kamerplanter.backup-disk`, and `kamerplanter.backup-disk-force`. The key of an encrypted disk is never a setting here, since this file lies on the data disk: it comes as the credential `kamerplanter.data-disk-key` or `kamerplanter.backup-disk-key`, or as the file of that name in `/var/lib/kamerplanter/disks/keys/`. The configuration check rejects a disk named by any other kind of path. See [Data disk and backup disk](../getting-started/data-disk.md).
+
 ## Checks before the services start
 
 The services stay stopped, with a message in `systemctl status kamerplanter-config`, when:
@@ -63,4 +76,4 @@ The services stay stopped, with a message in `systemctl status kamerplanter-conf
 Right before a service starts with one of them for the first time, a digest is recorded under `/var/lib/kamerplanter/pinned/`: the database password before ArangoDB starts, the other two before the API starts. A value missing from `secrets.env` after that is not generated again; restore it from your backup. To change one deliberately, first do what its reason requires, for the database password: change it in the database, then set `ARANGODB_PASSWORD` in your file, then delete `/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD` and restart.
 
 !!! warning "Backups"
-    Back up `/etc/kamerplanter/secrets.env` together with your data. Data restored without the matching `FERNET_KEY` and `ERASURE_TOMBSTONE_SALT` loses its encrypted fields and deletion records.
+    Back up `/etc/kamerplanter/secrets.env` together with your data. Data restored without the matching `FERNET_KEY` and `ERASURE_TOMBSTONE_SALT` loses its encrypted fields and deletion records. With a data disk, both lie on that disk; the disk itself is no backup, and the pre-update backup on a backup disk holds the databases only, not the secrets. The key of an encrypted disk is kept on the system disk; keep a copy of it as well.

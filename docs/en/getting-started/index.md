@@ -3,7 +3,7 @@ title: Getting Started
 audience: [maintainer]
 content_mode: tutorial
 track: developer-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 ---
 
 # Getting Started
@@ -30,6 +30,11 @@ task disk:package  # compressed disk image and checksums in .build/dist/
 ```
 
 `task test:boot` prints one line per run and keeps the serial console and a diagnosis of every failed run under `.build/boot/`. The first boot of each run pulls the container images from their registries and takes several minutes.
+
+## Running the appliance
+
+- [Updates and rollback](updates.md) — how the appliance updates itself and returns to the previous release
+- [Data disk and backup disk](data-disk.md) — keep the data and the pre-update backups on separate local disks
 
 ## Clean up
 

@@ -62,7 +62,7 @@ flowchart TD
     subgraph vm["Appliance"]
         os["Immutable OS image<br/>read-only, versioned"] --> stack["Kamerplanter containers<br/>pinned by digest"]
         fb["First-boot setup"] -->|generates secrets| stack
-        stack --> data[("Data partition<br/>survives updates")]
+        stack --> data[("Persistent state<br/>system disk or optional data disk")]
         upd["Automatic update"] -->|new image, reboot, rollback on failure| os
     end
     user["Browser / Home Assistant"] -->|8080 / 8000| stack
@@ -72,7 +72,7 @@ flowchart TD
 - **Containers pinned by digest:** the appliance starts a fixed set of container images. They may be loaded from the registry at the first start; later starts need no registry access.
 - **Container control by the distribution:** the service manager of the operating system starts the containers in order, restarts one that fails, and brings everything back after a reboot.
 - **First-boot setup:** a one-shot step generates the passwords and salts that upstream requires. No default credentials ship in the image.
-- **Separated state:** databases and configuration live on a data partition that updates never touch. Backup covers that partition alone, or the whole VM as a snapshot.
+- **Separated state:** databases, configuration, and secrets live outside the system image, so updates and rollbacks never touch them. They stay on the system disk, or move onto an optional local data disk (label `kp-data`) that a reinstalled system adopts; an optional backup disk (label `kp-backup`) receives the pre-update backups. See [Data disk and backup disk](docs/en/getting-started/data-disk.md).
 - **Network:** only the web UI (8080) and the API (8000) are reachable from outside. Databases and Valkey stay on loopback, as upstream intends.
 - **Protection:** TLS for the web UI and the API, automatic blocking of addresses after repeated failed logins, and a rate limit per source against floods from few sources. All of it is active without configuration.
 
@@ -93,7 +93,7 @@ A hosted server has a public address. The appliance is meant to offer TLS there;
 
 ## Updating (planned)
 
-The appliance checks for a new appliance release, downloads it in the background, and activates it with a reboot. If the new version doesn't come up healthy, the system boots the previous one again. The data partition is kept across updates and rollbacks.
+The appliance checks for a new appliance release, downloads it in the background, and activates it with a reboot. If the new version doesn't come up healthy, the system boots the previous one again. The configuration, the secrets, and the databases are kept across updates and rollbacks, on the system disk or on the data disk.
 
 There is no separate patching of the distribution. Whether the operating system and the Kamerplanter containers arrive in one update or in two is open; either way the user does nothing.
 

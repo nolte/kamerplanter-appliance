@@ -3,7 +3,7 @@ title: Erste Schritte
 audience: [maintainer]
 content_mode: tutorial
 track: developer-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 ---
 
 # Erste Schritte
@@ -30,6 +30,11 @@ task disk:package  # komprimiertes Disk-Image und Prüfsummen in .build/dist/
 ```
 
 `task test:boot` gibt je Lauf eine Zeile aus und legt die serielle Konsole und eine Diagnose jedes gescheiterten Laufs unter `.build/boot/` ab. Der erste Start jedes Laufs lädt die Container-Images aus ihren Registries und dauert mehrere Minuten.
+
+## Die Appliance betreiben
+
+- [Updates und Rollback](updates.md) — wie sich die Appliance selbst aktualisiert und zum vorherigen Release zurückkehrt
+- [Datenträger und Sicherungs-Datenträger](data-disk.md) — Daten und die Sicherungen vor Updates auf eigenen lokalen Platten halten
 
 ## Aufräumen
 

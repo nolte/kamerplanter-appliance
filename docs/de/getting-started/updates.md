@@ -3,7 +3,7 @@ title: Updates und Rollback
 audience: [self-hoster]
 content_mode: explanation
 track: user-docs
-last_updated: 2026-11-14
+last_updated: 2026-11-15
 ---
 
 # Updates und Rollback
@@ -15,7 +15,7 @@ Die Appliance hält sich selbst aktuell. Du musst nichts tun, aber es hilft zu w
 1. **Jeden Tag** fragt die Appliance die Registry `ghcr.io/nolte/kamerplanter-appliance`, ob ein neues Release erschienen ist. Sie baut nur Verbindungen nach außen auf; kein Port muss offen sein.
 2. Ein neues Release wird **im Hintergrund heruntergeladen**, und seine Signatur wird gegen den Schlüssel geprüft, der in die Appliance eingebaut ist. Ein Release mit fehlender oder falscher Signatur wird verworfen, ebenso ein Release, das älter ist als das laufende. Kamerplanter läuft währenddessen weiter.
 3. Im **Wartungsfenster**, standardmäßig nachts zwischen 03:00 und 03:30 Uhr in der Zeit der Appliance, startet sie einmal in das neue Release neu. Web-UI und API sind dabei einige Minuten nicht erreichbar. Alles, was das neue Release braucht, wurde vorher heruntergeladen, auch die Kamerplanter-Container; der Neustart braucht also keinen Internetzugang.
-4. Bevor das neue Release deine Daten zum ersten Mal berührt, **kopiert die Appliance die Datenbank** nach `/var/lib/kamerplanter/update/backup/`.
+4. Bevor das neue Release deine Daten zum ersten Mal berührt, **kopiert die Appliance die Datenbank**: nach `/var/lib/kamerplanter/update/backup/` auf der Systemplatte oder auf einen [Sicherungs-Datenträger oder Datenträger](#where-the-backup-goes), wenn du einen hast.
 5. Das neue Release hat 20 Minuten, um **gesund** zu werden: Die Konfigurationsprüfung besteht, jeder Container meldet sich gesund, und Web-UI und API antworten. Dann gilt das Update als abgeschlossen.
 
 Das Update ersetzt System und Kamerplanter-Version gemeinsam. Deine Einstellungen in `/etc/kamerplanter/kamerplanter.env`, die erzeugten Geheimnisse und deine Daten bleiben, wie sie sind.
@@ -72,7 +72,25 @@ Trage sie in `/etc/kamerplanter/kamerplanter.env` ein:
 
 Nach einer Änderung von `UPDATE_WINDOW` führe `systemctl daemon-reload` aus. Die Zeitzone der Appliance ist UTC, solange du keine andere mit `timedatectl set-timezone` einstellst.
 
-Die Datenbank-Kopie braucht Platz: Ein Update wird nicht aktiviert, solange `/var` weniger freien Platz hat als die Datenbank plus einen Puffer; das Protokoll sagt das. Lässt sich die Kopie beim ersten Start des neuen Release trotzdem nicht anlegen, kehrt die Appliance zum vorigen Release zurück, bevor das neue die Daten berührt, und aktiviert das Update in einem späteren Fenster erneut.
+Die Datenbank-Kopie braucht Platz: Ein Update wird nicht aktiviert, solange kein Ort für die Kopie freien Platz für die Datenbank plus 10 % und 512 MiB hat; das Protokoll sagt das. Lässt sich die Kopie beim ersten Start des neuen Release trotzdem nicht anlegen, kehrt die Appliance zum vorigen Release zurück, bevor das neue die Daten berührt, und aktiviert das Update in einem späteren Fenster erneut.
+
+## Wohin die Datenbank-Kopie geht { #where-the-backup-goes }
+
+Mit einem [Sicherungs-Datenträger oder Datenträger](data-disk.md) nimmt die Appliance den ersten dieser Orte, der verwendbar ist und Platz hat:
+
+1. den Sicherungs-Datenträger `kp-backup`, in `update-backup/` oben auf der Platte
+2. den Datenträger `kp-data`, in `update-backup/` oben auf der Platte
+3. die Systemplatte, in `/var/lib/kamerplanter/update/backup/`
+
+Eine Platte wird übergangen, wenn sie nicht eingerichtet ist, fehlt, unter einer anderen Identität eingehängt ist als der, mit der sie eingerichtet wurde, oder zu wenig Platz hat. Mit einem verschlüsselten Datenträger wird auch ein unverschlüsselter Sicherungs-Datenträger übergangen. Das Update-Protokoll nennt den verwendeten Ort und warum die anderen übergangen wurden:
+
+```text
+  2026-11-15T03:05:40Z  update  backup  data backed up before the first start of v0.3.0 on the data disk kp-data; not on the backup disk kp-backup: the backup disk kp-backup is missing or not mounted
+```
+
+Das erste Update von einem Release, das nur die Systemplatte kennt, legt seine Kopie dort ab, damit ein Rollback auf dieses Release sie findet.
+
+Das Protokoll hält fest, wo jede Kopie liegt, und eine Prüfsumme, die vor einer Wiederherstellung geprüft wird. Fehlt die Platte der Kopie bei einem Rollback oder stimmt die Prüfsumme nicht, wird die Kopie nicht wiederhergestellt, und die Dienste bleiben angehalten; `systemctl status kamerplanter-update-guard.service` sagt warum. Bei einer fehlenden Platte schließe sie wieder an und starte dann neu, oder führe `systemctl restart kamerplanter-backup-disk.service kamerplanter.target` aus. Eine beschädigte Kopie musst du von Hand aus einer anderen Sicherung ersetzen. `kamerplanter-update status` listet jede Kopie mit ihrem Ort.
 
 ## Den Zeitpunkt wählen
 

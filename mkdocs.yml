@@ -75,6 +75,7 @@ plugins:
             References: Referenzen
             Configuration: Konfiguration
             Updates and rollback: Updates und Rollback
+            Data disk and backup disk: Datenträger und Sicherungs-Datenträger
             Verifying a download: Einen Download prüfen
             Related repositories: Zugehörige Repositorys
 
@@ -132,6 +133,7 @@ nav:
   - Getting Started:
       - en/getting-started/index.md
       - Updates and rollback: en/getting-started/updates.md
+      - Data disk and backup disk: en/getting-started/data-disk.md
   - References:
       - en/references/index.md
       - Configuration: en/references/configuration.md

@@ -3,7 +3,7 @@ title: Updates and rollback
 audience: [self-hoster]
 content_mode: explanation
 track: user-docs
-last_updated: 2026-11-14
+last_updated: 2026-11-15
 ---
 
 # Updates and rollback
@@ -15,7 +15,7 @@ The appliance keeps itself up to date. You do not need to do anything, but it he
 1. **Every day** the appliance asks the registry `ghcr.io/nolte/kamerplanter-appliance` whether a new release is out. It only connects outwards; no port has to be open.
 2. A new release is **downloaded in the background** and its signature is checked against the key built into the appliance. A release with a missing or wrong signature is discarded, and so is a release older than the one running. Kamerplanter keeps running while this happens.
 3. In the **maintenance window**, by default at night between 03:00 and 03:30 in the appliance's time, it restarts once into the new release. The web UI and the API are unavailable for a few minutes. Everything the new release needs was downloaded beforehand, including the Kamerplanter containers, so the restart needs no internet access.
-4. Before the new release touches your data for the first time, the appliance **copies the database** to `/var/lib/kamerplanter/update/backup/`.
+4. Before the new release touches your data for the first time, the appliance **copies the database**: to `/var/lib/kamerplanter/update/backup/` on the system disk, or to a [backup disk or data disk](#where-the-backup-goes) when you have one.
 5. The new release has 20 minutes to become **healthy**: the configuration check passes, every container reports healthy, and the web UI and the API answer. Then the update counts as done.
 
 The update replaces the system and the Kamerplanter version together. Your settings in `/etc/kamerplanter/kamerplanter.env`, the generated secrets, and your data stay as they are.
@@ -72,7 +72,25 @@ Put these into `/etc/kamerplanter/kamerplanter.env`:
 
 After changing `UPDATE_WINDOW`, run `systemctl daemon-reload`. The appliance's time zone is UTC unless you set another one with `timedatectl set-timezone`.
 
-There is room needed for the database copy: an update is not activated while `/var` has less free space than the database plus a margin; the record says so. If the copy still cannot be made when the new release starts for the first time, the appliance returns to the previous release before the new one touches the data, and activates the update again in a later window.
+There is room needed for the database copy: an update is not activated while no backup location has free space for the database plus 10 % and 512 MiB; the record says so. If the copy still cannot be made when the new release starts for the first time, the appliance returns to the previous release before the new one touches the data, and activates the update again in a later window.
+
+## Where the backup goes
+
+With a [backup disk or data disk](data-disk.md), the appliance takes the first of these locations that is usable and has room:
+
+1. the backup disk `kp-backup`, in `update-backup/` at the top of the disk
+2. the data disk `kp-data`, in `update-backup/` at the top of the disk
+3. the system disk, in `/var/lib/kamerplanter/update/backup/`
+
+A disk is skipped when it isn't set up, is missing, is mounted under another identity than the one it was set up with, or lacks the room. With an encrypted data disk, an unencrypted backup disk is skipped too. The update record names the location used and why the others were skipped:
+
+```text
+  2026-11-15T03:05:40Z  update  backup  data backed up before the first start of v0.3.0 on the data disk kp-data; not on the backup disk kp-backup: the backup disk kp-backup is missing or not mounted
+```
+
+The first update from a release that knows only the system disk puts its backup there, so that a rollback to that release finds it.
+
+The record keeps where each backup is and a checksum, which is checked before a restore. When the backup's disk is missing at a rollback, or the checksum doesn't match, the backup isn't restored and the services stay stopped; `systemctl status kamerplanter-update-guard.service` says why. For a missing disk, attach it again, then reboot, or run `systemctl restart kamerplanter-backup-disk.service kamerplanter.target`. A damaged backup has to be replaced by hand from another backup. `kamerplanter-update status` lists every backup with its location.
 
 ## Choosing when
 
