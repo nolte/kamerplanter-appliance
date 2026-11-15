@@ -28,7 +28,9 @@ BASE=${IMAGE_REF:-localhost/kamerplanter-appliance:poc}
 WORK=.build/update
 REGISTRY=registry.test:5000
 CHANNEL=$REGISTRY/kamerplanter-appliance:stable
-REGISTRY_IMAGE=docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+# Pulled through Google's Docker Hub mirror: CI runners hit the anonymous
+# Docker Hub pull limit. Same digest as docker.io/library/registry:3.
+REGISTRY_IMAGE=mirror.gcr.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
 # A healthy release passes in about 2 minutes; the budget leaves room
 # for a slow host and bounds how long u5 and u6 wait for a broken one.
 HEALTH_MINUTES=${HEALTH_MINUTES:-5}
