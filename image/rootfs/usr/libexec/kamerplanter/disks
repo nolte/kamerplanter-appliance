@@ -8,6 +8,10 @@
 #   disks stop ROLE      run when the unit stops: unbinds, unmounts, closes
 #   disks status         what is set up, where it is mounted, and how far a
 #                        move from the system disk has come
+#   disks name ROLE PATH [force] | disks name ROLE none
+#                        as root: name the disk of ROLE (data or backup) on
+#                        the system disk, optionally forcing its format once,
+#                        or remove that naming; takes effect at the next start
 #
 # Run by the update tool (/usr/bin/kamerplanter-update), not by the user:
 #   disks move healthy | unhealthy REASON | missing REASON
@@ -15,18 +19,27 @@
 #   disks cleanup DAYS   deletes the system disk's copy of moved data, DAYS
 #                        days after the services passed that check
 #
-# Naming. A disk is named by a /dev/disk/by-id/ or /dev/disk/by-uuid/ path in
-# the user file (DATA_DISK, BACKUP_DISK) or as the system credential
-# kamerplanter.data-disk or kamerplanter.backup-disk. Nothing else is ever
-# formatted or adopted, also not a disk that only carries the label.
+# Naming. A disk is named by a /dev/disk/by-id/ or /dev/disk/by-uuid/ path,
+# only from the system side: as the system credential kamerplanter.data-disk
+# or kamerplanter.backup-disk, or as DATA_DISK or BACKUP_DISK in the naming
+# file /var/lib/kamerplanter/disks/naming.env (root, written by `disks name`
+# or by hand; read literally, never run). The user file
+# /etc/kamerplanter/kamerplanter.env names a disk too, but only while no data
+# disk is set up: it then lies on the system disk. Once a data disk is set
+# up, the user file lies on that disk, which may have been changed elsewhere
+# (a USB stick), so its DATA_DISK, BACKUP_DISK and *_FORCE are ignored, and
+# the journal says where to set them instead. Nothing else is ever formatted
+# or adopted, also not a disk that only carries the label.
 #
 # Set-up. A named disk that is not set up yet is
 #   - adopted when it carries an ext4 file system with its label already,
 #   - formatted ext4 with the label kp-data or kp-backup when it is blank,
 #   - refused when it carries another signature, which the message names,
 #     unless DATA_DISK_FORCE=1 or BACKUP_DISK_FORCE=1 (credential
-#     kamerplanter.data-disk-force, kamerplanter.backup-disk-force) forces the
-#     format; a force applies once to the path it names,
+#     kamerplanter.data-disk-force, kamerplanter.backup-disk-force; from the
+#     same sources as the naming) forces the format; a force applies once to
+#     the device it names, recorded by its WWN or serial (and partition), so
+#     another path to the same device does not apply it again,
 #   - always refused when it, or a partition on it, carries kp-data or
 #     kp-backup in another way, is or lies on the disk holding the running
 #     system, is mounted or otherwise in use, or is not a local disk.
@@ -46,22 +59,31 @@
 # disk without a key. Once the disk is set up or opened, the key that opened
 # it is kept in keys/ROLE.key (root, 0600, directory 0700) on the system
 # disk, so later boots open it without the credential; every provisioned copy
-# of that same key the appliance keeps (the file in keys/, and
-# /etc/credstore*/ and /run/credstore*/) is deleted then. The stored key is
-# deleted when the disk is no longer set up. A key is passed to cryptsetup
-# only as a file (--key-file), never on a command line, and no message names
-# more of it than where it came from. It is not sealed in the TPM: a PCR
+# of that same key the appliance keeps is deleted then: the file in keys/, the
+# plain credential in /etc/credstore/ or /run/credstore/, and the encrypted
+# one in /etc/credstore.encrypted/ or /run/credstore.encrypted/ (compared
+# after systemd-creds decrypt). These are the writable credential stores
+# ImportCredential= searches (systemd.exec(5)); /usr/lib/credstore*/ is part
+# of the image. A key on the kernel command line (systemd.set_credential=) is
+# refused: every user can read the command line, and the journal records it.
+# The stored key is deleted when the disk is no longer set up. A key is
+# passed to cryptsetup only as a file (--key-file), never on a command line,
+# and no message names more of it than where it came from (an encrypted
+# credential is decrypted only into a pipe to cmp). It is not sealed in the
+# TPM: a PCR
 # policy over the boot chain would change with every update of the image.
 # With an encrypted data disk, a backup disk is set up only with a key, and
 # one set up unencrypted is not used (E16).
 #
 # State in /var/lib/kamerplanter/disks/ on the system disk:
 #   ROLE.env    the disk is set up: its label, file system, UUID and
-#               encryption. Only this record makes a disk "set up", so a
-#               missing disk is told apart from one that never was. Delete it
-#               only to retire the disk.
+#               encryption (with cipher and key size). Only this record
+#               makes a disk "set up", so a missing disk is told apart from
+#               one that never was. Delete it only to retire the disk.
 #   keys/       the stored keys (ROLE.key) and the provisioned key files
-#   forced      the paths a forced format was used for, one per line
+#   naming.env  DATA_DISK, BACKUP_DISK and their *_FORCE (see Naming)
+#   forced      the devices a forced format was used for, one per line
+#               (device_identity; paths, from older releases, count as well)
 #   move.env    the move of the system disk's data onto the data disk
 #   move-targets  the UUIDs of the disks moves went to, one per line
 #   log.jsonl   one JSON object per set-up, and per step of a move
@@ -88,6 +110,10 @@
 # unmounted again, so configure finds no location to write to. At its top the
 # disk also carries the release marker "release", which only the update tool
 # reads and writes (/usr/bin/kamerplanter-update, E13); it is bound nowhere.
+# Next to it, as on the backup disk, update-backup holds pre-update backups:
+# a disk on which it, or an entry in it, is a symbolic link or no directory,
+# or "release" is a symbolic link or no regular file, is refused as well
+# (top_problem), since root writes and deletes there.
 #
 # Moving (E11). A data disk named on an appliance whose system disk holds
 # Kamerplanter data already (secrets, pins, database files; system_data) is
@@ -142,12 +168,23 @@ wait_seconds=30
 # Keys (E14): stored keys and provisioned key files, and the credential
 # stores systemd imports credentials from, from which a stored key is deleted.
 keys=$records/keys
-credstores=(/etc/credstore /etc/credstore.encrypted /run/credstore /run/credstore.encrypted)
+credstores=(/etc/credstore /run/credstore)
+credstores_encrypted=(/etc/credstore.encrypted /run/credstore.encrypted)
+# The kernel command line, which must not carry a key: every user reads it.
+cmdline=/proc/cmdline
+# Disk naming on the system disk (see Naming); the keys read from it.
+naming_file=$records/naming.env
+naming_keys=(DATA_DISK DATA_DISK_FORCE BACKUP_DISK BACKUP_DISK_FORCE)
 key_min=32
 key_max=8192
 # Extra options of luksFormat; empty on the appliance (cryptsetup's own key
-# derivation cost), the tests lower the cost.
+# derivation cost), the tests lower the cost. The cipher and key size are
+# fixed and recorded (CIPHER, KEY_BITS in ROLE.env); an opened container whose
+# data segment uses anything else (a header prepared with cipher_null) is
+# closed again and not used.
 luks_options=()
+luks_cipher=aes-xts-plain64
+luks_key_bits=512
 
 # ---------------------------------------------------------------------------
 # Decisions without side effects; tests/unit/disks.sh runs them on fake input.
@@ -195,7 +232,7 @@ classify() {
 # and FOUND_LABEL are the device's own file system (crypto_LUKS for a LUKS
 # container) and label, KEPT says which part of it carries kp-data or
 # kp-backup (empty when none), FORCE is 1 when the naming forces a format,
-# FORCED_BEFORE is 1 when a forced format was used for this path already,
+# FORCED_BEFORE is 1 when a forced format was used for this device already,
 # KEYED is 1 when a key is supplied for it, and the signatures are those
 # wipefs finds on it and on its partitions. Prints adopt, unlock (open the
 # LUKS2 container with the key, then adopt what is inside), format, wipe
@@ -224,7 +261,7 @@ setup_action() {
     if [ "$force" != 1 ]; then
         echo "refuse it carries $sigs; it is formatted only when the naming forces it"
     elif [ "$forced" = 1 ]; then
-        echo "refuse it carries $sigs, and the forced format of this path was used already"
+        echo "refuse it carries $sigs, and the forced format of this device was used already"
     else
         echo wipe
     fi
@@ -273,6 +310,85 @@ key_file_problem() {
     key_size_problem "$size"
 }
 
+# owner_problem FILE WHAT: why FILE, read by root as WHAT, is not used: it
+# must be a regular file of root that no one else may change; empty when it
+# is fine or does not exist. Reads the file's metadata only.
+owner_problem() {
+    local owner mode
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    if [ -L "$1" ] || [ ! -f "$1" ]; then echo "$2 $1 is not a regular file"; return; fi
+    read -r owner mode < <(stat -c '%u %a' -- "$1")
+    if [ "$owner" != 0 ]; then echo "$2 $1 is not owned by root"; return; fi
+    if [ $((8#$mode & 8#022)) -ne 0 ]; then echo "$2 $1 has the mode $mode, which lets others than root change it"; fi
+}
+
+# cmdline_key FILE ROLE: whether the kernel command line in FILE passes the
+# key of the ROLE disk as a credential (systemd.set_credential= or
+# systemd.set_credential_binary=). Every user can read the command line, and
+# the journal records it at every boot, so such a key is refused (E14).
+# Matches the name only; the key itself is never read into the script.
+cmdline_key() {
+    grep -Eq -- "(^|[[:space:]])\"?(rd\.)?systemd\.set_credential(_binary)?=kamerplanter\.$2-disk-key:" "$1" 2>/dev/null
+}
+
+# cipher_problem STATUS CIPHER BITS: why an opened LUKS2 container is not used,
+# from what `cryptsetup status` says of it (STATUS): its data must be
+# encrypted with CIPHER and a key of BITS bits, as it was set up; a header
+# prepared elsewhere with cipher_null would let anyone read and write the
+# disk. Empty when it is.
+cipher_problem() {
+    local line cipher='' bits=''
+    while IFS= read -r line; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case $line in
+            cipher:*) cipher=${line#cipher:} cipher=${cipher#"${cipher%%[![:space:]]*}"} ;;
+            keysize:*) bits=${line#keysize:} bits=${bits#"${bits%%[![:space:]]*}"} bits=${bits%%[!0-9]*} ;;
+        esac
+    done <<<"$1"
+    case $cipher in
+        cipher_null*) echo "its data is not encrypted (cipher_null)"; return ;;
+    esac
+    [ "$cipher" = "$2" ] && [ "$bits" = "$3" ] ||
+        echo "its data is encrypted with $(shown "${cipher:-an unknown cipher}") and a key of ${bits:-unknown} bits, not with $2 and $3 bits as it was set up"
+}
+
+# device_identity WWN SERIAL PARTITION DEVNO: what a forced format is recorded
+# under, so that every path to the same device finds it: the WWN, else the
+# serial of the disk, with the partition number of a partition; the device
+# number MAJOR:MINOR only when the disk reports neither.
+device_identity() {
+    local id
+    if [ -n "$1" ]; then
+        id=wwn:$1
+    elif [ -n "$2" ]; then
+        id=serial:$2
+    else
+        shown "devno:$4"
+        return
+    fi
+    shown "$id${3:+:part$3}"
+}
+
+# top_problem ROOT: why the disk mounted at ROOT is not used, from what lies
+# at its top beside the locations: update-backup, where the update tool
+# writes and deletes pre-update backups as root, must be a directory holding
+# directories only; none of them, nor update-backup, may be a symbolic link,
+# which root would follow. Empty when it is fine or missing. Reads only.
+top_problem() {
+    local dir=$1/update-backup type entry
+    if [ -L "$dir" ]; then echo "update-backup is a symbolic link"; return; fi
+    [ -e "$dir" ] || return 0
+    if [ ! -d "$dir" ]; then echo "update-backup is not a directory"; return; fi
+    while IFS=' ' read -r -d '' type entry; do
+        entry=update-backup/$(shown "${entry##*/}")
+        case $type in
+            d) ;;
+            l) echo "$entry is a symbolic link"; return ;;
+            *) echo "$entry is not a directory"; return ;;
+        esac
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -printf '%y %p\0')
+}
+
 # luks_uuid DM_UUID (the UUID of the LUKS2 container behind a dm-crypt
 # mapping) is in /usr/lib/kamerplanter/env.sh: the update tool checks the
 # identity of the backup disk with it as well.
@@ -283,10 +399,15 @@ key_file_problem() {
 # entry of etc or pinned that is not a regular file, or a regular file with
 # more than one link (a hard link elsewhere on the disk, such as into a volume
 # a container writes to); and a _data of a volume that is a symbolic link or
-# no directory, which Podman would follow. A missing location is fine: it is
-# created. Reads only.
+# no directory, which Podman would follow; the release marker as a symbolic
+# link or no regular file; and what top_problem refuses. A missing location
+# is fine: it is created. Reads only.
 layout_problem() {
     local root=$1 place dir path d part parts type links entry
+    if [ -L "$root/release" ]; then echo "release is a symbolic link"; return; fi
+    if [ -e "$root/release" ] && [ ! -f "$root/release" ]; then echo "release is not a regular file"; return; fi
+    entry=$(top_problem "$root")
+    if [ -n "$entry" ]; then echo "$entry"; return; fi
     for place in "${data_disk_places[@]}"; do
         read -r dir path <<<"$place"
         d=
@@ -427,12 +548,14 @@ role_vars() {
     mapper=/dev/mapper/$mapper_name
 }
 
-# report MESSAGE HINT: on the console until the unit succeeds again.
+# report MESSAGE HINT: on the console until the unit succeeds again. A name
+# from a disk or a naming in it is shown with its unprintable characters
+# replaced (shown), so it cannot write to the console or the journal.
 report() {
     install -d -m 0755 /run/issue.d
     {
-        echo "Kamerplanter: $1"
-        if [ -n "${2-}" ]; then echo "  $2"; fi
+        echo "Kamerplanter: $(shown "$1")"
+        if [ -n "${2-}" ]; then echo "  $(shown "$2")"; fi
         echo "  details: systemctl status $unit"
         echo
     } >"$issue.tmp"
@@ -451,8 +574,10 @@ clear_report() {
 # stopped; the journal (and so `systemctl status`) and the console say why.
 die() {
     local hint=${2:-fix this, then run: systemctl restart kamerplanter.target}
-    echo "$1" >&2
-    echo "$hint" >&2
+    shown "$1" >&2
+    echo >&2
+    shown "$hint" >&2
+    echo >&2
     close_opened
     report "$1; the services stay stopped" "$hint"
     exit 1
@@ -494,22 +619,52 @@ credential() {
     printf '%s' "${value%"${value##*[![:space:]]}"}"
 }
 
+# user_file_trusted: whether the user file may name disks: it lies on the
+# system disk, since no data disk is set up and nothing is mounted onto
+# /etc/kamerplanter (see Naming).
+user_file_trusted() {
+    [ ! -e "$records/data.env" ] && ! mountpoint -q /etc/kamerplanter
+}
+
 # naming: sets name and force for this role, other_name for the other one,
-# and conflict when the setting and the credential name different disks.
+# and conflict when two sources name different disks. The sources, first
+# one first: the credential, the naming file, and the user file only while
+# user_file_trusted. Keys of the user file it ignores are reported.
 naming() {
-    local setting credential
-    load "$defaults" "$user"
-    setting=$(get "$key")
-    credential=$(credential "$cred")
-    name=${credential:-$setting}
-    conflict=
-    if [ -n "$setting" ] && [ -n "$credential" ] && [ "$setting" != "$credential" ]; then
-        conflict="the setting $key=$setting and the credential $cred=$credential name different disks"
+    local why f_name f_force f_other u_name='' u_force='' u_other='' c_name i ignored=()
+    local sources=() names=()
+    why=$(owner_problem "$naming_file" "the naming file")
+    [ -z "$why" ] ||
+        die "$why; no disk is named from it" \
+            "make it a regular file of root with mode 0600, or delete it, then run: systemctl restart kamerplanter.target"
+    load "$naming_file"
+    f_name=$(get "$key") f_force=$(get "${key}_FORCE") f_other=$(get "$other_key")
+    load "$user"
+    if user_file_trusted; then
+        u_name=$(get "$key") u_force=$(get "${key}_FORCE") u_other=$(get "$other_key")
+    else
+        if [ -n "$(get "$key")" ]; then ignored+=("$key"); fi
+        if [ -n "$(get "${key}_FORCE")" ] && [ "$(get "${key}_FORCE")" != 0 ]; then ignored+=("${key}_FORCE"); fi
     fi
+    if [ ${#ignored[@]} -gt 0 ]; then
+        echo "$user sets ${ignored[*]}, which is ignored there: that file lies on the data disk; name the $role disk with: /usr/libexec/kamerplanter/disks name $role PATH [force] (in $naming_file), or as the credential $cred" >&2
+    fi
+    c_name=$(credential "$cred")
+    if [ -n "$c_name" ]; then sources+=("the credential $cred") names+=("$c_name"); fi
+    if [ -n "$f_name" ]; then sources+=("$key in $naming_file") names+=("$f_name"); fi
+    if [ -n "$u_name" ]; then sources+=("the setting $key") names+=("$u_name"); fi
+    name=${names[0]-}
+    conflict=
+    for i in "${!names[@]}"; do
+        if [ "${names[i]}" != "$name" ]; then
+            conflict=$(shown "${sources[0]}=$name and ${sources[i]}=${names[i]} name different disks")
+            break
+        fi
+    done
     force=0
-    if [ "$(get "${key}_FORCE")" = 1 ] || [ "$(credential "$cred-force")" = 1 ]; then force=1; fi
+    if [ "$(credential "$cred-force")" = 1 ] || [ "$f_force" = 1 ] || [ "$u_force" = 1 ]; then force=1; fi
     other_name=$(credential "$other_cred")
-    other_name=${other_name:-$(get "$other_key")}
+    other_name=${other_name:-${f_other:-$u_other}}
 }
 
 # probe DEVICE: sets fs_type, fs_label and fs_uuid from the device itself,
@@ -595,6 +750,21 @@ in_use() {
 # DEVICE itself, then the partitions and other devices on it.
 tree() { lsblk -nrpo NAME -- "$1"; }
 
+# lsblk_field DEVICE COLUMN: one column of lsblk for DEVICE itself, without
+# the blanks lsblk pads it with.
+lsblk_field() {
+    local v
+    v=$(lsblk -ndo "$2" -- "$1" 2>/dev/null || true)
+    v=${v#"${v%%[![:space:]]*}"}
+    printf '%s' "${v%"${v##*[![:space:]]}"}"
+}
+
+# identity_of DEVICE: device_identity of DEVICE, as lsblk and sysfs report it.
+identity_of() {
+    device_identity "$(lsblk_field "$1" WWN)" "$(lsblk_field "$1" SERIAL)" \
+        "$(cat "/sys/class/block/$(kname "$1")/partition" 2>/dev/null || true)" "$(lsblk_field "$1" MAJ:MIN)"
+}
+
 # kept DEVICE: which part of DEVICE carries kp-data or kp-backup; empty when none.
 kept() {
     local d
@@ -678,13 +848,30 @@ key_origin() {
 
 # provisioned_copies: the copies of this role's key the appliance keeps from
 # provisioning, which are deleted once the key is stored: the key file in
-# keys/ and the credential in a credential store. The credentials systemd
-# passes from the firmware or the kernel command line live in memory only.
+# keys/, and the credential in a writable credential store, plain or
+# encrypted (a line "encrypted FILE" for the latter). The credentials systemd
+# passes from the firmware live in memory only; the kernel command line is
+# refused as a channel (supplied_keys).
 provisioned_copies() {
     local f
     for f in "$key_input" "${credstores[@]/%//$key_cred}"; do
-        if [ -e "$f" ] || [ -L "$f" ]; then echo "$f"; fi
+        if [ -e "$f" ] || [ -L "$f" ]; then echo "plain $f"; fi
     done
+    for f in "${credstores_encrypted[@]/%//$key_cred}"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then echo "encrypted $f"; fi
+    done
+}
+
+# same_key KIND FILE: whether FILE holds the stored key: compared byte for
+# byte, an encrypted credential after systemd-creds decrypt, piped into cmp,
+# so the key goes from file to file only. A link is never the same.
+same_key() {
+    [ -f "$2" ] && [ ! -L "$2" ] || return 1
+    case $1 in
+        plain) cmp -s -- "$2" "$key_store" ;;
+        encrypted) systemd-creds decrypt --name="$key_cred" -- "$2" - 2>/dev/null | cmp -s - "$key_store" ;;
+        *) return 1 ;;
+    esac
 }
 
 # secure_keys: the directory of the keys, root and 0700; never a link.
@@ -705,6 +892,10 @@ secure_keys() {
 supplied_keys() {
     supplied=()
     local f why
+    if cmdline_key "$cmdline" "$role"; then
+        die "the key for the $role disk is passed on the kernel command line (systemd.set_credential=$key_cred:...), which every user can read and the journal records; it is not used, and not stored" \
+            "remove it from the kernel command line, consider the key exposed, and supply a key as an SMBIOS or encrypted credential $key_cred or in $key_input; then reboot"
+    fi
     if [ -e "$keys" ] || [ -L "$keys" ]; then secure_keys; fi
     for f in "$key_input" "${CREDENTIALS_DIRECTORY:+$CREDENTIALS_DIRECTORY/$key_cred}"; do
         [ -n "$f" ] || continue
@@ -727,17 +918,32 @@ forget_key() {
     log_event key-deleted "the stored key $key_store, since no encrypted $role disk is set up"
 }
 
-# open_disk DEVICE UUID: opens the LUKS2 container on DEVICE as this role's
-# mapper with the stored key, else with a supplied one; a container open
-# already counts when it is that one. Sets used_key to the key file that
-# opened it (empty when it was open), opened_now to 1 when this run opened it.
+# check_cipher DEVICE CIPHER BITS: the container open as this role's mapper
+# must encrypt its data as set up (cipher_problem); else it is closed (when
+# this run opened it) and the unit fails, as for a disk of another identity.
+check_cipher() {
+    local why
+    why=$(cipher_problem "$(cryptsetup status "$mapper_name" 2>/dev/null || true)" "$2" "$3")
+    [ -z "$why" ] ||
+        die "$role disk $label ($1) is not used: $why; it may have been replaced by a disk prepared elsewhere" \
+            "attach the disk that was set up, then run: systemctl restart kamerplanter.target"
+}
+
+# open_disk DEVICE UUID [CIPHER BITS]: opens the LUKS2 container on DEVICE as
+# this role's mapper with the stored key, else with a supplied one; a
+# container open already counts when it is that one. Either way its data
+# must be encrypted with CIPHER and BITS (by default luks_cipher and
+# luks_key_bits, what set_up formats with). Sets used_key to the key file
+# that opened it (empty when it was open), opened_now to 1 when this run
+# opened it.
 open_disk() {
-    local dev=$1 uuid=$2 f rc err candidates=() tried=()
+    local dev=$1 uuid=$2 want_cipher=${3:-$luks_cipher} want_bits=${4:-$luks_key_bits} f rc err candidates=() tried=()
     used_key=
     if [ -e "$mapper" ] || [ -L "$mapper" ]; then
         if [ "$(mapping_uuid)" != "${uuid,,}" ] || ! mapping_on "$dev"; then
             die "$mapper is open already, but not as the $label disk with LUKS2 UUID $uuid on $dev; it is not used"
         fi
+        check_cipher "$dev" "$want_cipher" "$want_bits"
         echo "$label disk $dev ($uuid) is open as $mapper"
         return
     fi
@@ -765,6 +971,7 @@ open_disk() {
         die "$role disk $label ($dev) cannot be unlocked: no key it was given opens it (${list%; })" \
             "supply its key as the credential $key_cred or in $key_input, then run: systemctl restart kamerplanter.target"
     fi
+    check_cipher "$dev" "$want_cipher" "$want_bits"
     udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
     echo "$label disk $dev ($uuid) unlocked with $(key_origin "$used_key")"
 }
@@ -781,13 +988,16 @@ keep_key() {
         log_event key-stored "the key from $(key_origin "$used_key") is kept in $key_store (root, 0600)"
     fi
     [ -f "$key_store" ] || return 0
-    while IFS= read -r f; do
-        if cmp -s -- "$f" "$key_store"; then
+    local kind
+    while read -r kind f; do
+        if same_key "$kind" "$f"; then
             shred -u -- "$f" 2>/dev/null || rm -f -- "$f"
             sync "$(dirname "$f")"
             log_event key-copy-deleted "$f, a provisioned copy of the stored key"
+        elif [ "$kind" = encrypted ]; then
+            echo "$f is not deleted: it is not a regular file, cannot be decrypted here, or holds another key than the one that opens the $role disk; delete it once it is no longer needed" >&2
         else
-            echo "$f holds another key than the one that opens the $role disk; it is not used" >&2
+            echo "$f is not deleted: it is not a regular file, or holds another key than the one that opens the $role disk; delete it once it is no longer needed" >&2
         fi
     done < <(provisioned_copies)
 }
@@ -826,12 +1036,16 @@ mount_disk() {
 
 # A disk that is set up: find it by label, accept it only under its UUID.
 find_and_mount() {
-    local uuid type encryption result verdict dev other deadline skip=()
+    local uuid type encryption cipher bits result verdict dev other deadline skip=()
     load "$record"
     uuid=$(get UUID)
     type=$(get TYPE)
     encryption=$(get ENCRYPTION)
-    [[ $uuid =~ ^[0-9A-Fa-f-]{8,}$ ]] && [ -n "$type" ] && [[ ${encryption:-none} =~ ^(none|luks2)$ ]] ||
+    # A record from before the cipher was recorded: what set_up formats with.
+    cipher=$(get CIPHER) bits=$(get KEY_BITS)
+    cipher=${cipher:-$luks_cipher} bits=${bits:-$luks_key_bits}
+    [[ $uuid =~ ^[0-9A-Fa-f-]{8,}$ ]] && [ -n "$type" ] && [[ ${encryption:-none} =~ ^(none|luks2)$ ]] &&
+        [[ $cipher =~ ^[a-z0-9-]+$ && $cipher != cipher_null* && $bits =~ ^[1-9][0-9]*$ ]] ||
         die "the record $record of the $label disk is damaged" \
             "restore it from a backup, or delete it and name the disk again, then run: systemctl restart kamerplanter.target"
     # E16: with an encrypted data disk, an unencrypted backup disk is not
@@ -892,11 +1106,11 @@ find_and_mount() {
             die "$role disk $label is missing: $dev carries the label as ${fs_type:-unknown}, but was set up as $type; it is not used"
     fi
     if [ -n "$name" ] && [ "$(readlink -f -- "$name" 2>/dev/null || true)" != "$dev" ]; then
-        echo "$key names $name, but the $role disk set up is $dev ($uuid); the naming is not used while that disk is set up" >&2
+        echo "$key names $(shown "$name"), but the $role disk set up is $dev ($uuid); the naming is not used while that disk is set up" >&2
     fi
     if [ "$type" != ext4 ]; then die "the $label disk $dev is $type, which this release cannot mount"; fi
     if [ "$encryption" = luks2 ]; then
-        open_disk "$dev" "$uuid"
+        open_disk "$dev" "$uuid" "$cipher" "$bits"
         keep_key
         probe "$mapper"
         [ "$fs_type" = "$type" ] && [ "$fs_label" = "$label" ] ||
@@ -909,10 +1123,10 @@ find_and_mount() {
 
 # A named disk that is not set up yet: adopt, format, or refuse it.
 set_up() {
-    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident
     [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
     disk_path_ok "$name" ||
-        die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $name" \
+        die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $(shown "$name")" \
             "name the disk by one of those paths (ls -l /dev/disk/by-id/), then run: systemctl restart kamerplanter.target"
     # E11: the system disk holds data already, which is moved onto the disk.
     held=
@@ -957,7 +1171,10 @@ set_up() {
     kept_by=$(kept "$dev")
     out=$(signatures "$dev") || die "the signatures on $name ($dev) cannot be read; it is not formatted"
     if [ -n "$out" ]; then mapfile -t sigs < <(awk '!seen[$0]++' <<<"$out"); fi
-    if grep -Fqx -- "$name" "$records/forced" 2>/dev/null; then forced_before=1; fi
+    # A force is used once per device, whatever path names it (S7); a path
+    # recorded by an older release counts as well.
+    ident=$(identity_of "$dev")
+    if grep -Fqx -e "$ident" -e "$name" -- "$records/forced" 2>/dev/null; then forced_before=1; fi
     action=$(setup_action "$label" "$type" "$found" "$kept_by" "$force" "$forced_before" "$keyed" ${sigs[@]+"${sigs[@]}"})
     case $action in
         adopt | unlock)
@@ -986,7 +1203,7 @@ set_up() {
                 verdict=$(move_target "$entries" "$uuid" "$(cat "$records/move-targets" 2>/dev/null || true)")
                 [ "$verdict" = ok ] ||
                     die "$name ($dev) is not used as data disk: the system disk holds Kamerplanter data (${held//$'\n'/, }), and ${verdict#refuse }; moving one onto the other would lose data" \
-                        "name a blank disk to move the data onto, or remove the naming ($key or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
+                        "name a blank disk to move the data onto, or remove the naming ($key, in $naming_file or $user, or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
             fi
             ;;
         format | wipe)
@@ -998,7 +1215,7 @@ set_up() {
                 # Recorded before the wipe, so a crash cannot make the force
                 # apply a second time.
                 install -d -m 0700 "$records"
-                { cat "$records/forced" 2>/dev/null || true; echo "$name"; } | replace "$records/forced"
+                { cat "$records/forced" 2>/dev/null || true; echo "$ident"; } | replace "$records/forced"
                 # Partitions first, the device itself last.
                 local d
                 while IFS= read -r d; do
@@ -1011,6 +1228,7 @@ set_up() {
                 # disk outside it.
                 encryption=luks2
                 cryptsetup luksFormat --batch-mode --type luks2 --label "$label" \
+                    --cipher "$luks_cipher" --key-size "$luks_key_bits" \
                     --key-file "${supplied[0]}" ${luks_options[@]+"${luks_options[@]}"} "$dev" ||
                     die "encrypting $name ($dev) as $label failed"
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
@@ -1033,7 +1251,7 @@ set_up() {
             ;;
         refuse\ *)
             die "$name ($dev) is not used as $role disk: ${action#refuse }" \
-                "name a blank disk, or force the format with ${key}_FORCE=1 if its content may be destroyed, then run: systemctl restart kamerplanter.target"
+                "name a blank disk, or, if its content may be destroyed, force the format once with: /usr/libexec/kamerplanter/disks name $role $name force (or the credential $cred-force=1), then run: systemctl restart kamerplanter.target"
             ;;
         *) die "no decision for $name ($dev): $action" ;;
     esac
@@ -1048,6 +1266,10 @@ set_up() {
         echo "TYPE=ext4"
         echo "UUID=$uuid"
         echo "ENCRYPTION=$encryption"
+        if [ "$encryption" = luks2 ]; then
+            echo "CIPHER=$luks_cipher"
+            echo "KEY_BITS=$luks_key_bits"
+        fi
         echo "NAMED=$name"
         echo "SINCE=$(date -u +%FT%TZ)"
     } | replace "$record"
@@ -1458,9 +1680,9 @@ fall_back() {
 ignore_naming() {
     local why
     why=$(move_get REASON)
-    echo "$name is not used as data disk: the move onto it failed on $(move_get FAILED) (${why:-no reason recorded}); the data stays on the system disk" >&2
+    echo "$(shown "$name") is not used as data disk: the move onto it failed on $(move_get FAILED) (${why:-no reason recorded}); the data stays on the system disk" >&2
     report "data disk $name is not used: the move onto it failed (${why:-no reason recorded}); the services run from the system disk" \
-        "to move onto it again, remove the naming ($key or the credential $cred) and reboot, then name it again"
+        "to move onto it again, remove the naming ($key, in $naming_file or $user, or the credential $cred) and reboot, then name it again"
 }
 
 # lift_naming: a start without any naming after a failed move: the naming of
@@ -1544,6 +1766,7 @@ cmd_cleanup() {
     flock -w 60 9 || { echo "the disk service is busy; the copy on the system disk is deleted at a later run"; return 0; }
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
+    days=$(keep_days "$days")
     [ "$(move_get STATE)" = verified ] || return 0
     verified=$(move_get VERIFIED)
     epoch=$(date -d "$verified" +%s 2>/dev/null) || epoch=
@@ -1571,6 +1794,15 @@ cmd_cleanup() {
 # system). Prints what it emptied, or nothing was left.
 cmd_clean_underneath() {
     role_vars data
+    # Only in a mount namespace of its own: here the binds of the running
+    # system would be taken away.
+    local ns_self ns_init
+    ns_self=$(readlink /proc/self/ns/mnt 2>/dev/null || true)
+    ns_init=$(readlink /proc/1/ns/mnt 2>/dev/null || true)
+    if [ -z "$ns_self" ] || [ -z "$ns_init" ] || [ "$ns_self" = "$ns_init" ]; then
+        echo "clean-underneath runs only in a mount namespace of its own (disks cleanup)" >&2
+        exit 1
+    fi
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
     if [ "$(move_get STATE)" != verified ] || ! mountpoint -q "$mnt"; then
@@ -1590,8 +1822,9 @@ cmd_clean_underneath() {
     done
     if [ -d "$deployments" ]; then
         if mountpoint -q /sysroot && [[ ,$(findmnt -rno OPTIONS -M /sysroot | tail -n1), == *,ro,* ]]; then
-            mount -o remount,rw /sysroot 2>/dev/null || mount -o remount,bind,rw /sysroot ||
-                { echo "/sysroot could not be made writable" >&2; exit 1; }
+            # Only this mount, not the file system: outside this namespace
+            # /sysroot stays read-only.
+            mount -o remount,bind,rw /sysroot || { echo "/sysroot could not be made writable" >&2; exit 1; }
         fi
         for d in "$deployments"/*/deploy/*/etc/kamerplanter; do
             [ -d "$d" ] && [ ! -L "$d" ] || continue
@@ -1624,8 +1857,7 @@ move_status() {
         moved) echo "  moved from the system disk on $(move_get MOVED); the health check from the disk is pending, the copy on the system disk is kept" ;;
         verified)
             load "$defaults" "$user"
-            keep=$(get UPDATE_BACKUP_KEEP_DAYS)
-            [[ $keep =~ ^[1-9][0-9]*$ ]] || keep=7
+            keep=$(keep_days "$(get UPDATE_BACKUP_KEEP_DAYS)")
             verified=$(move_get VERIFIED)
             due=$(date -u -d "@$(($(date -d "$verified" +%s 2>/dev/null || echo 0) + keep * 86400))" +%FT%TZ)
             echo "  moved from the system disk on $(move_get MOVED), healthy from the disk since $verified; the copy on the system disk is deleted after $due"
@@ -1645,16 +1877,27 @@ cmd_start() {
     flock 9
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
-    naming
     first_use=0 mounted_now=0 opened_now=0 bound=() new_dirs=() created=() used_key=
     # E11: the services failed the health check after a move.
     if [ "$role" = data ] && [ "$(move_get STATE)" = falling-back ]; then fall_back; fi
+    # After a return to the system copy, whose user file names disks again.
+    naming
     # E14: a stored key goes with the encrypted disk it unlocks.
     if [ ! -e "$record" ] || ! encrypted "$record"; then forget_key; fi
     supplied_keys
     if [ -e "$record" ]; then
         if [ -n "$conflict" ]; then echo "$conflict; both are ignored while a $role disk is set up" >&2; fi
         find_and_mount
+        # The update tool writes and deletes backups at the top of the disk.
+        if [ "$role" = backup ] && mountpoint -q "$mnt"; then
+            local problem
+            problem=$(top_problem "$mnt")
+            if [ -n "$problem" ]; then
+                undo
+                die "the $label disk is not used: $problem" \
+                    "remove or replace it on the disk, then run: systemctl restart kamerplanter.target"
+            fi
+        fi
     elif [ -n "$name" ]; then
         if [ "$role" = data ] && naming_ignored "$(move_get STATE)" "$(move_get IGNORED_NAME)" "$name"; then
             ignore_naming
@@ -1766,7 +2009,50 @@ cmd_status() {
     done
 }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+# cmd_name ROLE PATH [force] | ROLE none: as root, names the disk of ROLE in
+# the naming file on the system disk (see Naming), with force to format it
+# once although it carries other signatures, or removes that naming; the
+# other role's naming in the file stays. Takes effect when the disk unit
+# starts next: at the next boot, or with systemctl restart of the unit.
+cmd_name() {
+    [ "$(id -u)" = 0 ] || { echo "disks name must be run as root" >&2; exit 1; }
+    role_vars "${1-}" || usage
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    local path=${2-} force=${3-} why k v
+    [ -n "$path" ] && { [ -z "$force" ] || [ "$force" = force ]; } && [ $# -le 3 ] || usage
+    if [ "$path" = none ]; then
+        [ -z "$force" ] || usage
+        path=
+    elif ! disk_path_ok "$path"; then
+        echo "not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $(shown "$path") (see: ls -l /dev/disk/by-id/)" >&2
+        exit 2
+    fi
+    exec 9>"$lock"
+    flock 9
+    why=$(owner_problem "$naming_file" "the naming file")
+    if [ -n "$why" ]; then echo "$why; it is not changed" >&2; exit 1; fi
+    load "$naming_file"
+    cfg[$key]=$path
+    if [ -n "$force" ]; then cfg[${key}_FORCE]=1; else cfg[${key}_FORCE]=; fi
+    install -d -m 0700 "$records"
+    {
+        echo "# The disks of this appliance, named on the system disk by"
+        echo "# /usr/libexec/kamerplanter/disks name (or by hand, as root); see its comments."
+        for k in "${naming_keys[@]}"; do
+            v=$(get "$k")
+            if [ -n "$v" ]; then echo "$k=$v"; fi
+        done
+    } | replace "$naming_file"
+    if [ -n "$path" ]; then
+        log_event named "$key=$path${force:+, forced once} in $naming_file"
+    else
+        log_event unnamed "$key removed from $naming_file"
+    fi
+    echo "takes effect at the next boot, or with: systemctl restart $unit"
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 main() {
     case ${1-} in
@@ -1776,6 +2062,7 @@ main() {
         move) shift; cmd_move "$@" ;;
         cleanup) shift; cmd_cleanup "$@" ;;
         clean-underneath) cmd_clean_underneath ;;
+        name) shift; cmd_name "$@" ;;
         *) usage ;;
     esac
 }

@@ -82,7 +82,7 @@ expect "partition table is refused, naming every signature" \
     "$(setup_action kp-data '' '' '' 0 0 0 gpt PMBR 'ntfs on /dev/sdb1')"
 expect "foreign file system, forced, is wiped" wipe "$(setup_action kp-data xfs '' '' 1 0 0 xfs)"
 expect "a force applies once to its path" \
-    "refuse it carries vfat, and the forced format of this path was used already" \
+    "refuse it carries vfat, and the forced format of this device was used already" \
     "$(setup_action kp-data vfat '' '' 1 1 0 vfat)"
 expect "the other label is never formatted, even forced" \
     "refuse it carries the label kp-backup on ext4, and is never formatted again" \
@@ -190,6 +190,24 @@ problem "FIFO in etc" "etc/pipe is a device or other special file" "$full && mkf
 problem "directory in etc" "etc/sub is a directory" "$full && mkdir etc/sub"
 problem "unprintable name is shown masked" "etc/a?b is a symbolic link" "$full && ln -s x etc/a\$'\\n'b"
 problem "files in a volume are the database's own" "" "$full && ln -s / volumes/valkey_data/_data/link && mkfifo volumes/valkey_data/_data/fifo"
+# The top of the disk, where the update tool writes and deletes as root (W1).
+D=sha256:$(printf '%064d' 1)
+victim=$(mktemp -d "$work/victim.XXXXXX")
+problem "backups and the marker at the top are used" "" "$full && mkdir -p update-backup/$D && echo 1.0 >release"
+problem "update-backup as symbolic link" "update-backup is a symbolic link" "$full && ln -s $victim update-backup"
+problem "a backup as symbolic link" "update-backup/$D is a symbolic link" "$full && mkdir update-backup && ln -s $victim update-backup/$D"
+problem "any entry as symbolic link" "update-backup/x is a symbolic link" "$full && mkdir update-backup && ln -s $victim update-backup/x"
+problem "update-backup as file" "update-backup is not a directory" "$full && touch update-backup"
+problem "a file in update-backup" "update-backup/f is not a directory" "$full && mkdir update-backup && touch update-backup/f"
+problem "release marker as symbolic link" "release is a symbolic link" "$full && ln -s $victim/m release"
+problem "release marker as directory" "release is not a regular file" "$full && mkdir release"
+b=$(mktemp -d "$work/backup.XXXXXX")
+expect "backup disk: an empty top is fine" "" "$(top_problem "$b")"
+mkdir "$b/update-backup"; ln -s "$victim" "$b/update-backup/$D"
+expect "backup disk: a backup as symbolic link is refused" "update-backup/$D is a symbolic link" "$(top_problem "$b")"
+rm -r "$b/update-backup"; ln -s "$victim" "$b/update-backup"
+expect "backup disk: update-backup as symbolic link is refused" "update-backup is a symbolic link" "$(top_problem "$b")"
+expect "the victim is untouched by the checks" "" "$(ls -A "$victim")"
 
 held() {  # held NAME EXPECTED SETUP: system_data of a fresh root after SETUP
     local d
@@ -271,6 +289,101 @@ selinuxenabled() { return 1; }
 : >"$calls"; first_use=1; new_dirs=(); relabel
 expect "SELinux disabled: nothing relabelled" "" "$(cat "$calls")"
 unset -f selinuxenabled restorecon
+
+# --- naming only from the system side (W2) ---
+nrec=$(mktemp -d "$work/naming.XXXXXX")
+cred_dir=$nrec/creds
+mkdir -p "$cred_dir"
+names() {  # names: name|force|other_name|conflict, and what naming says
+    (
+        records=$nrec naming_file=$nrec/naming.env user=$nrec/user.env CREDENTIALS_DIRECTORY=$cred_dir
+        owner_problem() { :; }
+        mountpoint() { return 1; }
+        die() { echo "DIE: $1"; exit 1; }
+        role_vars "${1:-data}"
+        naming 2>"$nrec/err"
+        printf '%s|%s|%s|%s' "$name" "$force" "$other_name" "$conflict"
+        if [ -s "$nrec/err" ]; then printf ' [%s]' "$(cat "$nrec/err")"; fi
+    )
+}
+A=/dev/disk/by-id/virtio-a B=/dev/disk/by-id/virtio-b C=/dev/disk/by-id/virtio-c
+printf 'DATA_DISK=%s\nDATA_DISK_FORCE=1\nBACKUP_DISK=%s\n' "$A" "$B" >"$nrec/user.env"
+expect "naming: no data disk: the user file lies on the system disk and names disks" "$A|1|$B|" "$(names)"
+touch "$nrec/data.env"
+expect "naming: data disk set up: the user file is ignored, and that is said" \
+    "|0|| [$nrec/user.env sets DATA_DISK DATA_DISK_FORCE, which is ignored there: that file lies on the data disk; name the data disk with: /usr/libexec/kamerplanter/disks name data PATH [force] (in $nrec/naming.env), or as the credential kamerplanter.data-disk]" \
+    "$(names)"
+expect "naming: data disk set up: BACKUP_DISK of the user file is ignored" "|0|| [$nrec/user.env sets BACKUP_DISK, which is ignored there: that file lies on the data disk; name the backup disk with: /usr/libexec/kamerplanter/disks name backup PATH [force] (in $nrec/naming.env), or as the credential kamerplanter.backup-disk]" \
+    "$(names backup)"
+printf 'DATA_DISK=\nDATA_DISK_FORCE=0\n' >"$nrec/user.env"
+expect "naming: empty settings in the user file are nothing to ignore" "|0||" "$(names)"
+printf 'DATA_DISK=%s\nBACKUP_DISK=%s\nBACKUP_DISK_FORCE=1\n' "$C" "$B" >"$nrec/naming.env"
+expect "naming: the naming file on the system disk names disks" "$C|0|$B|" "$(names)"
+expect "naming: and forces a format" "$B|1|$C|" "$(names backup)"
+printf '%s\n' "$A" >"$cred_dir/kamerplanter.data-disk"
+expect "naming: credential and naming file differ: a conflict" \
+    "$A|0|$B|the credential kamerplanter.data-disk=$A and DATA_DISK in $nrec/naming.env=$C name different disks" "$(names)"
+printf 'DATA_DISK=%s\n' "$A" >"$nrec/naming.env"
+expect "naming: credential and naming file agree" "$A|0||" "$(names)"
+rm "$nrec/data.env"; printf 'DATA_DISK=%s\n' "$B" >"$nrec/user.env"
+expect "naming: no data disk: a differing user file is a conflict as before" \
+    "$A|0||the credential kamerplanter.data-disk=$A and the setting DATA_DISK=$B name different disks" "$(names)"
+rm "$cred_dir/kamerplanter.data-disk"
+printf 'DATA_DISK=%s\n' "$(printf '/dev/disk/by-id/x\033[2J')" >"$nrec/naming.env"
+expect "naming: a conflict is shown without control characters" \
+    "DATA_DISK in $nrec/naming.env=/dev/disk/by-id/x?[2J and the setting DATA_DISK=$B name different disks" "$(names | cut -d'|' -f4)"
+rm "$nrec/naming.env" "$nrec/user.env"
+expect "naming: nothing named" "|0||" "$(names)"
+
+naming_owner=$(mktemp "$work/naming.XXXXXX")
+expect "naming file: missing is fine" "" "$(owner_problem "$work/none" "the naming file")"
+if [ "$(id -u)" = 0 ]; then
+    chmod 0600 "$naming_owner"
+    expect "naming file: root, 0600" "" "$(owner_problem "$naming_owner" "the naming file")"
+    chmod 0664 "$naming_owner"
+    expect "naming file: writable by its group" "the naming file $naming_owner has the mode 664, which lets others than root change it" "$(owner_problem "$naming_owner" "the naming file")"
+else
+    expect "naming file: not owned by root" "the naming file $naming_owner is not owned by root" "$(owner_problem "$naming_owner" "the naming file")"
+fi
+ln -s "$naming_owner" "$work/naming.link"
+expect "naming file: a link is refused" "the naming file $work/naming.link is not a regular file" "$(owner_problem "$work/naming.link" "the naming file")"
+
+# --- a force is used once per device, not per path (S7) ---
+expect "identity: the WWN" "wwn:0x5000c500a1b2c3d4" "$(device_identity 0x5000c500a1b2c3d4 S3Z1NB0K '' 8:16)"
+expect "identity: the serial without a WWN" "serial:kpdata" "$(device_identity '' kpdata '' 252:16)"
+expect "identity: a partition by its number" "serial:S3Z1NB0K:part2" "$(device_identity '' S3Z1NB0K 2 8:18)"
+expect "identity: the device number without either" "devno:7:3" "$(device_identity '' '' '' 7:3)"
+expect "identity: unprintable characters replaced" "serial:a?b" "$(device_identity '' $'a\nb' '' 8:0)"
+
+# --- no key on the kernel command line (W5) ---
+cmd=$work/cmdline
+on_cmdline() { printf '%s\n' "$1" >"$cmd"; if cmdline_key "$cmd" "$2"; then echo refused; else echo fine; fi; }
+expect "cmdline: a key credential for the data disk" refused "$(on_cmdline 'BOOT_IMAGE=/vmlinuz ro systemd.set_credential=kamerplanter.data-disk-key:secret quiet' data)"
+expect "cmdline: a binary key credential" refused "$(on_cmdline 'ro systemd.set_credential_binary=kamerplanter.backup-disk-key:c2VjcmV0' backup)"
+expect "cmdline: at the start, quoted" refused "$(on_cmdline '"systemd.set_credential=kamerplanter.data-disk-key:a b"' data)"
+expect "cmdline: for the initrd" refused "$(on_cmdline 'rd.systemd.set_credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: the other disk's key does not count" fine "$(on_cmdline 'systemd.set_credential=kamerplanter.backup-disk-key:x' data)"
+expect "cmdline: the disk naming may come this way" fine "$(on_cmdline 'systemd.set_credential=kamerplanter.data-disk:/dev/disk/by-id/x' data)"
+expect "cmdline: a similar parameter" fine "$(on_cmdline 'xsystemd.set_credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: no command line" fine "$(if cmdline_key "$work/none" data; then echo refused; else echo fine; fi)"
+
+# --- the data of an opened container must be encrypted as set up ---
+status_ok=$'/dev/mapper/kamerplanter-data is active.\n  type:    LUKS2\n  cipher:  aes-xts-plain64\n  keysize: 512 [bits]\n  key location: keyring\n  device:  /dev/vdb'
+expect "cipher: as set up" "" "$(cipher_problem "$status_ok" aes-xts-plain64 512)"
+expect "cipher: older cryptsetup says bits without brackets" "" "$(cipher_problem "${status_ok/512 \[bits\]/512 bits}" aes-xts-plain64 512)"
+expect "cipher: cipher_null is refused" "its data is not encrypted (cipher_null)" \
+    "$(cipher_problem "${status_ok/aes-xts-plain64/cipher_null-ecb}" aes-xts-plain64 512)"
+expect "cipher: another cipher" "its data is encrypted with aes-cbc-essiv:sha256 and a key of 512 bits, not with aes-xts-plain64 and 512 bits as it was set up" \
+    "$(cipher_problem "${status_ok/aes-xts-plain64/aes-cbc-essiv:sha256}" aes-xts-plain64 512)"
+expect "cipher: a shorter key" "its data is encrypted with aes-xts-plain64 and a key of 256 bits, not with aes-xts-plain64 and 512 bits as it was set up" \
+    "$(cipher_problem "${status_ok/512/256}" aes-xts-plain64 512)"
+expect "cipher: nothing known about it" "its data is encrypted with an unknown cipher and a key of unknown bits, not with aes-xts-plain64 and 512 bits as it was set up" \
+    "$(cipher_problem "/dev/mapper/kamerplanter-data is inactive." aes-xts-plain64 512)"
+expect "cipher: the set-up uses what is checked" "aes-xts-plain64 512" "$luks_cipher $luks_key_bits"
+
+# --- the system disk's copy is deleted only in a namespace of its own (S6) ---
+out=$( (cmd_clean_underneath) 2>&1 ); rc=$?
+expect "clean-underneath: refused in the system's mount namespace" "1|clean-underneath runs only in a mount namespace of its own (disks cleanup)" "$rc|$out"
 
 # The writers' check (configure, the update guard).
 placed() { if data_disk_placed; then echo placed; else echo "not placed"; fi; }

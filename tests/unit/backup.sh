@@ -184,6 +184,73 @@ expect "record: no prefix match" "" "$(record_field LOC "$work/rec")"
 expect "luks_uuid: from a dm-crypt mapping" "$id" "$(luks_uuid "CRYPT-LUKS2-${id//-/}-kamerplanter-backup")"
 expect "luks_uuid: another mapping" "" "$(luks_uuid "LVM-abc")"
 
+# --- writing and deleting backups never follows a link (W1) ---
+# A disk prepared elsewhere may carry update-backup, or an entry in it, as a
+# symbolic link to a directory of the system; root must not follow it.
+D=sha256:$(printf '%064d' 1)
+E=sha256:$(printf '%064d' 2)
+backup_disk_mount=$work/backup-mnt data_disk_mount=$work/data-mnt system_backup_base=$work/state/backup
+mkdir -p "$backup_disk_mount" "$data_disk_mount" "$work/state" "$work/victim/keep"
+printf 'precious' >"$work/victim/keep/file"
+victim_intact() { if [ -f "$work/victim/keep/file" ] && [ "$(ls -A "$work/victim")" = keep ]; then echo intact; else echo damaged; fi; }
+yes_no() { if "$@" 2>/dev/null; then echo yes; else echo no; fi; }
+expect "name: the digest of a version" yes "$(yes_no backup_name_ok "$D")"
+expect "name: anything else is no backup" no "$(yes_no backup_name_ok x)"
+expect "name: no path" no "$(yes_no backup_name_ok "../$D")"
+expect "name: upper-case digest is not one the tool writes" no "$(yes_no backup_name_ok "sha256:$(printf '%064d' 1 | tr 0 A)")"
+expect "create: a fresh backup at the backup disk" yes "$(yes_no backup_create backup-disk "$D")"
+expect "create: base and backup are directories of mode 0700" "700 700" \
+    "$(stat -c %a "$backup_disk_mount/update-backup") $(stat -c %a "$backup_disk_mount/update-backup/$D")"
+mkdir "$backup_disk_mount/update-backup/$E" "$backup_disk_mount/update-backup/notes"
+touch "$backup_disk_mount/update-backup/sha256:file"
+ln -s "$work/victim" "$backup_disk_mount/update-backup/sha256:$(printf '%064d' 3)"
+expect "entries: only directories named as backups, no links" "$D|$E" "$(backup_entries backup-disk | sort | paste -sd'|')"
+expect "delete: a backup of its own" "yes|no" "$(yes_no backup_delete backup-disk "$E")|$([ -e "$backup_disk_mount/update-backup/$E" ] && echo yes || echo no)"
+# update-backup/D -> victim: the entry as a link.
+rm -rf "${backup_disk_mount:?}/update-backup/$D"
+ln -s "$work/victim" "$backup_disk_mount/update-backup/$D"
+expect "entry link: problem named" "$backup_disk_mount/update-backup/$D is a symbolic link" "$(backup_entry_problem backup-disk "$D")"
+expect "entry link: not deleted" no "$(yes_no backup_delete backup-disk "$D")"
+expect "entry link: not written into" no "$(yes_no backup_create backup-disk "$D")"
+expect "entry link: the victim survives" intact "$(victim_intact)"
+expect "entry link: the link stays, untouched" "$work/victim" "$(readlink "$backup_disk_mount/update-backup/$D")"
+# The old cleanup's glob with a trailing slash would have reached the victim
+# through this link: rm -rf "$base"/*/ deletes the target's content.
+expect "entry link: not listed for the cleanup" "" "$(backup_entries backup-disk)"
+# update-backup -> victim: the base as a link.
+rm -rf "${backup_disk_mount:?}/update-backup"
+mkdir "$work/victim/$D"
+ln -s "$work/victim" "$backup_disk_mount/update-backup"
+expect "base link: problem named" "$backup_disk_mount/update-backup is a symbolic link" "$(backup_base_problem backup-disk)"
+expect "base link: nothing listed" "" "$(backup_entries backup-disk)"
+expect "base link: not deleted" no "$(yes_no backup_delete backup-disk "$D")"
+expect "base link: not written" no "$(yes_no backup_create backup-disk "$D")"
+rmdir "$work/victim/$D"
+expect "base link: the victim survives" intact "$(victim_intact)"
+rm "$backup_disk_mount/update-backup"
+touch "$backup_disk_mount/update-backup"
+expect "base file: problem named" "$backup_disk_mount/update-backup is not a directory" "$(backup_base_problem backup-disk)"
+rm "$backup_disk_mount/update-backup"
+rmdir "$backup_disk_mount"; ln -s "$work/victim" "$backup_disk_mount"
+expect "mount point as a link: not used" "$backup_disk_mount is not a directory" "$(backup_base_problem backup-disk)"
+expect "mount point as a link: the victim survives" intact "$(victim_intact)"
+expect "data disk: the same rules" yes "$(yes_no backup_create data-disk "$D")"
+expect "data disk: deleted again" yes "$(yes_no backup_delete data-disk "$D")"
+expect "system disk: the same rules" yes "$(yes_no backup_create system-disk "$D")"
+expect "an unknown location" "nowhere is no location of the pre-update backup" "$(backup_base_problem nowhere)"
+expect "a name that is no backup is never deleted" no "$(yes_no backup_delete system-disk ..)"
+expect "deleting a missing backup succeeds" yes "$(yes_no backup_delete data-disk "$E")"
+
+# --- the keeping period read from the data disk is bounded ---
+expect "keep: the default" 7 "$(keep_days 7)"
+expect "keep: longer is kept" 30 "$(keep_days 30)"
+expect "keep: one day is raised to the minimum" "$backup_keep_min" "$(keep_days 1)"
+expect "keep: the minimum is 3 days" 3 "$backup_keep_min"
+expect "keep: not a number is the default" 7 "$(keep_days x)"
+expect "keep: zero is the default" 7 "$(keep_days 0)"
+expect "keep: empty is the default" 7 "$(keep_days '')"
+expect "keep: too many digits is the default" 7 "$(keep_days 99999999999999999999)"
+
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
     exit 1

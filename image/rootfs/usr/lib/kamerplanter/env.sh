@@ -276,14 +276,135 @@ backup_first() {
     return 1
 }
 
+system_backup_base=/var/lib/kamerplanter/update/backup
+
 # backup_base LOCATION: the directory the backups at LOCATION are kept in.
 backup_base() {
     case $1 in
         backup-disk) printf '%s' "$backup_disk_mount/update-backup" ;;
         data-disk) printf '%s' "$data_disk_mount/update-backup" ;;
-        system-disk) printf '%s' /var/lib/kamerplanter/update/backup ;;
+        system-disk) printf '%s' "$system_backup_base" ;;
         *) return 1 ;;
     esac
+}
+
+# backup_root LOCATION: the directory the base of LOCATION lies in, and on
+# whose file system it must be: the mount point of the disk, or the update
+# state on the system disk.
+backup_root() {
+    case $1 in
+        backup-disk) printf '%s' "$backup_disk_mount" ;;
+        data-disk) printf '%s' "$data_disk_mount" ;;
+        system-disk) printf '%s' "${system_backup_base%/*}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Deleting and writing backups. A disk, a USB stick above all, may have been
+# prepared elsewhere: its update-backup, or an entry in it, may be a symbolic
+# link to anywhere on the system, which root would follow. So a backup is
+# written or deleted only as a directory of its own, named as the update tool
+# names it (backup_name_ok), directly in a base that is a directory of its
+# own, both on the file system of the location; anything else at a location
+# is left alone, and never followed.
+
+# backup_name_ok NAME: whether NAME is the name of a backup: the digest of
+# the version it was taken when leaving (sha256:<64 hex digits>).
+backup_name_ok() { [[ $1 =~ ^sha256:[0-9a-f]{64}$ ]]; }
+
+# backup_base_problem LOCATION: why no backup is written to or deleted at
+# LOCATION; empty when its base may be used. Its root must be a directory,
+# and its base, when it exists, a directory on the same file system; neither
+# may be a symbolic link. Reads only.
+backup_base_problem() {
+    local root base
+    if ! root=$(backup_root "$1") || ! base=$(backup_base "$1"); then
+        echo "$1 is no location of the pre-update backup"
+        return
+    fi
+    if [ -L "$root" ] || [ ! -d "$root" ]; then echo "$root is not a directory"; return; fi
+    if [ -L "$base" ]; then echo "$base is a symbolic link"; return; fi
+    [ -e "$base" ] || return 0
+    if [ ! -d "$base" ]; then echo "$base is not a directory"; return; fi
+    [ "$(stat -c %d -- "$base")" = "$(stat -c %d -- "$root")" ] || echo "$base is on another file system than $root"
+}
+
+# backup_entry_problem LOCATION NAME: why the backup NAME at LOCATION is not
+# written, restored or deleted; empty when it may be: NAME is the name of a
+# backup, the base may be used, and the backup, when it exists, is a
+# directory on the file system of the base, not a symbolic link. Reads only.
+backup_entry_problem() {
+    local problem dir
+    backup_name_ok "$2" || { echo "the name of the backup is not the digest of a version"; return; }
+    problem=$(backup_base_problem "$1")
+    if [ -n "$problem" ]; then echo "$problem"; return; fi
+    dir=$(backup_base "$1")/$2
+    if [ -L "$dir" ]; then echo "$dir is a symbolic link"; return; fi
+    [ -e "$dir" ] || return 0
+    if [ ! -d "$dir" ]; then echo "$dir is not a directory"; return; fi
+    [ "$(stat -c %d -- "$dir")" = "$(stat -c %d -- "$(backup_base "$1")")" ] || echo "$dir is on another file system"
+}
+
+# backup_entries LOCATION: the names of the backups at LOCATION, one per
+# line: the directories directly in its base, on its file system, named as a
+# backup. Symbolic links, files and other names are not listed; nothing is
+# when the base may not be used.
+backup_entries() {
+    local base dev d name
+    [ -z "$(backup_base_problem "$1")" ] || return 0
+    base=$(backup_base "$1")
+    [ -d "$base" ] || return 0
+    dev=$(stat -c %d -- "$base")
+    while IFS=' ' read -r -d '' d name; do
+        if [ "$d" = "$dev" ] && backup_name_ok "$name"; then printf '%s\n' "$name"; fi
+    done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%D %f\0')
+}
+
+# backup_delete LOCATION NAME: deletes the backup NAME at LOCATION, never
+# through a symbolic link and never on another file system; fails, deleting
+# nothing, when backup_entry_problem names a problem, and says it.
+backup_delete() {
+    local problem dir
+    problem=$(backup_entry_problem "$1" "$2")
+    if [ -n "$problem" ]; then
+        echo "$problem; nothing is deleted there" >&2
+        return 1
+    fi
+    dir=$(backup_base "$1")/$2
+    [ -e "$dir" ] || return 0
+    rm -rf --one-file-system -- "$dir"
+}
+
+# backup_create LOCATION NAME: an empty directory (0700) for the backup NAME
+# at LOCATION, in place of an earlier one; the base is created when missing,
+# never over a link. Fails, and says why, when backup_entry_problem names a
+# problem.
+backup_create() {
+    local problem base
+    problem=$(backup_entry_problem "$1" "$2")
+    if [ -n "$problem" ]; then
+        echo "$problem; no backup is written there" >&2
+        return 1
+    fi
+    base=$(backup_base "$1")
+    if [ ! -e "$base" ]; then mkdir -m 0700 -- "$base" || return 1; fi
+    backup_delete "$1" "$2" && mkdir -m 0700 -- "$base/$2"
+}
+
+# keep_days VALUE: the days a pre-update backup, and the system disk's copy of
+# data moved onto the data disk, are kept, from UPDATE_BACKUP_KEEP_DAYS: a
+# whole number of days, at least backup_keep_min. The user file lies on the
+# data disk when one is set up, so whoever changes the disk elsewhere can set
+# it; the minimum keeps a backup for a rollback that long all the same. 7, the
+# default, when VALUE is no whole number of at most six digits (the
+# configuration check reports it).
+backup_keep_min=3
+keep_days() {
+    if [[ $1 =~ ^[1-9][0-9]{0,5}$ ]]; then
+        if [ "$1" -lt "$backup_keep_min" ]; then printf '%s' "$backup_keep_min"; else printf '%s' "$1"; fi
+    else
+        printf 7
+    fi
 }
 
 # backup_fs LOCATION: the path whose file system receives a backup at

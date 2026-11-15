@@ -107,6 +107,10 @@ count() {
     if [[ $value =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
 }
 
+# keep_period: UPDATE_BACKUP_KEEP_DAYS, at least the minimum of keep_days in
+# /usr/lib/kamerplanter/env.sh: with a data disk the user file is on it.
+keep_period() { keep_days "$(count UPDATE_BACKUP_KEEP_DAYS 7)"; }
+
 log() {  # log EVENT RESULT DETAIL [FROM] [TO] [JSON]; JSON, an object, is added
     install -d -m 0700 "$state"
     local extra=${6-}
@@ -350,14 +354,18 @@ readable() {
 }
 
 # backup_problem D: why the recorded backup of D is not restored: it cannot
-# be read, its directory is gone, or it does not match its checksum (D10);
-# empty when it may be restored.
+# be read, it is no directory of its own (backup_entry_problem in
+# /usr/lib/kamerplanter/env.sh), its directory is gone, or it does not match
+# its checksum (D10); empty when it may be restored.
 backup_problem() {
-    local problem dir sum where
+    local problem dir sum where loc
     problem=$(readable "$1")
     if [ -n "$problem" ]; then echo "$problem"; return; fi
+    loc=$(record_field LOCATION "$backups/$1")
     dir=$(backup_dir "$1")
-    where=$(backup_where "$(record_field LOCATION "$backups/$1")")
+    where=$(backup_where "$loc")
+    problem=$(backup_entry_problem "$loc" "$1")
+    if [ -n "$problem" ]; then echo "it is not read on $where: $problem"; return; fi
     [ -d "$dir" ] || { echo "it is recorded on $where, but $dir is not there"; return; }
     if ! sum=$(backup_checksum "$dir"); then
         echo "it cannot be read completely on $where ($dir)"
@@ -370,29 +378,34 @@ backup_problem() {
 # forget_backup D: before a new backup of D, the earlier one is deleted with
 # its record. When its disk is missing, only the record goes; cleanup deletes
 # the backup left there once that disk is back and the keeping period is over.
+# A backup that is no directory of its own (a symbolic link) is not followed
+# and stays; only the record goes, and the new backup goes elsewhere.
 forget_backup() {
-    local dir
+    local loc
     [ -e "$backups/$1" ] || return 0
-    dir=$(backup_dir "$1")
-    if [ -n "$dir" ] && [ -z "$(readable "$1")" ]; then rm -rf -- "${dir:?}" || return 1; fi
+    loc=$(record_field LOCATION "$backups/$1")
+    if backup_base "$loc" >/dev/null && [ -z "$(readable "$1")" ]; then
+        backup_delete "$loc" "$1" || echo "the earlier backup of $(short "$1") on $(backup_where "$loc") is left as it is" >&2
+    fi
     rm -f -- "${backups:?}/${1:?}"
 }
 
 # write_backup LOCATION D TO: the volumes and the marker copy into the backup
 # of D at LOCATION, its checksum, then its record; fails, and leaves nothing
-# of it behind, when any of that cannot be written.
+# of it behind, when any of that cannot be written. Writes only into a
+# directory of its own (backup_create in /usr/lib/kamerplanter/env.sh).
 write_backup() {
     local base dir sum
     base=$(backup_base "$1") || return 1
     dir=$base/${2:?}
-    if install -d -m 0700 "$base" && rm -rf -- "${dir:?}" && install -d -m 0700 "$dir" &&
+    if backup_create "$1" "$2" &&
         copy_volumes "$volumes" "$dir" && backup_marker "$dir" && sum=$(backup_checksum "$dir") &&
         sync -f "$dir" &&
         write_record "$backups/$2" LOCATION="$1" UUID="$(location_uuid "$1")" SHA256="$sum" \
             TAKEN="$(date -u +%FT%TZ)" TO="$3"; then
         return 0
     fi
-    rm -rf -- "${dir:?}"
+    backup_delete "$1" "$2" || true
     rm -f -- "${backups:?}/${2:?}"
     return 1
 }
@@ -667,7 +680,7 @@ cmd_status() {
         local verified due=''
         verified=$(data_disk_move_field VERIFIED)
         if [ -n "$verified" ] && verified=$(date -d "$verified" +%s 2>/dev/null); then
-            due=$(date -u -d "@$((verified + $(count UPDATE_BACKUP_KEEP_DAYS 7) * 86400))" +%FT%TZ)
+            due=$(date -u -d "@$((verified + $(keep_period) * 86400))" +%FT%TZ)
         fi
         move=$(jq -n --arg state "$(data_disk_move_field STATE)" --arg disk "$(data_disk_move_field NAMED)" \
             --arg started "$(data_disk_move_field STARTED)" --arg moved "$(data_disk_move_field MOVED)" \
@@ -753,7 +766,7 @@ cmd_status() {
 # none.
 backup_list() {
     local list='[]' rec d keep taken epoch after problem pending_since dir
-    keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
+    keep=$(keep_period)
     for rec in "$backups"/*; do
         [ -f "$rec" ] || continue
         d=${rec##*/}
@@ -1200,8 +1213,8 @@ check_health() {
 # that did not complete) is deleted at any location that is available, once
 # its directory is older than that period.
 cleanup() {
-    local keep now protect rec d loc epoch problem dir base
-    keep=$(count UPDATE_BACKUP_KEEP_DAYS 7)
+    local keep now protect rec d loc epoch problem base
+    keep=$(keep_period)
     now=$(date +%s)
     read -r protect _ <<<"$(pending)" || true
     for rec in "$backups"/*; do
@@ -1219,8 +1232,7 @@ cleanup() {
             fi
             continue
         fi
-        dir=$(backup_dir "$d")
-        if rm -rf -- "${dir:?}" && rm -f -- "$rec"; then
+        if backup_delete "$loc" "$d" && rm -f -- "$rec"; then
             log cleanup ok "deleted the pre-update backup of $(short "$d") from $(backup_where "$loc")"
         else
             log cleanup error "the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be deleted; it is tried again at the next run"
@@ -1228,19 +1240,19 @@ cleanup() {
     done
     for loc in "${backup_locations[@]}"; do
         [ "$(location_state "$loc")" = ok ] || continue
+        # Only the directories named as backups, never through a link
+        # (backup_entries in /usr/lib/kamerplanter/env.sh).
         base=$(backup_base "$loc")
-        for dir in "$base"/*/; do
-            [ -d "$dir" ] || continue
-            d=$(basename "$dir")
+        while IFS= read -r d; do
             [ "$d" != "${protect-}" ] || continue
             [ "$(record_field LOCATION "$backups/$d")" != "$loc" ] || continue
-            [ -n "$(find "$dir" -maxdepth 0 -mtime "+$((keep - 1))")" ] || continue
-            if rm -rf -- "${dir:?}"; then
+            [ -n "$(find "$base/$d" -maxdepth 0 -mtime "+$((keep - 1))")" ] || continue
+            if backup_delete "$loc" "$d"; then
                 log cleanup ok "deleted the pre-update backup of $(short "$d") from $(backup_where "$loc")"
             else
                 log cleanup error "the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be deleted; it is tried again at the next run"
             fi
-        done
+        done < <(backup_entries "$loc")
     done
     if [ "$(data_disk_move_field STATE)" = verified ]; then
         "$disks_tool" cleanup "$keep" ||
