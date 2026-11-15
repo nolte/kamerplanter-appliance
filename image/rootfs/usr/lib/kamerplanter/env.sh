@@ -9,7 +9,8 @@
 # KEY=VALUE per line, the value taken literally. A trailing CR, leading
 # whitespace, empty lines and comments are dropped; every other line that is
 # not KEY=VALUE is listed in cfg_invalid. Later files win, missing files are
-# skipped.
+# skipped; cfg_from names the file each value came from. Every reader loads
+# the layers of config_layers below, with load_config.
 #
 # It also names the locations of the data disk (data_disk_places below),
 # which the disk service binds and every writer checks, the record of a move
@@ -17,15 +18,20 @@
 # the release marker of the data disk (release_version below), and the
 # locations of the pre-update backup with the decisions about them
 # (backup_locations below).
-declare -A cfg
+declare -A cfg cfg_from
 cfg_invalid=()
+cfg_ignored=()
 load() {
     cfg=()
+    cfg_from=()
     cfg_invalid=()
-    local file line number key
+    cfg_ignored=()
+    local file line number key layer
     for file in "$@"; do
         [ -e "$file" ] || continue
         number=0
+        layer=other
+        if provisioning_source "$file"; then layer=provisioning; fi
         while IFS= read -r line || [ -n "$line" ]; do
             number=$((number + 1))
             line=${line%$'\r'}
@@ -36,11 +42,84 @@ load() {
                 cfg_invalid+=("line $number of $file is not KEY=VALUE")
                 continue
             fi
+            if [ "$layer" = provisioning ] && provisioning_ignores "$key"; then
+                cfg_ignored+=("$key $file")
+                continue
+            fi
             cfg[$key]=${line#*=}
+            cfg_from[$key]=$file
         done <"$file"
     done
 }
 get() { printf '%s' "${cfg[$1]-}"; }
+# source_of KEY: the file the value of KEY came from; empty when no file sets it.
+source_of() { printf '%s' "${cfg_from[$1]-}"; }
+
+# The layers of the configuration (spec/distribution-requirements/ D11, L10),
+# later wins:
+#   config_defaults        the defaults, part of the image
+#   provisioning_file      the provisioning layer: the file that cloud-init's
+#   provisioning_settings  write_files may write, then the settings of the
+#                          map kamerplanter: -> settings: of the provisioning
+#                          data, so the map wins over the file (L9)
+#   config_secrets         the generated secrets (configure)
+#   config_user            the user's own values
+# The provisioning layer lies on the system disk, also with a data disk: in
+# no location of data_disk_places below, not in /etc/kamerplanter, and not in
+# /run/kamerplanter, which the configuration check empties when it fails.
+# /usr/libexec/kamerplanter/provisioning renews provisioning_settings on
+# every boot that has provisioning data and keeps it on a boot without; it
+# never writes the user file.
+config_defaults=/usr/share/kamerplanter/kamerplanter.env
+provisioning_dir=/var/lib/kamerplanter/provisioning
+provisioning_file=$provisioning_dir/provisioning.env
+provisioning_settings=$provisioning_dir/settings.env
+config_secrets=/etc/kamerplanter/secrets.env
+config_user=/etc/kamerplanter/kamerplanter.env
+provisioning_layer=("$provisioning_file" "$provisioning_settings")
+config_layers=("$config_defaults" "${provisioning_layer[@]}" "$config_secrets" "$config_user")
+
+# load_config: loads the layers of config_layers, as every reader does.
+load_config() { load "${config_layers[@]}"; }
+
+# provisioning_source FILE: whether FILE is a file of the provisioning layer.
+provisioning_source() {
+    local f
+    for f in "${provisioning_layer[@]}"; do [ "$1" != "$f" ] || return 0; done
+    return 1
+}
+
+# The keys that name a data or backup disk or force its format. The
+# provisioning layer never sets them (L11, L19): load drops them there and
+# lists them in cfg_ignored as "KEY FILE"; a disk is named only from the
+# system side (/usr/libexec/kamerplanter/disks, Naming).
+provisioning_ignored_keys=(DATA_DISK DATA_DISK_FORCE BACKUP_DISK BACKUP_DISK_FORCE)
+provisioning_ignores() {
+    local k
+    for k in "${provisioning_ignored_keys[@]}"; do [ "$1" != "$k" ] || return 0; done
+    return 1
+}
+
+# The maintenance window generator and the drop-in it wrote at boot. At boot
+# it runs before /var and any disk are mounted, so it reads neither the
+# provisioning layer nor the user file of a data disk; whoever brings one of
+# them into place reloads systemd when window_stale says so.
+window_generator=/usr/lib/systemd/system-generators/kamerplanter-update-window
+window_conf=/run/systemd/generator/kamerplanter-update-apply.timer.d/50-window.conf
+
+# window_stale: whether the maintenance window the generator writes now
+# differs from the drop-in it wrote at boot. Not stale when the generator
+# fails now: a reload would not help then either.
+window_stale() {
+    local tmp rc=1
+    tmp=$(mktemp -d)
+    if "$window_generator" "$tmp" >/dev/null 2>&1 &&
+        ! cmp -s -- "$tmp/kamerplanter-update-apply.timer.d/50-window.conf" "$window_conf"; then
+        rc=0
+    fi
+    rm -rf -- "$tmp"
+    return "$rc"
+}
 
 # disk_path_ok PATH: whether PATH names a disk the only way
 # spec/distribution-requirements/ E7 allows, /dev/disk/by-id/NAME or

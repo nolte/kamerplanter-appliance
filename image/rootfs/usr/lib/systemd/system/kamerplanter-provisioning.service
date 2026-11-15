@@ -1,0 +1,26 @@
+[Unit]
+Description=Take the Kamerplanter settings from the provisioning data
+Documentation=file:///usr/libexec/kamerplanter/provisioning
+# Renews the provisioning layer (/var/lib/kamerplanter/provisioning/) from
+# kamerplanter: -> settings: of the provisioning data on every boot, and keeps
+# it on a boot without (spec/distribution-requirements/ L10).
+# kamerplanter-config.service is ordered after this unit, so the
+# configuration check sees the layer of this boot (L17).
+#
+# cloud-init runs write_files and writes its combined cloud-config in its
+# network stage, cloud-init-network.service. After= only: when cloud-init's
+# generator keeps it disabled because there is no provisioning data, that
+# unit is not part of the boot, and nothing waits for it (L4). After the data
+# disk as well, so one reload of systemd brings both the provisioned window
+# and that of the disk's user file into effect; neither is required.
+# Not part of kamerplanter.target: restarting the target does not run it
+# again, the provisioning data is read once per boot.
+After=cloud-init-network.service kamerplanter-data-disk.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/kamerplanter/provisioning
+
+[Install]
+WantedBy=kamerplanter.target

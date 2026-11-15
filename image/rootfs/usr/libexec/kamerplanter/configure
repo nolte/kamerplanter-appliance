@@ -6,14 +6,26 @@
 #   configure pin KEY…  run by a service right before it starts, to record the
 #                       values it starts with, which must not change from then on
 #
-# Layers, later wins:
+# Layers, later wins (config_layers in /usr/lib/kamerplanter/env.sh):
 #   /usr/share/kamerplanter/kamerplanter.env  defaults, part of the image
+#   /var/lib/kamerplanter/provisioning/       the provisioning layer: the
+#       provisioning.env                      write_files target, then
+#       settings.env                          kamerplanter: -> settings: of
+#                                             the provisioning data, renewed
+#                                             at boot by
+#                                             kamerplanter-provisioning.service
 #   /etc/kamerplanter/secrets.env             generated here, once per key
 #   /etc/kamerplanter/kamerplanter.env        the user's own values
+# A provisioned value is checked like a value of the user file, and a
+# message about it names the provisioning layer. The provisioning layer never
+# names a disk: its DATA_DISK, BACKUP_DISK and *_FORCE are ignored with a
+# message. A generated secret set there is passed through, with a warning
+# that names the key, never the value, and points to kamerplanter: -> secrets:.
 #
 # With a data disk, /etc/kamerplanter and /var/lib/kamerplanter/pinned are
 # bound from it by kamerplanter-data-disk.service
 # (/usr/libexec/kamerplanter/disks): the paths stay, the files live on the disk.
+# The provisioning layer stays on the system disk.
 #
 # The merged result is written to /run/kamerplanter/, and the container units
 # read only those files, so what this script checks is exactly what the
@@ -22,9 +34,6 @@
 set -euo pipefail
 umask 077
 
-defaults=/usr/share/kamerplanter/kamerplanter.env
-secrets=/etc/kamerplanter/secrets.env
-user=/etc/kamerplanter/kamerplanter.env
 pins=/var/lib/kamerplanter/pinned
 out=/run/kamerplanter
 
@@ -58,6 +67,33 @@ replace() {
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
+secrets=$config_secrets
+user=$config_user
+
+# The secrets generated below (spec/distribution-requirements/ D9).
+secret_keys=(ARANGODB_PASSWORD JWT_SECRET_KEY FERNET_KEY ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT)
+
+# layer_name FILE: the file of the provisioning layer in a message.
+layer_name() {
+    case $1 in
+        "$provisioning_settings") printf 'the provisioning layer (kamerplanter: -> settings: of the provisioning data, in %s)' "$1" ;;
+        *) printf 'the provisioning layer (%s)' "$1" ;;
+    esac
+}
+
+# A failure about a value that the provisioning layer supplies names it, and
+# the closing advice then tells how to change a provisioned value.
+provisioned_errors=0
+fail_key() {  # fail_key KEY MESSAGE
+    local from
+    from=$(source_of "$1")
+    if [ -n "$from" ] && provisioning_source "$from"; then
+        provisioned_errors=1
+        fail "$2 (set in $(layer_name "$from"))"
+    else
+        fail "$2"
+    fi
+}
 
 # A data disk that is set up but not mounted, or whose locations are not all
 # bound from it, is never replaced by the system disk: nothing is generated or
@@ -92,10 +128,19 @@ install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$user" ] || install -m 0600 /dev/null "$user"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
 
+# The generated secrets that the provisioning layer sets, whichever layer
+# wins for them, as "KEY FILE".
+load "${provisioning_layer[@]}"
+provisioned_secrets=()
+for key in "${secret_keys[@]}"; do
+    from=$(source_of "$key")
+    if [ -n "$from" ]; then provisioned_secrets+=("$key $from"); fi
+done
+
 # A missing value is generated, except one that is already pinned: a new
 # FERNET_KEY or salt would not match the stored data, so it has to come back
 # from a backup instead.
-load "$defaults" "$secrets" "$user"
+load_config
 missing() {
     [ -z "${cfg[$1]+set}" ] || return 1
     if [ -n "${pinned[$1]+set}" ] && [ -e "$pins/$1" ]; then
@@ -115,34 +160,47 @@ missing LOG_PSEUDONYM_SALT && generated+=("LOG_PSEUDONYM_SALT=$(hex 32)")
 if [ ${#generated[@]} -gt 0 ]; then
     { awk 1 "$secrets"; printf '%s\n' "${generated[@]}"; } | replace "$secrets"
 fi
-load "$defaults" "$secrets" "$user"
-for line in "${cfg_invalid[@]}"; do fail "$line"; done
+load_config
+for line in "${cfg_invalid[@]}"; do
+    case $line in "line "*" of $provisioning_dir/"*) provisioned_errors=1 line="$line, in the provisioning layer" ;; esac
+    fail "$line"
+done
+# Never a value in these messages: they go to the journal.
+for entry in "${cfg_ignored[@]}"; do
+    key=${entry%% *}
+    case $key in BACKUP_DISK*) role=backup cred=kamerplanter.backup-disk ;; *) role=data cred=kamerplanter.data-disk ;; esac
+    [[ $key == *_FORCE ]] && cred=$cred-force
+    echo "$key in $(layer_name "${entry#* }") is ignored: provisioning data never names a disk; name the $role disk with: /usr/libexec/kamerplanter/disks name $role PATH [force], or as the system credential $cred" >&2
+done
+for entry in "${provisioned_secrets[@]}"; do
+    echo "warning: the secret ${entry%% *} is set in $(layer_name "${entry#* }"); it is passed through like any setting, but it stays there in plain text and is read again on every boot: supply it under kamerplanter: -> secrets: instead" >&2
+done
 
 # The ArangoDB image creates only its root user, with ARANGO_ROOT_PASSWORD.
 # The application logs in as that user, so one password serves both.
 if [ "$(get ARANGODB_USERNAME)" != root ]; then
-    fail "ARANGODB_USERNAME must be root: the appliance creates no other database user"
+    fail_key ARANGODB_USERNAME "ARANGODB_USERNAME must be root: the appliance creates no other database user"
 fi
 cfg[ARANGO_ROOT_PASSWORD]=$(get ARANGODB_PASSWORD)
 
 [ "$(get JWT_SECRET_KEY)" != change-me-in-production-use-openssl-rand-hex-32 ] && [ -n "$(get JWT_SECRET_KEY)" ] ||
-    fail "JWT_SECRET_KEY is empty or the upstream placeholder"
+    fail_key JWT_SECRET_KEY "JWT_SECRET_KEY is empty or the upstream placeholder"
 [[ $(get FERNET_KEY) =~ ^[A-Za-z0-9_-]{43}=$ ]] ||
-    fail "FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters)"
+    fail_key FERNET_KEY "FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters)"
 for key in ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT; do
     value=$(get "$key")
-    [ "${#value}" -ge 32 ] || fail "$key is shorter than 32 characters"
+    [ "${#value}" -ge 32 ] || fail_key "$key" "$key is shorter than 32 characters"
 done
 value=$(get TENANT_EXPORT_SIGNING_SECRET)
 if [ -n "$value" ] && [ "${#value}" -lt 32 ]; then
-    fail "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
+    fail_key TENANT_EXPORT_SIGNING_SECRET "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
 fi
 [[ $(get UPDATE_WINDOW) =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
-    fail "UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)"
+    fail_key UPDATE_WINDOW "UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)"
 [[ $(get UPDATE_HEALTH_TIMEOUT) =~ ^[1-9][0-9]*$ ]] ||
-    fail "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes"
+    fail_key UPDATE_HEALTH_TIMEOUT "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes"
 [[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]*$ ]] ||
-    fail "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
+    fail_key UPDATE_BACKUP_KEEP_DAYS "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
 # Checked for their form only; kamerplanter-data-disk.service and
 # kamerplanter-backup-disk.service decide whether a named disk is used. Not
 # checked when the user file lies on the data disk: the disk service ignores
@@ -155,19 +213,23 @@ if user_file_trusted; then
         [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
     done
 fi
-case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
+case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail_key ARANGODB_PASSWORD "ARANGODB_PASSWORD is empty or a known default" ;; esac
 
 for key in "${!pinned[@]}"; do
     [ -e "$pins/$key" ] || continue
     [ -n "${cfg[$key]+set}" ] || continue
     [ "$(cat "$pins/$key")" = "$(digest "$key")" ] ||
-        fail "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
+        fail_key "$key" "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
 done
 
 if [ ${#errors[@]} -gt 0 ]; then
     printf 'Kamerplanter configuration is invalid; the services stay stopped:\n' >&2
     printf '  - %s\n' "${errors[@]}" >&2
-    printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
+    if [ "$provisioned_errors" = 1 ]; then
+        printf 'Fix a provisioned value in the provisioning data (kamerplanter: -> settings: is read again at the next boot; %s is written once per instance and may be edited in place), or set it in %s, which wins over it, and run: systemctl restart kamerplanter.target\n' "$provisioning_file" "$user" >&2
+    else
+        printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
+    fi
     rm -f "$out"/*.env
     exit 1
 fi

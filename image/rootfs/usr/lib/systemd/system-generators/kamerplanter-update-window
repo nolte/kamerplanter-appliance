@@ -1,18 +1,22 @@
 #!/usr/bin/bash
 # Sets the start of the maintenance window from UPDATE_WINDOW (HH:MM, local
-# time) in the defaults and the user's file, later wins. Runs at boot and on
-# `systemctl daemon-reload`. A missing file or an invalid value falls back to
-# the default, so the timer always has a window; the configuration check
-# (kamerplanter-config.service) reports an invalid value. At boot it runs
-# before any disk is mounted: with a data disk it reads the user file of the
-# system disk, and kamerplanter-data-disk.service reloads systemd once the
-# disk's user file is in place and sets another window.
+# time) in the layers of the configuration, read as every reader reads them
+# (load_config in /usr/lib/kamerplanter/env.sh): the defaults, the
+# provisioning layer, the secrets and the user's file, later wins. Runs at
+# boot and on `systemctl daemon-reload`. A missing file or an invalid value
+# falls back to the default, so the timer always has a window; the
+# configuration check (kamerplanter-config.service) reports an invalid value.
+# At boot it runs before /var and any disk are mounted: it reads neither the
+# provisioning layer nor, with a data disk, the disk's user file, only the
+# user file of the system disk. kamerplanter-provisioning.service and
+# kamerplanter-data-disk.service reload systemd once those are in place and
+# set another window, so a provisioned window holds from the first boot.
 set -euo pipefail
 dir=${1:?usage: kamerplanter-update-window <normal-dir> [...]}
 default=03:00
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
-load /usr/share/kamerplanter/kamerplanter.env /etc/kamerplanter/kamerplanter.env
+load_config
 value=$(get UPDATE_WINDOW)
 [[ $value =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || value=$default
 mkdir -p "$dir/kamerplanter-update-apply.timer.d"

@@ -8,6 +8,10 @@ PartOf=kamerplanter.target
 # older release generates no secret and writes no pin onto that disk.
 Requires=kamerplanter-data-disk.service kamerplanter-update-guard.service
 After=kamerplanter-data-disk.service kamerplanter-update-guard.service
+# The provisioning layer of this boot is in place before the check
+# (spec/distribution-requirements/ L17). After= only: without provisioning
+# data that unit keeps the layer as it is and finishes at once.
+After=kamerplanter-provisioning.service
 
 [Service]
 Type=oneshot

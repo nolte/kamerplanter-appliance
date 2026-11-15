@@ -58,10 +58,11 @@ RUN install -d -m 0755 /usr/share/kamerplanter/keys \
     && chmod 0644 /usr/share/kamerplanter/keys/system-image.pub
 
 RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/libexec/kamerplanter/disks \
-        /usr/bin/kamerplanter-update \
+        /usr/libexec/kamerplanter/provisioning /usr/bin/kamerplanter-update \
         /usr/lib/systemd/system-generators/kamerplanter-update-window \
     && chmod 0700 /etc/kamerplanter && chmod 0600 /etc/kamerplanter/kamerplanter.env \
     && systemctl enable kamerplanter.target kamerplanter-config.service \
+        kamerplanter-provisioning.service \
         kamerplanter-data-disk.service kamerplanter-backup-disk.service \
         kamerplanter-update-guard.service kamerplanter-update-health.service \
         kamerplanter-update-fetch.timer kamerplanter-update-apply.timer \

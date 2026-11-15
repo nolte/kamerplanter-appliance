@@ -159,12 +159,10 @@ set -euo pipefail
 umask 077
 
 records=/var/lib/kamerplanter/disks
-defaults=/usr/share/kamerplanter/kamerplanter.env
 user=/etc/kamerplanter/kamerplanter.env
 lock=/run/kamerplanter-disks.lock
-# The maintenance window generator and the drop-in it wrote at boot.
-window_generator=/usr/lib/systemd/system-generators/kamerplanter-update-window
-window_conf=/run/systemd/generator/kamerplanter-update-apply.timer.d/50-window.conf
+# The maintenance window generator and the drop-in it wrote at boot are
+# window_generator and window_conf in /usr/lib/kamerplanter/env.sh.
 # Seconds a set-up disk, or a named one, gets to appear: USB disks take a moment.
 wait_seconds=30
 # Keys (E14): stored keys and provisioned key files, and the credential
@@ -490,21 +488,10 @@ system_data() {
     done
 }
 
-# window_stale: whether the maintenance window the generator writes now
-# differs from the drop-in it wrote at boot. At boot it ran before the data
-# disk was mounted and read the user file underneath /etc/kamerplanter, not
-# the one on the disk. Not stale when the generator fails now: a reload would
-# not help then either.
-window_stale() {
-    local tmp rc=1
-    tmp=$(mktemp -d)
-    if "$window_generator" "$tmp" >/dev/null 2>&1 &&
-        ! cmp -s -- "$tmp/kamerplanter-update-apply.timer.d/50-window.conf" "$window_conf"; then
-        rc=0
-    fi
-    rm -rf -- "$tmp"
-    return "$rc"
-}
+# window_stale (in /usr/lib/kamerplanter/env.sh): whether the maintenance
+# window the generator writes now differs from the drop-in it wrote at boot.
+# At boot it ran before the data disk was mounted and read the user file
+# underneath /etc/kamerplanter, not the one on the disk.
 
 # move_transition STATE EVENT: the state of the move record (move.env) after
 # EVENT, from STATE ("none" without a record); prints nothing when EVENT
@@ -1924,7 +1911,7 @@ move_status() {
         copying) echo "  move from the system disk: copying since $(move_get STARTED); until it is complete the system disk is in use" ;;
         moved) echo "  moved from the system disk on $(move_get MOVED); the health check from the disk is pending, the copy on the system disk is kept" ;;
         verified)
-            load "$defaults" "$user"
+            load_config
             keep=$(keep_days "$(get UPDATE_BACKUP_KEEP_DAYS)")
             verified=$(move_get VERIFIED)
             due=$(date -u -d "@$(($(date -d "$verified" +%s 2>/dev/null || echo 0) + keep * 86400))" +%FT%TZ)

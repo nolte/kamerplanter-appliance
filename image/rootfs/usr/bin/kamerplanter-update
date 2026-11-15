@@ -72,8 +72,6 @@ state=/var/lib/kamerplanter/update
 volumes=/var/lib/containers/storage/volumes
 # Named volumes of the Quadlet units (image/rootfs/usr/share/containers/systemd/*.volume).
 data_volumes=(arangodb_data valkey_data)
-defaults=/usr/share/kamerplanter/kamerplanter.env
-user=/etc/kamerplanter/kamerplanter.env
 issue=/run/issue.d/50-kamerplanter.issue
 # The disk service, which keeps the record of a move onto the data disk.
 disks_tool=/usr/libexec/kamerplanter/disks
@@ -110,12 +108,13 @@ update_lock() {
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
-# count KEY DEFAULT: KEY as a whole number of at least 1 from the defaults and
-# the user file, read like the configuration check reads them; DEFAULT when
-# it is anything else, which the configuration check reports.
+# count KEY DEFAULT: KEY as a whole number of at least 1 from the layers of
+# the configuration (load_config), read like the configuration check reads
+# them; DEFAULT when it is anything else, which the configuration check
+# reports.
 count() {
     local value
-    load "$defaults" "$user"
+    load_config
     value=$(get "$1")
     if [[ $value =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
 }
