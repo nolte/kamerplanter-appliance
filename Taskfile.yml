@@ -110,6 +110,12 @@ tasks:
     cmds:
       - build/in-tools.sh tests/boot/update.sh {{.CLI_ARGS}}
 
+  test:data-disk:
+    desc: Boot tests with a data disk, after image:build and disk:build (steps as CLI_ARGS)
+    deps: [tools:build]
+    cmds:
+      - build/in-tools.sh tests/boot/data-disk.sh {{.CLI_ARGS}}
+
   clean:
     desc: Remove build output and the tool container's volumes
     cmds:
