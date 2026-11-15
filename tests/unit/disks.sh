@@ -365,6 +365,17 @@ expect "cmdline: for the initrd" refused "$(on_cmdline 'rd.systemd.set_credentia
 expect "cmdline: the other disk's key does not count" fine "$(on_cmdline 'systemd.set_credential=kamerplanter.backup-disk-key:x' data)"
 expect "cmdline: the disk naming may come this way" fine "$(on_cmdline 'systemd.set_credential=kamerplanter.data-disk:/dev/disk/by-id/x' data)"
 expect "cmdline: a similar parameter" fine "$(on_cmdline 'xsystemd.set_credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: dashes for underscores in the parameter" refused "$(on_cmdline 'ro systemd.set-credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: binary with a dash" refused "$(on_cmdline 'systemd.set-credential-binary=kamerplanter.data-disk-key:eA==' data)"
+expect "cmdline: binary mixed" refused "$(on_cmdline 'systemd.set_credential-binary=kamerplanter.data-disk-key:eA==' data)"
+expect "cmdline: initrd with dashes" refused "$(on_cmdline 'rd.systemd.set-credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: quoted value" refused "$(on_cmdline 'systemd.set_credential="kamerplanter.data-disk-key:a b" quiet' data)"
+expect "cmdline: quotes inside the credential name" refused "$(on_cmdline 'systemd.set_credential=kamerplanter."data"-disk-key:x' data)"
+expect "cmdline: quotes inside the parameter name" refused "$(on_cmdline 'sys"temd".set_credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: tab before it" refused "$(on_cmdline $'ro\tsystemd.set_credential=kamerplanter.data-disk-key:x' data)"
+expect "cmdline: dash and underscore are not the same in the credential name" fine "$(on_cmdline 'systemd.set_credential=kamerplanter.data_disk_key:x' data)"
+expect "cmdline: an unrelated credential" fine "$(on_cmdline 'systemd.set-credential=io.systemd.firstboot.locale:de_DE systemd.set_credential=kamerplanter.data-disk-keyring:x' data)"
+expect "cmdline: the name inside a quoted value of another parameter" fine "$(on_cmdline 'foo="systemd.set_credential=kamerplanter.data-disk-key:x"' data)"
 expect "cmdline: no command line" fine "$(if cmdline_key "$work/none" data; then echo refused; else echo fine; fi)"
 
 # --- the data of an opened container must be encrypted as set up ---
