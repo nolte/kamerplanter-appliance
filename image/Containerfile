@@ -25,6 +25,20 @@ LABEL org.opencontainers.image.title="Kamerplanter appliance" \
       org.opencontainers.image.vendor="Kamerplanter" \
       org.opencontainers.image.licenses="MIT"
 
+# cloud-init reads the provisioning data: hostname, network, SSH keys and the
+# Kamerplanter settings (spec/distribution-requirements/ §L).
+# /etc/cloud/cloud.cfg.d/50-kamerplanter.cfg sets its sources and policy;
+# without a source its generator keeps it disabled.
+# The install leaves state in /run, /var/cache, /var/lib and /var/log that the
+# base image does not carry and bootc container lint warns about; it is
+# removed. /var/lib/cloud is created at boot by usr/lib/tmpfiles.d/
+# kamerplanter-cloud-init.conf, /run/cloud-init by cloud-init's own entry and
+# /var/lib/dhcpcd by dhcpcd's.
+RUN dnf -y install cloud-init \
+    && dnf clean all \
+    && rm -rf /run/cloud-init /run/dnf /var/cache /var/lib/cloud \
+        /var/lib/dhcpcd /var/lib/dnf /var/log
+
 COPY rootfs/ /
 
 # The public half of the shared key that signs released system images.
