@@ -42,18 +42,22 @@ Eine Platte wird nur verwendet, wenn du sie ausdrücklich benennst, über einen 
 ls -l /dev/disk/by-id/
 ```
 
-Benenne sie auf einem von zwei Wegen:
+Benenne sie auf einem dieser Wege:
 
-- **In deiner Datei** `/etc/kamerplanter/kamerplanter.env`, auf einer Appliance, die bereits läuft:
+- **Auf der Systemplatte**, auf einer Appliance, die bereits läuft, als root:
 
-    ```ini
-    DATA_DISK=/dev/disk/by-id/usb-Example_Disk_0123456789-0:0
-    BACKUP_DISK=/dev/disk/by-id/ata-Example_SSD_ABC123
+    ```bash
+    /usr/libexec/kamerplanter/disks name data /dev/disk/by-id/usb-Example_Disk_0123456789-0:0
+    /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
     ```
+
+    Das schreibt `/var/lib/kamerplanter/disks/naming.env` (root, 0600), die du auch von Hand als `DATA_DISK=…` und `BACKUP_DISK=…` bearbeiten kannst. `disks name backup none` entfernt eine Benennung.
+
+- **In deiner Datei** `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…` oder `BACKUP_DISK=…`, aber nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger, und wer die Platte in den Händen hatte, kann sie geändert haben. Deshalb ignoriert die Appliance dann `DATA_DISK`, `BACKUP_DISK` und ihre `…_FORCE` in dieser Datei und sagt das in `systemctl status kamerplanter-data-disk`; benenne den Sicherungs-Datenträger dann mit `disks name`.
 
 - **Als System-Credential** `kamerplanter.data-disk` oder `kamerplanter.backup-disk` vom Provisioner, vor dem ersten Start. Siehe [Provisionierung](#provisioning).
 
-Benennen beide den Datenträger unterschiedlich, verwendet die Appliance keinen von beiden. Eine Platte kann nicht zugleich als Datenträger und als Sicherungs-Datenträger benannt werden.
+Benennen zwei dieser Wege den Datenträger unterschiedlich, verwendet die Appliance keinen davon. Eine Platte kann nicht zugleich als Datenträger und als Sicherungs-Datenträger benannt werden.
 
 Was mit der benannten Platte geschieht:
 
@@ -61,7 +65,7 @@ Was mit der benannten Platte geschieht:
 |---|---|
 | ist leer | Wird als ext4 mit dem Label `kp-data` oder `kp-backup` formatiert |
 | trägt bereits ein ext4-Dateisystem mit diesem Label | Wird verwendet, wie sie ist |
-| trägt ein anderes Dateisystem oder eine Partitionstabelle | Wird abgelehnt; die Meldung nennt, was gefunden wurde. `DATA_DISK_FORCE=1` oder `BACKUP_DISK_FORCE=1` (Credential `kamerplanter.data-disk-force`, `kamerplanter.backup-disk-force`) formatiert sie trotzdem, einmal für diesen Pfad |
+| trägt ein anderes Dateisystem oder eine Partitionstabelle | Wird abgelehnt; die Meldung nennt, was gefunden wurde. `disks name data PFAD force` (in der Benennungsdatei `DATA_DISK_FORCE=1` oder `BACKUP_DISK_FORCE=1`; Credential `kamerplanter.data-disk-force`, `kamerplanter.backup-disk-force`) formatiert sie trotzdem, einmal je Gerät: Ein anderer Pfad zur selben Platte formatiert sie nicht erneut. Das Gerät wird über seine WWN oder Seriennummer vermerkt; eine Platte, die keins von beidem meldet, über ihre Gerätenummer, die sich nach einem Neustart ändern kann |
 | trägt das laufende System, ist eingehängt oder in Gebrauch, oder ist keine lokale Platte | Wird immer abgelehnt, auch erzwungen |
 
 Eine Platte, die spät erscheint, etwa eine USB-Platte, bekommt 30 Sekunden. Einmal eingerichtet, wird die Platte samt ihrer UUID in `/var/lib/kamerplanter/disks/` auf der Systemplatte vermerkt. Bei jedem Start wird sie über ihr Label gefunden und nur unter dieser UUID angenommen. Ein zweites Gerät mit demselben Label, zum Beispiel ein geklonter Stick, hält die Dienste angehalten, bis du es entfernst.
@@ -96,7 +100,7 @@ lsblk -o NAME,SIZE,FSTYPE,LABEL
 Eine Appliance, die bereits Daten auf ihrer Systemplatte hält, zieht sie einmalig auf einen neu benannten Datenträger um:
 
 1. Schließe eine leere Platte an. Eine Platte, die nichts als `lost+found` hält, oder die Platte eines früheren Umzugs dieser Appliance geht ebenso; eine Platte mit eigenen Daten wird abgelehnt, da eins von beidem verloren ginge.
-2. Benenne sie in `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…`.
+2. Benenne sie mit `/usr/libexec/kamerplanter/disks name data /dev/disk/by-id/…` oder in `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…`.
 3. Führe aus:
 
     ```bash
@@ -107,7 +111,7 @@ Eine Appliance, die bereits Daten auf ihrer Systemplatte hält, zieht sie einmal
 
 Die Appliance kopiert `/etc/kamerplanter`, die Aufzeichnungen und beide Volumes auf den Datenträger, vergleicht die Kopie und schreibt sie fest, bevor sie den Datenträger verwendet. Der Datenträger braucht Platz für die Daten plus 10 % und 32 MiB; mit weniger wird der Umzug abgebrochen, und die Dienste starten von der Systemplatte. Nach einem Stromausfall während des Kopierens läuft die Appliance weiter von der Systemplatte und kopiert erneut.
 
-Danach müssen die Dienste dieselbe Gesundheitsprüfung bestehen wie nach einem Update. Die Kopie auf der Systemplatte bleibt, bis sie bestanden ist, und danach noch `UPDATE_BACKUP_KEEP_DAYS` Tage; dann wird sie gelöscht. Fallen die Dienste durch die Prüfung, kehrt die Appliance zur Kopie auf der Systemplatte zurück und verwendet den Datenträger nicht mehr.
+Danach müssen die Dienste dieselbe Gesundheitsprüfung bestehen wie nach einem Update. Die Kopie auf der Systemplatte bleibt, bis sie bestanden ist, und danach noch `UPDATE_BACKUP_KEEP_DAYS` Tage (mindestens 3); dann wird sie gelöscht. Fallen die Dienste durch die Prüfung, kehrt die Appliance zur Kopie auf der Systemplatte zurück und verwendet den Datenträger nicht mehr.
 
 Die Aufzeichnung des Umzugs hat diese Zustände, angezeigt von `/usr/libexec/kamerplanter/disks status` und `kamerplanter-update status`:
 
@@ -168,9 +172,13 @@ Der Schlüssel kommt von dir oder deinem Provisioner; die Appliance erzeugt nie 
 - System-Credential `kamerplanter.data-disk-key` oder `kamerplanter.backup-disk-key`, oder
 - Datei dieses Namens in `/var/lib/kamerplanter/disks/keys/`, im Besitz von root mit Modus 0600.
 
+Übergib einen Schlüssel nie auf der Kernel-Kommandozeile (`systemd.set_credential=kamerplanter.data-disk-key:…`): Jeder Benutzer der Appliance kann die Kommandozeile lesen, und das Journal hält sie bei jedem Start fest. Die Appliance lehnt einen solchen Schlüssel ab, speichert ihn nicht und hält die Dienste angehalten, bis er von der Kommandozeile entfernt ist. Betrachte einen Schlüssel, der so übergeben wurde, als anderen bekannt.
+
 Ein Schlüssel hat 32 bis 8192 Bytes und wird Byte für Byte übernommen, einschließlich eines abschließenden Zeilenumbruchs.
 
-Ist die Platte eingerichtet, behält die Appliance den Schlüssel auf der Systemplatte in `/var/lib/kamerplanter/disks/keys/` (root, 0600, Verzeichnis 0700) und öffnet die Platte damit bei jedem Start. Die Kopien, die sie bekommen hat, löscht sie: die Schlüsseldatei und das Credential in `/etc/credstore/` oder `/run/credstore/`. Ein Credential aus der Firmware oder von der Kernel-Kommandozeile liegt nur im Arbeitsspeicher. Der Schlüssel erscheint nie in einer Meldung, im Journal oder im Update-Protokoll. Ist die Platte nicht mehr eingerichtet, wird der gespeicherte Schlüssel gelöscht.
+Ist die Platte eingerichtet, behält die Appliance den Schlüssel auf der Systemplatte in `/var/lib/kamerplanter/disks/keys/` (root, 0600, Verzeichnis 0700) und öffnet die Platte damit bei jedem Start. Die Kopien dieses Schlüssels, die sie bekommen hat, löscht sie: die Schlüsseldatei, das unverschlüsselte Credential in `/etc/credstore/` oder `/run/credstore/` und das verschlüsselte Credential in `/etc/credstore.encrypted/` oder `/run/credstore.encrypted/`, das sie zum Vergleich entschlüsselt. Eine Kopie, die einen anderen Schlüssel hält oder sich nicht entschlüsseln lässt, bleibt liegen, und das Journal sagt das; lösche sie selbst. Ein Credential aus der Firmware, etwa eine SMBIOS-Zeichenkette, kann sie nicht löschen; siehe [Verbleibende Risiken](#residual-risks). Der Schlüssel erscheint nie in einer Meldung, im Journal oder im Update-Protokoll. Ist die Platte nicht mehr eingerichtet, wird der gespeicherte Schlüssel gelöscht.
+
+Die Appliance verschlüsselt mit `aes-xts-plain64` und einem 512-Bit-Schlüssel und vermerkt beides. Bei jedem Öffnen prüft sie, dass der Container noch so verschlüsselt; ein Container, der das nicht tut, etwa einer, der mit `cipher_null` vorbereitet wurde und die Daten unverschlüsselt ablegt, hält die Dienste angehalten wie eine fremde Platte.
 
 Bewahre eine Kopie des Schlüssels außerhalb der Appliance auf: Ein neues System braucht ihn, um die Platte zu öffnen.
 
@@ -211,11 +219,25 @@ Unter QEMU erscheint ein Datenträger mit der Seriennummer `kpdata` als `/dev/di
 -smbios type=11,value=io.systemd.credential:kamerplanter.data-disk=/dev/disk/by-id/virtio-kpdata
 ```
 
-Ein binärer Schlüssel geht base64-kodiert als `io.systemd.credential.binary:kamerplanter.data-disk-key=…` mit.
+Ein binärer Schlüssel geht base64-kodiert als `io.systemd.credential.binary:kamerplanter.data-disk-key=…` mit. Übergib einen Schlüssel nur so, als verschlüsseltes Credential oder als Datei; nie auf der Kernel-Kommandozeile.
 
-## Eine Platte außer Dienst stellen
+## Eine Platte außer Dienst stellen { #retiring-a-disk }
 
 Gelöschte Dateien können auf dem Medium lesbar bleiben, auch die Kopie auf der Systemplatte nach einem Umzug. Lösche eine Platte sicher oder zerstöre sie, bevor sie aus der Hand gegeben wird.
 
-- **Sicherungs-Datenträger:** Entferne die Benennung, lösche `/var/lib/kamerplanter/disks/backup.env` und starte neu. Der gespeicherte Schlüssel der Platte wird dann gelöscht. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
+- **Sicherungs-Datenträger:** Entferne die Benennung (`/usr/libexec/kamerplanter/disks name backup none` oder das Credential), lösche `/var/lib/kamerplanter/disks/backup.env` und starte neu. Der gespeicherte Schlüssel der Platte wird dann gelöscht. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
 - **Datenträger:** Dieses Release kann die Daten weder auf die Systemplatte zurück noch auf einen anderen Datenträger umziehen; solange ein Datenträger eingerichtet ist, wird eine andere Benennung übergangen. Lösche `/var/lib/kamerplanter/disks/data.env` nicht, solange deine Daten auf der Platte liegen: Ohne diese Datei verwendet die Appliance die Platte nicht mehr.
+
+## Verbleibende Risiken { #residual-risks }
+
+Die Appliance schließt, was sie kann, aber einige Risiken bleiben mit dem Entwurf oder mit der Hardware. Kenne sie, bevor du eine Platte und einen Schlüssel wählst.
+
+**Eine unverschlüsselte Platte lässt sich gegen eine gefälschte tauschen.** Ein unverschlüsselter Datenträger oder Sicherungs-Datenträger wird nur an seinem Label und an der UUID seines Dateisystems erkannt. Beides sind einfache Werte, die jeder auf einen anderen Stick übertragen kann. Wer die Platte tauschen kann, während die Appliance aus ist, kann sie dazu bringen, seine eigene anzunehmen: Ein gefälschter Datenträger bringt dessen Secrets und Datenbank mit, und ein gefälschter Sicherungs-Datenträger erhält mit dem nächsten Update eine vollständige Kopie deiner Datenbank. Beim Prüfen und Einhängen einer solchen Platte liest der Kernel außerdem als root ein Dateisystem, das jemand anderes vorbereitet hat. Nur Verschlüsselung bindet eine Platte an dich, denn ein LUKS2-Container öffnet sich nur mit deinem Schlüssel. **Was zu tun ist:** [Verschlüssele](#encryption) jede Platte, die sich abziehen lässt oder das Gelände verlassen kann, und stelle die Maschine so auf, dass andere nicht an ihre Anschlüsse kommen.
+
+**Ein Schlüssel aus der Firmware bleibt lesbar.** Ein Schlüssel, der als SMBIOS-Typ-11-Credential übergeben wird, bleibt für root lesbar, solange die Appliance läuft, in den Firmware-Tabellen unter `/sys/firmware/dmi/` und in den System-Credentials unter `/run/credentials/`. Er liegt außerdem im Klartext in der VM-Konfiguration des Hypervisors und in den Dateien des Provisioners, etwa einer Terraform-Konfiguration und ihrem State. Keine dieser Kopien kann die Appliance löschen. **Was zu tun ist:** Beschränke, wer die VM-Konfiguration und den State des Provisioners lesen kann, und entferne das Credential aus der VM, sobald die Platte eingerichtet ist; die Appliance behält ihre eigene Kopie auf der Systemplatte.
+
+**Gelöschte Schlüssel und Kopien können auf Flash-Speicher bleiben.** Die Appliance überschreibt den gespeicherten Schlüssel, die mitgegebenen Kopien davon sowie die Secrets und Aufzeichnungen der Kopie umgezogener Daten auf der Systemplatte, bevor sie sie löscht; den Rest dieser Kopie, die Datenbanken, löscht sie nur. Auf einer SSD, einem USB-Stick oder einem Copy-on-Write-Dateisystem können die alten Blöcke trotzdem lesbar bleiben, weil das Medium an anderer Stelle schreibt und die alten Blöcke erst später freigibt. **Was zu tun ist:** Folge [Eine Platte außer Dienst stellen](#retiring-a-disk); lösche ein Medium sicher oder zerstöre es, bevor es aus der Hand gegeben wird, die Systemplatte eingeschlossen.
+
+**Eine alte Kopie der verschlüsselten Platte wird angenommen.** LUKS2, wie die Appliance es einrichtet, verschlüsselt, erkennt aber nicht, wenn der Inhalt als Ganzes ersetzt wird. Wer mit Zugang zur Hardware die verschlüsselte Platte früher kopiert hat, kann diese Kopie zurückschreiben. Sie öffnet sich mit dem gespeicherten Schlüssel, unter derselben UUID, und die Appliance verwendet die ältere Datenbank, die älteren Secrets und die ältere Release-Markierung darauf. **Was zu tun ist:** Halte die Maschine und ihre Platten unter Verschluss, und prüfe die Daten, nachdem die Appliance aus deinen Händen war.
+
+**Der Schlüssel liegt auf der Systemplatte.** Die Appliance hält den Schlüssel einer verschlüsselten Platte im Klartext auf der Systemplatte und bindet ihn nicht an das TPM; wer die ganze Maschine hat, oder die Systemplatte und den Datenträger, kann den Datenträger öffnen. Siehe [Wovor Verschlüsselung schützt](#encryption). **Was zu tun ist:** Betrachte die Systemplatte als Trägerin des Schlüssels; bewahre deine eigene Kopie des Schlüssels außerhalb der Appliance auf, und schütze die Maschine als Ganzes.

@@ -48,9 +48,17 @@ Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerp
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
 | `DATA_DISK` | leer | Der Datenträger, als Pfad unter `/dev/disk/by-id/` oder `/dev/disk/by-uuid/`; leer: keiner |
-| `DATA_DISK_FORCE` | `0` | `1` formatiert einen benannten Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmalig |
+| `DATA_DISK_FORCE` | `0` | `1` formatiert einen benannten Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmal je Gerät |
 | `BACKUP_DISK` | leer | Der Sicherungs-Datenträger, ebenso benannt |
-| `BACKUP_DISK_FORCE` | `0` | `1` formatiert einen benannten Sicherungs-Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmalig |
+| `BACKUP_DISK_FORCE` | `0` | `1` formatiert einen benannten Sicherungs-Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmal je Gerät |
+
+Diese vier Einstellungen gelten in dieser Datei nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger; die Appliance ignoriert sie dann hier und sagt das in `systemctl status kamerplanter-data-disk`. Setze sie stattdessen als root auf der Systemplatte:
+
+```bash
+/usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
+```
+
+Das Kommando schreibt `/var/lib/kamerplanter/disks/naming.env`; hänge `force` an den Pfad an, um die Platte einmalig zu formatieren, obwohl sie andere Signaturen trägt, oder gib `none` statt eines Pfads an, um die Benennung zu entfernen.
 
 Ein Provisioner übergibt dasselbe als System-Credentials `kamerplanter.data-disk`, `kamerplanter.data-disk-force`, `kamerplanter.backup-disk` und `kamerplanter.backup-disk-force`. Der Schlüssel einer verschlüsselten Platte ist hier nie eine Einstellung, da diese Datei auf dem Datenträger liegt: Er kommt als Credential `kamerplanter.data-disk-key` oder `kamerplanter.backup-disk-key` oder als Datei dieses Namens in `/var/lib/kamerplanter/disks/keys/`. Die Konfigurationsprüfung lehnt eine Platte ab, die über eine andere Art von Pfad benannt ist. Siehe [Datenträger und Sicherungs-Datenträger](../getting-started/data-disk.md).
 

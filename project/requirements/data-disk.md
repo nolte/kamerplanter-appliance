@@ -105,6 +105,8 @@ Self-consistency (`k = 2`) lowered `c_d` before Q3, Q4 and Q10: for "NFS", "form
 - **R20** — WHILE the data disk is encrypted, the appliance SHALL write the pre-update backup only to an equally protected location: an encrypted backup disk, the encrypted data disk, or the system disk when the key is kept there; otherwise it SHALL postpone the update.
   - _dimension_: `non_functional` · _status_: `confirmed` · _source_: security review decision 2026-11-14 ("Nur gleich geschützt")
 
+- **2026-11-15, security review (P11, before the PR):** the maintainer decided that disks are named, and a format forced, only from the system side: a systemd credential or the naming file `/var/lib/kamerplanter/disks/naming.env` on the system disk (`disks name`). The user file names a disk only while no data disk is set up (it lies on the system disk then); once one is, its `DATA_DISK`, `BACKUP_DISK` and `*_FORCE` are ignored with a message, since the file lies on a disk that may have been changed elsewhere. "In the appliance configuration" in R1 reads accordingly. `UPDATE_BACKUP_KEEP_DAYS` counts as at least 3 days.
+
 ## Surviving assumptions / open risks
 
 - **Design risk — `/etc` under bootc:** whether `kamerplanter.env` and `secrets.env` can move to the data disk by bind mount or symlink while `/etc` is merged by ostree on updates is unverified (issue open question). Settled by a prototype; the requirement (R5) stands either way.

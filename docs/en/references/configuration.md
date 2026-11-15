@@ -48,9 +48,17 @@ To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`,
 | Setting | Default | Meaning |
 |---|---|---|
 | `DATA_DISK` | empty | The data disk, as a `/dev/disk/by-id/` or `/dev/disk/by-uuid/` path; empty: none |
-| `DATA_DISK_FORCE` | `0` | `1` formats a named data disk that carries another file system or partition table, once |
+| `DATA_DISK_FORCE` | `0` | `1` formats a named data disk that carries another file system or partition table, once per device |
 | `BACKUP_DISK` | empty | The backup disk, named the same way |
-| `BACKUP_DISK_FORCE` | `0` | `1` formats a named backup disk that carries another file system or partition table, once |
+| `BACKUP_DISK_FORCE` | `0` | `1` formats a named backup disk that carries another file system or partition table, once per device |
+
+These four settings count in this file only while no data disk is set up. Once one is, this file lies on the data disk, so the appliance ignores them here and says so in `systemctl status kamerplanter-data-disk`. Set them on the system disk instead, as root:
+
+```bash
+/usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
+```
+
+The command writes `/var/lib/kamerplanter/disks/naming.env`; add `force` after the path to format the disk once although it carries other signatures, or give `none` instead of a path to remove the naming.
 
 A provisioner passes the same as the system credentials `kamerplanter.data-disk`, `kamerplanter.data-disk-force`, `kamerplanter.backup-disk`, and `kamerplanter.backup-disk-force`. The key of an encrypted disk is never a setting here, since this file lies on the data disk: it comes as the credential `kamerplanter.data-disk-key` or `kamerplanter.backup-disk-key`, or as the file of that name in `/var/lib/kamerplanter/disks/keys/`. The configuration check rejects a disk named by any other kind of path. See [Data disk and backup disk](../getting-started/data-disk.md).
 

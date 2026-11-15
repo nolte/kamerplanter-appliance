@@ -42,18 +42,22 @@ A disk is used only when you name it explicitly, by a path under `/dev/disk/by-i
 ls -l /dev/disk/by-id/
 ```
 
-Name it in one of two ways:
+Name it in one of these ways:
 
-- **In your file** `/etc/kamerplanter/kamerplanter.env`, on an appliance that runs already:
+- **On the system disk**, on an appliance that runs already, as root:
 
-    ```ini
-    DATA_DISK=/dev/disk/by-id/usb-Example_Disk_0123456789-0:0
-    BACKUP_DISK=/dev/disk/by-id/ata-Example_SSD_ABC123
+    ```bash
+    /usr/libexec/kamerplanter/disks name data /dev/disk/by-id/usb-Example_Disk_0123456789-0:0
+    /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
     ```
+
+    This writes `/var/lib/kamerplanter/disks/naming.env` (root, 0600), which you may also edit by hand as `DATA_DISK=…` and `BACKUP_DISK=…`. `disks name backup none` removes a naming.
+
+- **In your file** `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…` or `BACKUP_DISK=…`, but only while no data disk is set up. Once one is, that file lies on the data disk, and anyone who has had the disk in their hands could have changed it. So the appliance then ignores `DATA_DISK`, `BACKUP_DISK`, and their `…_FORCE` in that file and says so in `systemctl status kamerplanter-data-disk`; name the backup disk with `disks name` instead.
 
 - **As a system credential** `kamerplanter.data-disk` or `kamerplanter.backup-disk` from the provisioner, before the first boot. See [Provisioning](#provisioning).
 
-When both name the data disk differently, the appliance uses neither. One disk can't be named as data disk and as backup disk at once.
+When two of these name the data disk differently, the appliance uses none of them. One disk can't be named as data disk and as backup disk at once.
 
 What happens to the named disk:
 
@@ -61,7 +65,7 @@ What happens to the named disk:
 |---|---|
 | is blank | Formatted ext4 with the label `kp-data` or `kp-backup` |
 | carries an ext4 file system with that label already | Used as it is |
-| carries another file system or a partition table | Refused; the message names what it found. `DATA_DISK_FORCE=1` or `BACKUP_DISK_FORCE=1` (credential `kamerplanter.data-disk-force`, `kamerplanter.backup-disk-force`) formats it anyway, once for that path |
+| carries another file system or a partition table | Refused; the message names what it found. `disks name data PATH force` (in the naming file `DATA_DISK_FORCE=1` or `BACKUP_DISK_FORCE=1`; credential `kamerplanter.data-disk-force`, `kamerplanter.backup-disk-force`) formats it anyway, once per device: another path to the same disk doesn't format it again. The device is recorded by its WWN or serial number; a disk that reports neither is recorded by its device number, which can change after a reboot |
 | holds the running system, is mounted or in use, or isn't a local disk | Always refused, also when forced |
 
 A disk that appears late, such as a USB disk, gets 30 seconds. Once set up, the disk is recorded in `/var/lib/kamerplanter/disks/` on the system disk together with its UUID. On every boot it's found by its label and accepted only under that UUID. A second device with the same label, for example a cloned stick, keeps the services stopped until you remove it.
@@ -96,7 +100,7 @@ lsblk -o NAME,SIZE,FSTYPE,LABEL
 An appliance that already holds data on its system disk moves it onto a newly named data disk once:
 
 1. Attach a blank disk. A disk that holds nothing but `lost+found`, or the disk of an earlier move of this appliance, works as well; a disk that holds data of its own is refused, since one of the two would be lost.
-2. Name it in `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…`.
+2. Name it with `/usr/libexec/kamerplanter/disks name data /dev/disk/by-id/…`, or in `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…`.
 3. Run:
 
     ```bash
@@ -107,7 +111,7 @@ An appliance that already holds data on its system disk moves it onto a newly na
 
 The appliance copies `/etc/kamerplanter`, the records, and both volumes onto the disk, compares the copy, and syncs it before it uses the disk. The disk needs room for the data plus 10 % and 32 MiB; with less, the move is abandoned and the services start from the system disk. After a power cut during the copy, the appliance still runs from the system disk and copies again.
 
-The services then have to pass the same health check as after an update. The copy on the system disk is kept until they have, and for `UPDATE_BACKUP_KEEP_DAYS` days after; then it's deleted. If they fail the check, the appliance returns to the copy on the system disk and stops using the disk.
+The services then have to pass the same health check as after an update. The copy on the system disk is kept until they have, and for `UPDATE_BACKUP_KEEP_DAYS` days after (at least 3); then it's deleted. If they fail the check, the appliance returns to the copy on the system disk and stops using the disk.
 
 The record of the move has these states, shown by `/usr/libexec/kamerplanter/disks status` and `kamerplanter-update status`:
 
@@ -168,9 +172,13 @@ The key comes from you or your provisioner; the appliance never generates one, a
 - the system credential `kamerplanter.data-disk-key` or `kamerplanter.backup-disk-key`, or
 - the file of that name in `/var/lib/kamerplanter/disks/keys/`, owned by root with mode 0600.
 
+Never pass a key on the kernel command line (`systemd.set_credential=kamerplanter.data-disk-key:…`): every user on the appliance can read the command line, and the journal records it at every boot. The appliance refuses such a key, doesn't store it, and keeps the services stopped until it's gone from the command line. Treat a key that was passed that way as known to others.
+
 A key holds 32 to 8192 bytes and is taken byte for byte, a trailing line break included.
 
-Once the disk is set up, the appliance keeps the key on the system disk in `/var/lib/kamerplanter/disks/keys/` (root, 0600, directory 0700) and opens the disk with it on every boot. It deletes the copies it was given: the key file, and the credential in `/etc/credstore/` or `/run/credstore/`. A credential from the firmware or the kernel command line lives only in memory. The key never appears in a message, the journal, or the update record. When the disk is no longer set up, the stored key is deleted.
+Once the disk is set up, the appliance keeps the key on the system disk in `/var/lib/kamerplanter/disks/keys/` (root, 0600, directory 0700) and opens the disk with it on every boot. It deletes the copies of that key it was given: the key file, the plain credential in `/etc/credstore/` or `/run/credstore/`, and the encrypted credential in `/etc/credstore.encrypted/` or `/run/credstore.encrypted/`, which it decrypts to compare. A copy that holds another key, or can't be decrypted, stays where it is, and the journal says so; delete it yourself. It can't delete a credential from the firmware, such as an SMBIOS string; see [Residual risks](#residual-risks). The key never appears in a message, the journal, or the update record. When the disk is no longer set up, the stored key is deleted.
+
+The appliance encrypts with `aes-xts-plain64` and a 512-bit key and records both. Each time it opens the disk it checks that the container still encrypts that way; a container that doesn't, such as one prepared with `cipher_null`, which stores the data unencrypted, keeps the services stopped as a foreign disk would.
 
 Keep a copy of the key off the appliance: a new system needs it to open the disk.
 
@@ -211,11 +219,25 @@ For QEMU, a data disk with the serial `kpdata` appears as `/dev/disk/by-id/virti
 -smbios type=11,value=io.systemd.credential:kamerplanter.data-disk=/dev/disk/by-id/virtio-kpdata
 ```
 
-A binary key goes in base64 as `io.systemd.credential.binary:kamerplanter.data-disk-key=…`.
+A binary key goes in base64 as `io.systemd.credential.binary:kamerplanter.data-disk-key=…`. Pass a key only this way, as an encrypted credential, or as a file; never on the kernel command line.
 
 ## Retiring a disk
 
 Deleted files may remain readable on the medium, also the copy on the system disk after a move. Wipe or destroy a disk before it leaves your hands.
 
-- **Backup disk:** remove the naming, delete `/var/lib/kamerplanter/disks/backup.env`, and reboot. The stored key of the disk is deleted then. Backups on that disk can no longer be restored.
+- **Backup disk:** remove the naming (`/usr/libexec/kamerplanter/disks name backup none`, or the credential), delete `/var/lib/kamerplanter/disks/backup.env`, and reboot. The stored key of the disk is deleted then. Backups on that disk can no longer be restored.
 - **Data disk:** this release has no way to move the data back to the system disk or onto another data disk; while a data disk is set up, a different naming is ignored. Don't delete `/var/lib/kamerplanter/disks/data.env` while your data is on the disk: without it, the appliance no longer uses that disk.
+
+## Residual risks
+
+The appliance closes what it can, but some risks stay with the design or with the hardware. Know them before you choose a disk and a key.
+
+**An unencrypted disk can be swapped for a forged one.** An unencrypted data disk or backup disk is recognised only by its label and its file system UUID. Both are plain values anyone can copy onto another stick. Whoever can swap the disk while the appliance is off can make it accept their own: a forged data disk brings their secrets and database, and a forged backup disk receives a full copy of your database with the next update. While checking and mounting such a disk, the kernel also parses a file system someone else prepared, as root. Only encryption ties a disk to you, since a LUKS2 container opens only with your key. **What to do:** [encrypt](#encryption) every disk that can be unplugged or leave the premises, and keep the machine where others can't reach its ports.
+
+**A key from the firmware stays readable.** A key passed as an SMBIOS type 11 credential stays readable for root as long as the appliance runs, in the firmware tables under `/sys/firmware/dmi/` and in the system credentials under `/run/credentials/`. It's also stored in plain text in the hypervisor's VM configuration and in the provisioner's files, such as a Terraform configuration and its state. The appliance can't delete any of these copies. **What to do:** restrict who can read the VM configuration and the provisioner's state, and remove the credential from the VM once the disk is set up; the appliance keeps its own copy on the system disk.
+
+**Deleted keys and copies may stay on flash.** The appliance overwrites the stored key, the provisioned copies of it, and the secrets and records of the system disk's copy of moved data before it deletes them; the rest of that copy, the databases, it only deletes. On an SSD, a USB stick, or a copy-on-write file system the old blocks may remain readable all the same, because the medium writes elsewhere and frees the old blocks only later. **What to do:** follow [Retiring a disk](#retiring-a-disk); wipe or destroy a medium before it leaves your hands, the system disk included.
+
+**An old copy of the encrypted disk is accepted.** LUKS2 as the appliance sets it up encrypts, but doesn't detect when the content is replaced as a whole. Someone with physical access who copied the encrypted disk earlier can write that copy back. It opens with the stored key, under the same UUID, and the appliance uses the older database, secrets, and release marker it holds. **What to do:** keep the machine and its disks physically secure, and check the data after the appliance was out of your hands.
+
+**The key lies on the system disk.** The appliance keeps the key of an encrypted disk in plain text on the system disk and doesn't seal it in the TPM, so whoever has the whole machine, or the system disk and the data disk, can open the data disk. See [What encryption protects against](#encryption). **What to do:** treat the system disk as holding the key; keep your own copy of the key off the appliance, and protect the machine as a whole.
