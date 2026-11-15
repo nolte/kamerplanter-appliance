@@ -31,7 +31,7 @@ The reference targets for hosted and private VMs share a common base, which §H 
 | Network device | virtio [R20] | Not documented | Intel E1000 by default, VirtIO recommended [R17] | virtio-net, plus E1000 |
 | Firmware | Not documented | Not documented | SeaBIOS by default, OVMF selectable [R17][R18] | Legacy BIOS, and UEFI as well |
 | Network configuration | IPv4 through DHCP [R21] | Through metadata; DHCP not documented | Not supplied by the platform without cloud-init [R19] | DHCP client |
-| Provisioning data | Metadata server read by cloud-init [R3] | Metadata server read by cloud-init [R22] | Optional cloud-init drive in NoCloud format [R19] | cloud-init-compatible source, not guaranteed to exist |
+| Provisioning data | Metadata server read by cloud-init [R3] | Metadata server read by cloud-init [R22] | Optional cloud-init drive in NoCloud format [R19]; otherwise a NoCloud seed URL or seed files that the user supplies | cloud-init-compatible source, not guaranteed to exist; the image reads NoCloud and the metadata services (`spec/distribution-requirements/` L2) |
 
 Outside the common base are the installer ISO, which only Proxmox VE and mini PCs accept, drivers for physical hardware, which only mini PCs and OVHcloud dedicated servers need, and OVHcloud VPS, for which OVH documents no path.
 
@@ -127,7 +127,7 @@ Readers: maintainers who build and release the appliance, reviewers who decide w
 - **H3 MUST** boot that image with the devices that Proxmox VE assigns by default, including the emulated ones.
 - **H4 MUST** boot that image under legacy BIOS and under UEFI.
 - **H5 MUST** obtain its IPv4 configuration through DHCP without user action.
-- **H6 MUST** read provisioning data from the cloud-init-compatible source of the target when one is present.
+- **H6 MUST** read provisioning data from the cloud-init-compatible source of the target when one is present: on Proxmox VE, on mini PCs, and on other private targets a NoCloud drive labelled `CIDATA` (a virtual drive, or a USB stick on a mini PC), a NoCloud seed URL, or NoCloud seed files; on Hetzner Cloud and OVHcloud the metadata service of the provider; as `spec/distribution-requirements/` D4 and §L define.
 - **H7 MUST** start and complete its first-boot setup when no provisioning data is present.
 - **H8 MUST** fit the smallest disk that a reference target offers and grow to the available disk at first boot.
 - **H9 MUST NOT** depend on an image that the vendor shares or publishes inside a provider.

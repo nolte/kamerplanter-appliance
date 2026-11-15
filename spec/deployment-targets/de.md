@@ -31,7 +31,7 @@ Die Referenzziele für gehostete und private VMs haben eine gemeinsame Basis, di
 | Netzwerkgerät | virtio [R20] | Nicht dokumentiert | Standardmäßig Intel E1000, VirtIO empfohlen [R17] | virtio-net, dazu E1000 |
 | Firmware | Nicht dokumentiert | Nicht dokumentiert | Standardmäßig SeaBIOS, OVMF wählbar [R17][R18] | Legacy-BIOS und zusätzlich UEFI |
 | Netzwerkkonfiguration | IPv4 per DHCP [R21] | Über Metadaten; DHCP nicht dokumentiert | Ohne cloud-init nicht von der Plattform geliefert [R19] | DHCP-Client |
-| Provisionierungsdaten | Metadata-Server, von cloud-init gelesen [R3] | Metadata-Server, von cloud-init gelesen [R22] | Optionales cloud-init-Laufwerk im NoCloud-Format [R19] | cloud-init-kompatible Quelle, deren Existenz nicht garantiert ist |
+| Provisionierungsdaten | Metadata-Server, von cloud-init gelesen [R3] | Metadata-Server, von cloud-init gelesen [R22] | Optionales cloud-init-Laufwerk im NoCloud-Format [R19]; sonst eine NoCloud-Seed-URL oder Seed-Dateien, die der Nutzer liefert | cloud-init-kompatible Quelle, deren Existenz nicht garantiert ist; das Image liest NoCloud und die Metadatendienste (`spec/distribution-requirements/` L2) |
 
 Außerhalb der gemeinsamen Basis liegen das Installer-ISO, das nur Proxmox VE und Mini-PCs annehmen, Treiber für physische Hardware, die nur Mini-PCs und dedizierte OVHcloud-Server brauchen, und OVHcloud VPS, für die OVH keinen Weg dokumentiert.
 
@@ -127,7 +127,7 @@ Leser: Maintainer, die die Appliance bauen und veröffentlichen, Reviewer, die e
 - **H3 MUSS [MUST]** dieses Image mit den Geräten booten, die Proxmox VE standardmäßig zuweist, einschließlich der emulierten.
 - **H4 MUSS [MUST]** dieses Image unter Legacy-BIOS und unter UEFI booten.
 - **H5 MUSS [MUST]** seine IPv4-Konfiguration ohne Nutzereingriff per DHCP beziehen.
-- **H6 MUSS [MUST]** Provisionierungsdaten aus der cloud-init-kompatiblen Quelle des Ziels lesen, wenn eine vorhanden ist.
+- **H6 MUSS [MUST]** Provisionierungsdaten aus der cloud-init-kompatiblen Quelle des Ziels lesen, wenn eine vorhanden ist: auf Proxmox VE, auf Mini-PCs und auf anderen privaten Zielen ein NoCloud-Laufwerk mit dem Label `CIDATA` (ein virtuelles Laufwerk oder ein USB-Stick an einem Mini-PC), eine NoCloud-Seed-URL oder NoCloud-Seed-Dateien; auf Hetzner Cloud und OVHcloud den Metadatendienst des Anbieters; wie `spec/distribution-requirements/` D4 und §L festlegen.
 - **H7 MUSS [MUST]** starten und seine Ersteinrichtung abschließen, wenn keine Provisionierungsdaten vorhanden sind.
 - **H8 MUSS [MUST]** auf die kleinste Platte passen, die ein Referenzziel anbietet, und beim ersten Boot auf die verfügbare Platte wachsen.
 - **H9 DARF NICHT [MUST NOT]** von einem Image abhängen, das der Hersteller innerhalb eines Anbieters teilt oder veröffentlicht.

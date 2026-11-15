@@ -244,3 +244,4 @@ Commit order on the single PR strand: **P1 (spike, no commit) → P2 → P3 → 
 <!-- <YYYY-MM-DD> P<k> dispatched to <subagent_type> — <result one-liner> -->
 2026-11-14 plan approved by the operator, Q1–Q5 defaults accepted; sequencing: #15 merges first.
 2026-11-14 P1 done by the generalist (three spike runs on `exp/provisioning-spike`): all NoCloud forms detected except seed files with several datasources (/var mounts after the generator); static network not applied (keyfile bound to the v2 id); default user `fedora` created; cached secret copies return while the source is attached; nftables metadata restriction and systemd credentials work.
+2026-11-15 P2 done by spec (general-purpose agent following the spec skill) — new §L (L1–L20) in distribution-requirements, D4/D11/E7 and H6 plus the provisioning-data row extended, en+de; seed files need a NoCloud-only drop-in (L3), degraded status accepted (L8), network forms to be verified by P7 (L6).
