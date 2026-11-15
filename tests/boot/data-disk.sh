@@ -309,8 +309,9 @@ step_move() {
     record d4 PASS "$((SECONDS - start))s" "running appliance moved onto newly named $(by_id move) by a restart of the disk unit, healthy from it (verified), same secrets and volume data, binds and labels in place (E11)"
     # The copy on the system disk goes UPDATE_BACKUP_KEEP_DAYS after the
     # check, at the daily run of the fetch unit (cleanup); the check is moved
-    # two days back instead of waiting.
-    guest "sed -i 's/^VERIFIED=.*/VERIFIED=$(date -u -d '-2 days' +%FT%TZ)/' /var/lib/kamerplanter/disks/move.env &&
+    # four days back instead of waiting (the 1 set above counts as the
+    # minimum of 3 days, keep_days in env.sh).
+    guest "sed -i 's/^VERIFIED=.*/VERIFIED=$(date -u -d '-4 days' +%FT%TZ)/' /var/lib/kamerplanter/disks/move.env &&
         systemctl start kamerplanter-update-fetch.service" >"$OUT/d4.cleanup.txt" 2>&1
     local left problems
     state=$(guest '. /usr/lib/kamerplanter/env.sh; data_disk_move_field STATE')
