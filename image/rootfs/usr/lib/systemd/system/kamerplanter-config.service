@@ -8,15 +8,24 @@ PartOf=kamerplanter.target
 # older release generates no secret and writes no pin onto that disk.
 Requires=kamerplanter-data-disk.service kamerplanter-update-guard.service
 After=kamerplanter-data-disk.service kamerplanter-update-guard.service
-# The provisioning layer of this boot is in place before the check
+# The provisioning layer of this boot is in place, and the secrets of the
+# provisioning data are staged, before the check
 # (spec/distribution-requirements/ L17). After= only: without provisioning
-# data that unit keeps the layer as it is and finishes at once.
+# data that unit keeps the layer as it is and finishes at once. configure
+# writes a staged secret into the secrets file only after the data disk is
+# mounted and bound, as everything else it writes.
 After=kamerplanter-provisioning.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/kamerplanter/configure
+# A secret may be supplied as the system credential kamerplanter.secret.<KEY>,
+# one per key, for example as an SMBIOS type 11 string; configure fills a key
+# that the secrets file does not hold with it, on every start
+# (spec/distribution-requirements/ L13). The credentials reach only this unit,
+# in its private, root-only $CREDENTIALS_DIRECTORY, never its environment.
+ImportCredential=kamerplanter.secret.*
 
 [Install]
 WantedBy=kamerplanter.target

@@ -14,13 +14,30 @@
 #                                             the provisioning data, renewed
 #                                             at boot by
 #                                             kamerplanter-provisioning.service
-#   /etc/kamerplanter/secrets.env             generated here, once per key
+#   /etc/kamerplanter/secrets.env             generated here, once per key,
+#                                             or taken over from the
+#                                             provisioned secrets
 #   /etc/kamerplanter/kamerplanter.env        the user's own values
 # A provisioned value is checked like a value of the user file, and a
 # message about it names the provisioning layer. The provisioning layer never
 # names a disk: its DATA_DISK, BACKUP_DISK and *_FORCE are ignored with a
 # message. A generated secret set there is passed through, with a warning
 # that names the key, never the value, and points to kamerplanter: -> secrets:.
+#
+# Provisioned secrets (spec/distribution-requirements/ L12-L14, L17) come
+# through two channels: the map kamerplanter: -> secrets: of the provisioning
+# data, which kamerplanter-provisioning.service stages in memory
+# (staged_secrets in /usr/lib/kamerplanter/env.sh) and which is taken over
+# once per instance; and the system credentials kamerplanter.secret.<KEY>,
+# which kamerplanter-config.service imports, read on every run. A credential
+# wins over the map for the same key. Either only fills a key that the
+# secrets file does not hold: a value the file holds is kept, with a warning
+# that names the key; a provisioned value of a pinned key that differs from
+# the recorded one is never written, and keeps the services stopped when no
+# layer holds that key. Only the secrets of provisionable_secret_keys are
+# taken over, and only values that pass the checks below; anything else
+# keeps the services stopped and nothing provisioned is written. A value is
+# never printed, nor passed on a command line.
 #
 # With a data disk, /etc/kamerplanter and /var/lib/kamerplanter/pinned are
 # bound from it by kamerplanter-data-disk.service
@@ -71,7 +88,53 @@ secrets=$config_secrets
 user=$config_user
 
 # The secrets generated below (spec/distribution-requirements/ D9).
-secret_keys=(ARANGODB_PASSWORD JWT_SECRET_KEY FERNET_KEY ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT)
+secret_keys=("${generated_secret_keys[@]}")
+
+# secret_problem KEY VALUE: sets problem to what is wrong with VALUE as the
+# secret KEY, empty when nothing is or KEY is no secret checked here. The
+# check of the configuration and the take-over of provisioned secrets apply
+# the same rules. Never a value in problem: it goes to the journal.
+problem=
+secret_problem() {
+    problem=
+    case $1 in
+        JWT_SECRET_KEY)
+            [ "$2" != change-me-in-production-use-openssl-rand-hex-32 ] && [ -n "$2" ] ||
+                problem="JWT_SECRET_KEY is empty or the upstream placeholder" ;;
+        FERNET_KEY)
+            [[ $2 =~ ^[A-Za-z0-9_-]{43}=$ ]] ||
+                problem="FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters)" ;;
+        ERASURE_TOMBSTONE_SALT | LOG_PSEUDONYM_SALT)
+            [ "${#2}" -ge 32 ] || problem="$1 is shorter than 32 characters" ;;
+        TENANT_EXPORT_SIGNING_SECRET)
+            [ -z "$2" ] || [ "${#2}" -ge 32 ] ||
+                problem="TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters" ;;
+        ARANGODB_PASSWORD)
+            case $2 in '' | rootpassword | changeme) problem="ARANGODB_PASSWORD is empty or a known default" ;; esac ;;
+    esac
+}
+
+# provisioned_problem KEY VALUE: as secret_problem, for a provisioned secret,
+# which must also be one line of 1 to 4096 printable ASCII characters, so it
+# is taken into the secrets file literally and as one line.
+provisioned_problem() {
+    local LC_ALL=C
+    problem=
+    if [ -z "$2" ]; then
+        problem="$1 is empty"
+    elif [ "${#2}" -gt 4096 ]; then
+        problem="$1 is longer than 4096 characters"
+    elif [[ $2 == *[![:print:]]* ]]; then
+        problem="$1 holds a character that is not printable ASCII, such as a line break"
+    else
+        secret_problem "$1" "$2"
+    fi
+}
+
+# key_shown KEY: a key named by the provisioning data, as a message shows it.
+key_shown() {
+    if [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_]{0,63}$ ]]; then printf '%s' "$1"; else printf 'a key that is no KEY name'; fi
+}
 
 # layer_name FILE: the file of the provisioning layer in a message.
 layer_name() {
@@ -93,6 +156,23 @@ fail_key() {  # fail_key KEY MESSAGE
     else
         fail "$2"
     fi
+}
+
+# report_invalid: says why the configuration is invalid and keeps the
+# services stopped.
+secret_errors=0
+report_invalid() {
+    printf 'Kamerplanter configuration is invalid; the services stay stopped:\n' >&2
+    printf '  - %s\n' "${errors[@]}" >&2
+    if [ "$secret_errors" = 1 ]; then
+        printf 'Fix the provisioned secret, in the provisioning data (kamerplanter: -> secrets: is read again at the next boot until it is taken over) or as the system credential %s<KEY>, and reboot; nothing provisioned is written to %s until then\n' "$secret_credentials" "$secrets" >&2
+    elif [ "$provisioned_errors" = 1 ]; then
+        printf 'Fix a provisioned value in the provisioning data (kamerplanter: -> settings: is read again at the next boot; %s is written once per instance and may be edited in place), or set it in %s, which wins over it, and run: systemctl restart kamerplanter.target\n' "$provisioning_file" "$user" >&2
+    else
+        printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
+    fi
+    rm -f "$out"/*.env
+    exit 1
 }
 
 # A data disk that is set up but not mounted, or whose locations are not all
@@ -127,6 +207,106 @@ fi
 install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$user" ] || install -m 0600 /dev/null "$user"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
+
+# --- The provisioned secrets (L12, L13, L14, L17) ---
+# Taken over here, after the check above that the data disk is in place, so
+# they fill the secrets file on the data disk, also one adopted from it
+# (E10), and never one on the system disk underneath.
+fail_secret() { secret_errors=1; fail "$1"; }
+declare -A offered=() offered_from=()
+offer() {  # offer KEY VALUE FROM: VALUE is supplied for KEY; a later offer wins
+    if provisionable_secret "$1"; then
+        offered[$1]=$2
+        offered_from[$1]=$3
+        return
+    fi
+    fail_secret "$(key_shown "$1") in $3 is no secret the appliance takes over (it takes over ${provisionable_secret_keys[*]})"
+}
+staged=no
+if [ -f "$staged_secrets" ] && [ ! -L "$staged_secrets" ]; then
+    staged=yes
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -n "$line" ] || continue
+        key=${line%%=*}
+        if [[ $line == *=* && $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            offer "$key" "${line#*=}" "kamerplanter: -> secrets: of the provisioning data"
+        else
+            fail_secret "$line"  # the provisioning step's message, never a value
+        fi
+    done <"$staged_secrets"
+fi
+# A credential is taken as it is, without its trailing line breaks.
+if [ -n "${CREDENTIALS_DIRECTORY-}" ] && [ -d "$CREDENTIALS_DIRECTORY" ]; then
+    for file in "$CREDENTIALS_DIRECTORY/$secret_credentials"*; do
+        [ -f "$file" ] || continue
+        key=${file##*/"$secret_credentials"}
+        from="the system credential $secret_credentials$(key_shown "$key")"
+        if [ "$(wc -c <"$file")" -gt 4097 ]; then
+            fail_secret "$(key_shown "$key") is longer than 4096 characters (supplied by $from)"
+        elif [ "$(LC_ALL=C tr -d '\040-\176\n' <"$file" | wc -c)" -gt 0 ]; then
+            fail_secret "$(key_shown "$key") holds a character that is not printable ASCII (supplied by $from)"
+        else
+            value=$(<"$file")
+            offer "$key" "$value" "$from"
+        fi
+    done
+fi
+load "$secrets"
+declare -A held=()
+for key in "${!cfg[@]}"; do held[$key]=${cfg[$key]}; done
+load_config
+taken=()
+taken_keys=()
+while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    value=${offered[$key]}
+    from=${offered_from[$key]}
+    if [ -n "${held[$key]+set}" ]; then
+        [ "${held[$key]}" = "$value" ] ||
+            echo "warning: $key from $from differs from the value in $secrets; that value is kept, the provisioned one is not used" >&2
+        continue
+    fi
+    provisioned_problem "$key" "$value"
+    if [ -n "$problem" ]; then
+        fail_secret "$problem (supplied by $from)"
+        continue
+    fi
+    # A pinned value is restored only as the value Kamerplanter started with.
+    if [ -n "${pinned[$key]+set}" ] && [ -e "$pins/$key" ] &&
+        [ "$(cat "$pins/$key")" != "$(printf '%s' "$value" | sha256sum | cut -d' ' -f1)" ]; then
+        if [ -n "${cfg[$key]+set}" ]; then
+            echo "warning: $key from $from differs from the value Kamerplanter started with; it is not taken over" >&2
+        else
+            fail_secret "$key from $from differs from the value Kamerplanter started with: ${pinned[$key]}; restore $key from your backup into $secrets"
+        fi
+        continue
+    fi
+    taken+=("$key=$value")
+    taken_keys+=("$key ($from)")
+done < <(printf '%s\n' "${!offered[@]}" | sort)
+[ "$secret_errors" = 0 ] || report_invalid
+# Written durably, before anything is generated or any service starts.
+if [ ${#taken[@]} -gt 0 ]; then
+    { awk 1 "$secrets"; printf '%s\n' "${taken[@]}"; } | replace "$secrets"
+    list=$(printf '%s; ' "${taken_keys[@]}")
+    echo "provisioned secrets taken over into $secrets: ${list%; }"
+fi
+taken=()
+offered=()
+value=
+# The map of this instance is taken over now: recorded, so it is not again,
+# and deleted from memory.
+if [ "$staged" = yes ]; then
+    instance=$(head -n1 -- "$staged_instance" 2>/dev/null) || instance=
+    [ -n "$instance" ] || instance=null
+    if [ -d "$provisioning_dir" ] && [ ! -L "$provisioning_dir" ]; then
+        printf '%s\n' "$instance" | replace "$secrets_taken"
+    else
+        echo "$provisioning_dir is not a directory: the take-over of kamerplanter: -> secrets: is not recorded and is repeated at the next boot" >&2
+    fi
+    rm -f -- "$staged_secrets" "$staged_instance"
+    rmdir -- "$provisioning_staging" 2>/dev/null || true
+fi
 
 # The generated secrets that the provisioning layer sets, whichever layer
 # wins for them, as "KEY FILE".
@@ -183,18 +363,10 @@ if [ "$(get ARANGODB_USERNAME)" != root ]; then
 fi
 cfg[ARANGO_ROOT_PASSWORD]=$(get ARANGODB_PASSWORD)
 
-[ "$(get JWT_SECRET_KEY)" != change-me-in-production-use-openssl-rand-hex-32 ] && [ -n "$(get JWT_SECRET_KEY)" ] ||
-    fail_key JWT_SECRET_KEY "JWT_SECRET_KEY is empty or the upstream placeholder"
-[[ $(get FERNET_KEY) =~ ^[A-Za-z0-9_-]{43}=$ ]] ||
-    fail_key FERNET_KEY "FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters)"
-for key in ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT; do
-    value=$(get "$key")
-    [ "${#value}" -ge 32 ] || fail_key "$key" "$key is shorter than 32 characters"
+for key in JWT_SECRET_KEY FERNET_KEY ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT TENANT_EXPORT_SIGNING_SECRET; do
+    secret_problem "$key" "$(get "$key")"
+    [ -z "$problem" ] || fail_key "$key" "$problem"
 done
-value=$(get TENANT_EXPORT_SIGNING_SECRET)
-if [ -n "$value" ] && [ "${#value}" -lt 32 ]; then
-    fail_key TENANT_EXPORT_SIGNING_SECRET "TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters"
-fi
 [[ $(get UPDATE_WINDOW) =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
     fail_key UPDATE_WINDOW "UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)"
 [[ $(get UPDATE_HEALTH_TIMEOUT) =~ ^[1-9][0-9]*$ ]] ||
@@ -213,7 +385,8 @@ if user_file_trusted; then
         [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
     done
 fi
-case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail_key ARANGODB_PASSWORD "ARANGODB_PASSWORD is empty or a known default" ;; esac
+secret_problem ARANGODB_PASSWORD "$(get ARANGODB_PASSWORD)"
+[ -z "$problem" ] || fail_key ARANGODB_PASSWORD "$problem"
 
 for key in "${!pinned[@]}"; do
     [ -e "$pins/$key" ] || continue
@@ -222,17 +395,7 @@ for key in "${!pinned[@]}"; do
         fail_key "$key" "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
 done
 
-if [ ${#errors[@]} -gt 0 ]; then
-    printf 'Kamerplanter configuration is invalid; the services stay stopped:\n' >&2
-    printf '  - %s\n' "${errors[@]}" >&2
-    if [ "$provisioned_errors" = 1 ]; then
-        printf 'Fix a provisioned value in the provisioning data (kamerplanter: -> settings: is read again at the next boot; %s is written once per instance and may be edited in place), or set it in %s, which wins over it, and run: systemctl restart kamerplanter.target\n' "$provisioning_file" "$user" >&2
-    else
-        printf 'Fix %s and run: systemctl restart kamerplanter.target\n' "$user" >&2
-    fi
-    rm -f "$out"/*.env
-    exit 1
-fi
+[ ${#errors[@]} -eq 0 ] || report_invalid
 
 # The application containers get the whole configuration; ArangoDB only the
 # value it needs to create its database.

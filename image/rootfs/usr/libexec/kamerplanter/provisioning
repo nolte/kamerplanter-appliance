@@ -1,6 +1,7 @@
 #!/usr/bin/bash
 # Takes the Kamerplanter settings from the provisioning data into the
-# provisioning layer (spec/distribution-requirements/ L9, L10, L17). Run by
+# provisioning layer, and stages its secrets for the configuration check
+# (spec/distribution-requirements/ L9, L10, L12, L17). Run by
 # kamerplanter-provisioning.service on every boot, after cloud-init's network
 # stage and before the configuration check (kamerplanter-config.service).
 #
@@ -29,6 +30,19 @@
 # KEY=VALUE, so the configuration check keeps the services stopped and names
 # it, as it does for any line of the user file (L11). Values are never
 # printed: this runs into the journal.
+#
+# The map kamerplanter: -> secrets: is staged for the configuration check
+# (L12, L17), never written into the provisioning layer: as KEY=VALUE lines
+# in staged_secrets, in a directory of mode 0700 in /run, with the id of the
+# instance in staged_instance (both in /usr/lib/kamerplanter/env.sh). The
+# check takes them into the secrets file once the data disk is in place and
+# deletes them. Once it has, it records the instance in secrets_taken, and
+# from then on the map of that instance is not staged again; a boot with a
+# new instance stages anew. A value is never printed, nor passed on a
+# command line: jq writes the lines straight into the staged file. An entry
+# that cannot be such a line, a key that is no KEY name, a value that is no
+# text or holds a line break or another control character, is staged as a
+# line that says so, and the check keeps the services stopped for it.
 #
 # At boot the maintenance window generator runs before /var is mounted and
 # does not see the provisioning layer; once it is in place, systemd is
@@ -86,6 +100,71 @@ settings_lines() {
             else $s | to_entries[] | entry
             end
           end'
+}
+
+# secret_lines: the lines of staged_secrets from the combined cloud-config on
+# stdin; nothing when kamerplanter: is no map, which settings_lines reports.
+# Fails when it is not JSON. jq's messages are dropped: they could quote the
+# input.
+secret_lines() {
+    jq -r '
+        def entry:
+            .key as $k | .value as $v
+            | if ($k | test("^[A-Za-z_][A-Za-z0-9_]*$") | not) then
+                "invalid entry of kamerplanter: -> secrets:, a key that is no KEY name"
+              elif ($v | type) != "string" then
+                "invalid entry of kamerplanter: -> secrets:, the value of \($k) is \(if $v == null then "empty" else "a \($v | type)" end), not a text; quote it"
+              elif ($v | test("[\u0000-\u001f\u007f]")) then
+                "invalid entry of kamerplanter: -> secrets:, the value of \($k) holds a line break or another control character"
+              else "\($k)=\($v)" end;
+        (.kamerplanter // {}) as $kp
+        | if ($kp | type) != "object" then empty
+          else ($kp.secrets // {}) as $s
+          | if ($s | type) != "object" then "invalid entry of the provisioning data: kamerplanter: -> secrets: is not a map"
+            else $s | to_entries[] | entry
+            end
+          end' 2>/dev/null
+}
+
+# instance_id: cloud-init's id of this instance, as one line of JSON; null
+# when it names none.
+instance_id() {
+    local id
+    id=$(jq -c '.v1.instance_id // null' "$instance_data" 2>/dev/null) || id=null
+    [ -n "$id" ] && [[ $id != *$'\n'* ]] || id=null
+    printf '%s' "$id"
+}
+
+# stage_secrets: stages kamerplanter: -> secrets: of this boot's provisioning
+# data for the configuration check, unless the map of this instance was
+# taken over already. Whatever was staged before is removed first.
+stage_secrets() {
+    local id tmp count
+    if [ -L "$provisioning_staging" ] || { [ -e "$provisioning_staging" ] && [ ! -d "$provisioning_staging" ]; }; then
+        echo "$provisioning_staging is not a directory; no provisioned secret is staged" >&2
+        return 0
+    fi
+    rm -rf -- "$provisioning_staging"
+    provided || return 0
+    id=$(instance_id)
+    if [ -f "$secrets_taken" ] && [ ! -L "$secrets_taken" ] && [ "$(head -n1 -- "$secrets_taken")" = "$id" ]; then
+        echo "the secrets of this provisioning instance were taken over on an earlier boot; kamerplanter: -> secrets: is not taken over again"
+        return 0
+    fi
+    install -d -m 0700 "$provisioning_staging"
+    chown root:root "$provisioning_staging"
+    chmod 0700 "$provisioning_staging"
+    tmp=$(mktemp "$provisioning_staging/.secrets.XXXXXX")
+    if ! secret_lines <"$combined" >"$tmp"; then
+        rm -rf -- "$provisioning_staging"
+        echo "the combined cloud-config of cloud-init cannot be read; no provisioned secret is staged" >&2
+        return 0
+    fi
+    printf '%s\n' "$id" >"$provisioning_staging/.instance"
+    mv -- "$provisioning_staging/.instance" "$staged_instance"
+    mv -- "$tmp" "$staged_secrets"
+    count=$(grep -c . "$staged_secrets" || true)
+    echo "$count entries of kamerplanter: -> secrets: staged for the configuration check"
 }
 
 # own_dir: the directory of the layer, root only (0700), created when missing;
@@ -152,4 +231,5 @@ refresh_window() {
 }
 
 renew
+stage_secrets
 refresh_window

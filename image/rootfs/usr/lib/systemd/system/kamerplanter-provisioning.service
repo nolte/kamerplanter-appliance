@@ -1,11 +1,13 @@
 [Unit]
-Description=Take the Kamerplanter settings from the provisioning data
+Description=Take the Kamerplanter settings and secrets from the provisioning data
 Documentation=file:///usr/libexec/kamerplanter/provisioning
 # Renews the provisioning layer (/var/lib/kamerplanter/provisioning/) from
 # kamerplanter: -> settings: of the provisioning data on every boot, and keeps
-# it on a boot without (spec/distribution-requirements/ L10).
+# it on a boot without (spec/distribution-requirements/ L10). Stages
+# kamerplanter: -> secrets: in /run/kamerplanter-provisioning/ (root, 0700),
+# in memory, until the secrets of the instance are taken over (L12).
 # kamerplanter-config.service is ordered after this unit, so the
-# configuration check sees the layer of this boot (L17).
+# configuration check sees the layer and the secrets of this boot (L17).
 #
 # cloud-init runs write_files and writes its combined cloud-config in its
 # network stage, cloud-init-network.service. After= only: when cloud-init's

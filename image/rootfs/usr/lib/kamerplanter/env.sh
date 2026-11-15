@@ -82,6 +82,50 @@ config_layers=("$config_defaults" "${provisioning_layer[@]}" "$config_secrets" "
 # load_config: loads the layers of config_layers, as every reader does.
 load_config() { load "${config_layers[@]}"; }
 
+# The provisioned secrets (spec/distribution-requirements/ L12, L13, L17).
+# They never become part of a layer: the configuration check
+# (/usr/libexec/kamerplanter/configure) takes them into config_secrets,
+# filling only keys that file does not hold.
+#   provisioning_staging  where the provisioning step
+#                         (/usr/libexec/kamerplanter/provisioning) stages the
+#                         map kamerplanter: -> secrets: for the check: a
+#                         directory of mode 0700 in /run, which is in memory.
+#                         Not /run/kamerplanter, which the check empties when
+#                         it fails: a take-over that waits for the data disk
+#                         still finds them at `systemctl restart
+#                         kamerplanter.target`. The check deletes them once
+#                         it has taken them over.
+#   staged_secrets        the map, one KEY=VALUE per line (0600); a line that
+#                         is not KEY=VALUE says what is wrong with an entry,
+#                         never with its value
+#   staged_instance       cloud-init's id of the instance they belong to
+#   secrets_taken         the id of the instance whose map was taken over, on
+#                         the system disk beside the provisioning layer: the
+#                         map is taken over once per instance (L12)
+#   secret_credentials    the prefix of the system credentials that supply
+#                         one secret each, kamerplanter.secret.<KEY>, read on
+#                         every boot (L13)
+# Only the keys of provisionable_secret_keys are taken over: the secrets the
+# check generates (D9) and TENANT_EXPORT_SIGNING_SECRET, which it checks. Any
+# other key would carry a setting, such as the naming of a disk (L19), into
+# the secrets file, past the rules of the provisioning layer.
+provisioning_staging=/run/kamerplanter-provisioning
+# shellcheck disable=SC2034 # read by configure and the provisioning step
+{
+    staged_secrets=$provisioning_staging/secrets.env
+    staged_instance=$provisioning_staging/instance
+    secrets_taken=$provisioning_dir/secrets-taken
+    secret_credentials=kamerplanter.secret.
+}
+generated_secret_keys=(ARANGODB_PASSWORD JWT_SECRET_KEY FERNET_KEY ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT)
+provisionable_secret_keys=("${generated_secret_keys[@]}" TENANT_EXPORT_SIGNING_SECRET)
+# provisionable_secret KEY: whether a provisioned KEY is taken over.
+provisionable_secret() {
+    local k
+    for k in "${provisionable_secret_keys[@]}"; do [ "$1" != "$k" ] || return 0; done
+    return 1
+}
+
 # provisioning_source FILE: whether FILE is a file of the provisioning layer.
 provisioning_source() {
     local f
