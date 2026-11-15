@@ -14,8 +14,10 @@ DISK=$(realpath "${DISK:-.build/disk.raw}")
 OUT=.build/boot
 RESULTS=$OUT/results.tsv
 KEY=$OUT/id_ed25519
-FIRST_BOOT_TIMEOUT=1500   # includes pulling the container images
-REBOOT_TIMEOUT=600
+# Seconds; CI may raise them through the environment (build/in-tools.sh
+# passes them on), the defaults are what a local run uses.
+FIRST_BOOT_TIMEOUT=${FIRST_BOOT_TIMEOUT:-1500}   # includes pulling the container images
+REBOOT_TIMEOUT=${REBOOT_TIMEOUT:-600}
 OVMF_CODE=/usr/share/edk2/ovmf/OVMF_CODE.fd
 OVMF_VARS=/usr/share/edk2/ovmf/OVMF_VARS.fd
 

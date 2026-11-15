@@ -31,6 +31,8 @@ task disk:package  # compressed disk image and checksums in .build/dist/
 
 `task test:boot` prints one line per run and keeps the serial console and a diagnosis of every failed run under `.build/boot/`. The first boot of each run pulls the container images from their registries and takes several minutes.
 
+The VM tests (`task test:boot`, `task test:update`, `task test:data-disk`) also run on GitHub Actions, in parallel jobs, through the workflow `vm-tests`: on a pull request once it carries the label `vm-tests` (and again on every push to it), after each merge to `develop` that changes `image/`, `build/` or `tests/boot/`, and by hand under **Actions → vm-tests → Run workflow**. The job summary lists every result; the results files and serial consoles are attached to the run.
+
 ## Running the appliance
 
 - [Updates and rollback](updates.md) — how the appliance updates itself and returns to the previous release

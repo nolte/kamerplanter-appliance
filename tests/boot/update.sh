@@ -31,7 +31,7 @@ CHANNEL=$REGISTRY/kamerplanter-appliance:stable
 REGISTRY_IMAGE=docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
 # A healthy release passes in about 2 minutes; the budget leaves room
 # for a slow host and bounds how long u5 and u6 wait for a broken one.
-HEALTH_MINUTES=5
+HEALTH_MINUTES=${HEALTH_MINUTES:-5}
 # With a data disk the volume is bound from it onto the same path
 # (data_disk_places in image/rootfs/usr/lib/kamerplanter/env.sh), so this path
 # and the one in the broken variant hold with and without one.
@@ -87,11 +87,19 @@ publish() {
 # and old is older than next.
 declare -A VARIANT_VERSION=([next]=1.1.0 [wrong]=1.2.0 [broken]=1.3.0 [old]=1.0.0)
 
+declare -A BUILT=()
 build_variant() {
+    BUILT[$1]=1
     podman build --quiet -t "localhost/kamerplanter-appliance:test-$1" \
         --build-arg BASE="$BASE" --build-arg VARIANT="$1" --build-arg VERSION="${VARIANT_VERSION[$1]}" \
         tests/boot/variants >/dev/null
 }
+
+# need_variant <variant>: builds it unless this run already did (in the
+# window step), so that a step run without the window step, as in a CI job of
+# `install auto` or `install uefi`, never takes a variant left over from an
+# earlier run on another image.
+need_variant() { [ -n "${BUILT[$1]-}" ] || build_variant "$1"; }
 
 # The guest reaches the registry under the same name, trusts the run's key
 # for it, and gets a short health budget and an immediate window spread.
@@ -340,11 +348,28 @@ auto_rollback() {
     fi
 }
 
-step_auto() { auto_rollback u5 u1 bios; stop_vm; }
+# Continues on the VM the steps before it left running; right after the
+# install step (CI runs `install auto` as a job of its own) it starts the
+# installed disk itself, as the window step does.
+step_auto() {
+    if ! vm_alive; then
+        [ -f "$OUT/u1.qcow2" ] || { record u5 SKIP - "needs the disk of the install step"; return 1; }
+        setup_tools
+        registry_up
+        start_vm u5 bios virtio-scsi virtio on "$OUT/u1.qcow2"
+        wait_up "$REBOOT_TIMEOUT" >/dev/null || { fail u5 "appliance did not come up"; return 1; }
+        prepare_guest
+    fi
+    need_variant broken || { record u5 FAIL - "build of variant broken failed"; return 1; }
+    auto_rollback u5 u1 bios
+    stop_vm
+}
 
 # The same on UEFI, from a fresh install of the update disk.
 step_uefi() {
     [ -f "$DISK" ] || { record u6 SKIP - "needs the disk of the install step"; return 1; }
+    setup_tools
+    need_variant broken || { record u6 FAIL - "build of variant broken failed"; return 1; }
     registry_up
     new_overlay "$OUT/u6.qcow2"
     start_vm u6 uefi virtio-scsi virtio on "$OUT/u6.qcow2"

@@ -113,7 +113,13 @@ avc_signatures() {
 
 # new_avcs NAME: the denials of this boot that the boot without a data disk
 # did not have; written to NAME.avc.txt.
+# Without the baseline every check would pass unseen: a run that leaves out
+# the step none (CI splits the steps into jobs) reports that as a denial.
 new_avcs() {
+    if [ ! -f "$WORK/avc-baseline.txt" ]; then
+        echo "no baseline of SELinux denials: run the step none before" | tee "$OUT/$1.avc.txt"
+        return
+    fi
     avc_signatures | comm -23 - "$WORK/avc-baseline.txt" >"$OUT/$1.avc.txt"
     cat "$OUT/$1.avc.txt"
 }

@@ -1,0 +1,408 @@
+name: vm-tests
+
+# Runs the QEMU VM tests of tests/boot/ on GitHub-hosted runners: the boot
+# matrix (`task test:boot`), the update and rollback chains (`task
+# test:update`) and the data-disk chains (`task test:data-disk`). The scripts
+# are the ones the Taskfile targets run, in the same tool container
+# (build/in-tools.sh), so a local run and a run here test the same way.
+#
+# One job builds the system image and the development disk once; every test
+# job loads exactly that image, so all of them test the same digest. The
+# ports of a test VM are fixed (10022, 18000, 18080), so each job runs one VM
+# at a time; chains whose steps share a running VM or a disk stay in one job.
+#
+# Not a required check (like disk-image): on a pull request it runs only with
+# the label `vm-tests`, after a merge to develop when the image, the build or
+# the tests change, and by hand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "Which tests to run"
+        required: true
+        type: choice
+        default: all
+        options: [all, boot, update, data-disk]
+  pull_request:
+    branches: [develop]
+    types: [labeled, synchronize]
+  push:
+    branches: [develop]
+    paths:
+      - 'image/**'
+      - 'build/**'
+      - 'tests/boot/**'
+      - '.github/workflows/vm-tests.yml'
+
+permissions:
+  contents: read
+
+# A newer push to a pull request or a new dispatch on the same ref supersedes
+# the running tests. Adding any other label to the pull request gets a group
+# of its own, so it neither starts tests nor cancels running ones. Every merge
+# to develop gets a group of its own as well and is never cancelled, so each
+# merge has a result.
+concurrency:
+  group: >-
+    vm-tests-${{ github.event_name }}-${{ github.ref }}-${{
+    (github.event_name == 'push' && github.sha) ||
+    (github.event.action == 'labeled' && github.event.label.name != 'vm-tests' && github.run_id) ||
+    'latest' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  TOOLS_IMAGE: kamerplanter-appliance-tools:poc
+  IMAGE_REF: localhost/kamerplanter-appliance:poc
+
+jobs:
+  build:
+    name: build
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'vm-tests') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'vm-tests'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Disk before the run
+        run: df -h /
+
+      - name: Build the tool container
+        run: docker build -t "$TOOLS_IMAGE" -f build/tools.Containerfile build
+
+      # The same command as `task image:build`: a development build, labelled
+      # with the commit that is built.
+      - name: Build the system image
+        run: |
+          set -euo pipefail
+          # The tool container writes as root; the directory stays the
+          # runner's, so the archives can be written next to its files.
+          mkdir -p .build/ci
+          revision=$(git rev-parse HEAD)
+          created=$(TZ=UTC0 git show -s --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd HEAD)
+          build/in-tools.sh podman build \
+            --build-arg REVISION="$revision" --build-arg CREATED="$created" \
+            --annotation org.opencontainers.image.version=dev \
+            --annotation org.opencontainers.image.revision="$revision" \
+            --annotation org.opencontainers.image.created="$created" \
+            -t "$IMAGE_REF" image
+
+      - name: Build the development disk
+        run: build/in-tools.sh build/disk.sh "$IMAGE_REF"
+
+      - name: Pack the tool container, the system image and the disk
+        run: |
+          set -euo pipefail
+          docker save "$TOOLS_IMAGE" | zstd -T0 -3 -q -o .build/ci/tools.tar.zst
+          build/in-tools.sh podman save -o .build/ci/system-image.tar "$IMAGE_REF"
+          zstd -T0 -3 -q --rm .build/ci/system-image.tar
+          zstd -T0 -3 -q .build/disk.raw -o .build/ci/disk.raw.zst
+          ls -lh .build/ci
+
+      - name: Record the image under test
+        run: |
+          set -euo pipefail
+          id=$(build/in-tools.sh podman image inspect --format '{{.Id}}' "$IMAGE_REF")
+          {
+            echo "### Image under test"
+            echo
+            echo "- commit: \`$(git rev-parse HEAD)\`"
+            echo "- \`$IMAGE_REF\` image ID: \`$id\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # Run-scoped intermediates for the test jobs below; never published.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-tools-image
+          path: .build/ci/tools.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-system-image
+          path: .build/ci/system-image.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vm-disk
+          path: .build/ci/disk.raw.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Disk after the run
+        if: always()
+        run: df -h /
+
+  # tests/boot/run.sh: runs 7 and 8 need the running VM of run 1, run 5 its
+  # disk and run 6 the running VM of run 5, so they stay with run 1.
+  boot:
+    name: boot (${{ matrix.name }})
+    needs: build
+    if: contains(fromJSON('["all", "boot"]'), inputs.suites || 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: runs 1 7 8 5 6
+            id: run1
+            runs: 1 7 8 5 6
+          - name: run 2
+            id: run2
+            runs: '2'
+          - name: run 3
+            id: run3
+            runs: '3'
+          - name: run 4
+            id: run4
+            runs: '4'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Give the runner user access to KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-tools-image
+          path: .build/ci
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-disk
+          path: .build/ci
+
+      - name: Load the tool container and the disk
+        run: |
+          set -euo pipefail
+          zstd -dc .build/ci/tools.tar.zst | docker load
+          zstd -d -q --sparse --rm .build/ci/disk.raw.zst -o .build/disk.raw
+          rm -f .build/ci/tools.tar.zst
+          df -h /
+
+      - name: Run the boot tests
+        env:
+          RUNS: ${{ matrix.runs }}
+        run: |
+          read -ra args <<<"$RUNS"
+          build/in-tools.sh tests/boot/run.sh "${args[@]}"
+
+      - name: Check the results
+        if: always()
+        run: tests/boot/results.sh .build/boot/results.tsv
+
+      # Results and serial consoles only: never the SSH key next to them.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: vm-results-boot-${{ matrix.id }}
+          path: |
+            .build/boot/*.tsv
+            .build/boot/*.serial.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # tests/boot/update.sh: window, signature, forward and manual continue on
+  # one running VM; auto and uefi need only the installed disk.
+  update:
+    name: update (${{ matrix.name }})
+    needs: build
+    if: contains(fromJSON('["all", "update"]'), inputs.suites || 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: window to manual
+            id: a
+            steps: install window signature forward manual
+          - name: auto
+            id: b
+            steps: install auto
+          - name: uefi
+            id: c
+            steps: install uefi
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Give the runner user access to KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-tools-image
+          path: .build/ci
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-system-image
+          path: .build/ci
+
+      - name: Load the tool container and the system image
+        run: |
+          set -euo pipefail
+          zstd -dc .build/ci/tools.tar.zst | docker load
+          zstd -d -q --rm .build/ci/system-image.tar.zst
+          build/in-tools.sh podman load -q -i .build/ci/system-image.tar
+          build/in-tools.sh podman image exists "$IMAGE_REF"
+          rm -f .build/ci/tools.tar.zst .build/ci/system-image.tar
+          df -h /
+
+      - name: Run the update tests
+        env:
+          STEPS: ${{ matrix.steps }}
+        run: |
+          read -ra args <<<"$STEPS"
+          build/in-tools.sh tests/boot/update.sh "${args[@]}"
+
+      - name: Check the results
+        if: always()
+        run: tests/boot/results.sh .build/boot/update-results.tsv
+
+      # Results and serial consoles only: the run's signing keys and their
+      # passphrases lie in .build/update and stay there.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: vm-results-update-${{ matrix.id }}
+          path: |
+            .build/boot/*.tsv
+            .build/boot/*.serial.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # tests/boot/data-disk.sh: every chain builds the release and its disk
+  # (build) and takes the baseline of SELinux denials (none) itself; move
+  # continues on the running VM of none; replace, missing, downgrade and backup
+  # need the data disk and the login of data. downgrade boots the development
+  # disk of the build job.
+  data-disk:
+    name: data-disk (${{ matrix.name }})
+    needs: build
+    if: contains(fromJSON('["all", "data-disk"]'), inputs.suites || 'all')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: move
+            id: move
+            steps: build none move
+            dev-disk: false
+          - name: data to backup
+            id: data
+            steps: build none data replace missing backup
+            dev-disk: false
+          - name: downgrade
+            id: downgrade
+            steps: build none data downgrade
+            dev-disk: true
+          - name: luks
+            id: luks
+            steps: build none luks
+            dev-disk: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Give the runner user access to KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-tools-image
+          path: .build/ci
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vm-system-image
+          path: .build/ci
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: matrix.dev-disk
+        with:
+          name: vm-disk
+          path: .build/ci
+
+      - name: Load the tool container, the system image and the disk
+        run: |
+          set -euo pipefail
+          zstd -dc .build/ci/tools.tar.zst | docker load
+          zstd -d -q --rm .build/ci/system-image.tar.zst
+          build/in-tools.sh podman load -q -i .build/ci/system-image.tar
+          build/in-tools.sh podman image exists "$IMAGE_REF"
+          if [ -f .build/ci/disk.raw.zst ]; then
+            zstd -d -q --sparse --rm .build/ci/disk.raw.zst -o .build/disk.raw
+          fi
+          rm -f .build/ci/tools.tar.zst .build/ci/system-image.tar
+          df -h /
+
+      - name: Run the data-disk tests
+        env:
+          STEPS: ${{ matrix.steps }}
+        run: |
+          read -ra args <<<"$STEPS"
+          build/in-tools.sh tests/boot/data-disk.sh "${args[@]}"
+
+      - name: Check the results
+        if: always()
+        run: tests/boot/results.sh .build/boot/data-disk-results.tsv
+
+      # Results and serial consoles only: the login token and the disks lie
+      # in .build/data-disk and stay there.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: vm-results-data-disk-${{ matrix.id }}
+          path: |
+            .build/boot/*.tsv
+            .build/boot/*.serial.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Disk after the run
+        if: always()
+        run: df -h /
+
+  report:
+    name: report
+    needs: [build, boot, update, data-disk]
+    if: always() && needs.build.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: vm-results-*
+          path: results
+
+      - name: Write the results into the summary
+        run: tests/boot/results.sh --summary results >>"$GITHUB_STEP_SUMMARY"
