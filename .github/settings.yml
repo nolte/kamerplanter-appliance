@@ -47,3 +47,11 @@ branches:
       enforce_admins: true
       required_linear_history: true
       restrictions: null
+
+# Repository labels on top of the shared set (probot/settings merges label
+# lists from `_extends` by name). `vm-tests` starts .github/workflows/vm-tests.yml
+# on a pull request.
+labels:
+  - name: vm-tests
+    color: "#5319e7"
+    description: Run the QEMU boot, update and data-disk tests on GitHub Actions.
