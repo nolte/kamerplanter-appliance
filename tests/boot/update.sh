@@ -218,7 +218,9 @@ step_window() {
     # shellcheck disable=SC2016 # expands in the guest
     features=$(guest 'root=$(bootc status --format=json | jq -r ".status.rollback.ostree | \"/sysroot/ostree/deploy/\(.stateroot)/deploy/\(.checksum).\(.deploySerial)\"")
         echo "$root"; grep -x backup-locations "$root/usr/lib/kamerplanter/features"' 2>&1)
-    if [ "$(tail -n1 <<<"$features")" = backup-locations ]; then
+    if [ "$(guest "bootc status --format=json | jq -r '.status.rollback.ostree.checksum // empty'")" = "" ]; then
+        record u2-features SKIP - "no rollback deployment: needs the healthy update of the window step"
+    elif [ "$(tail -n1 <<<"$features")" = backup-locations ]; then
         record u2-features PASS - "the rollback deployment's features file is readable under /sysroot ($(head -n1 <<<"$features"))"
     else
         record u2-features FAIL - "the rollback deployment's features file is not readable: ${features//$'\n'/; }"
