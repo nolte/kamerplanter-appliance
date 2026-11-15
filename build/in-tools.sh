@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 exec docker run --rm --privileged \
     --device /dev/kvm \
     -e DISK_SIZE -e DISK -e DISK_OUT -e IMAGE_REF \
+    -e FIRST_BOOT_TIMEOUT -e REBOOT_TIMEOUT -e HEALTH_MINUTES \
     -v /dev:/dev \
     -v kamerplanter-appliance-containers:/var/lib/containers \
     -v /var/tmp \

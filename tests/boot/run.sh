@@ -14,8 +14,10 @@ DISK=$(realpath "${DISK:-.build/disk.raw}")
 OUT=.build/boot
 RESULTS=$OUT/results.tsv
 KEY=$OUT/id_ed25519
-FIRST_BOOT_TIMEOUT=1500   # includes pulling the container images
-REBOOT_TIMEOUT=600
+# Seconds; CI may raise them through the environment (build/in-tools.sh
+# passes them on), the defaults are what a local run uses.
+FIRST_BOOT_TIMEOUT=${FIRST_BOOT_TIMEOUT:-1500}   # includes pulling the container images
+REBOOT_TIMEOUT=${REBOOT_TIMEOUT:-600}
 OVMF_CODE=/usr/share/edk2/ovmf/OVMF_CODE.fd
 OVMF_VARS=/usr/share/edk2/ovmf/OVMF_VARS.fd
 
@@ -32,10 +34,20 @@ record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" | tee -a "$RESULTS"; }
 
 new_overlay() { qemu-img create -q -f qcow2 -F raw -b "$DISK" "$1" 20G; }
 
+# Extras for the next start_vm, empty for the runs here:
+#   VM_DISKS        "SERIAL FILE" per further qcow2 disk, attached as
+#                   virtio-blk with that serial, so the guest names it
+#                   /dev/disk/by-id/virtio-SERIAL (at most 20 characters)
+#   VM_CREDENTIALS  "NAME VALUE" per further systemd credential, as the SSH
+#                   key is passed; VALUE is taken as text, or as base64 when
+#                   NAME is written binary:NAME
+#   VM_MONITOR      a TCP port on 127.0.0.1 for QEMU's monitor (monitor below)
+VM_DISKS=() VM_CREDENTIALS=() VM_MONITOR=
+
 # start_vm <name> <firmware: bios|uefi> <disk: virtio-scsi|lsi|virtio-blk>
 #          <net: virtio|e1000> <internet: on|off> <overlay>
 start_vm() {
-    local name=$1 fw=$2 disk=$3 net=$4 internet=$5 overlay=$6
+    local name=$1 fw=$2 disk=$3 net=$4 internet=$5 overlay=$6 extra serial file i=1
     local args=(
         -machine pc,accel=kvm -cpu host -smp 2 -m 4096 -display none
         -serial "file:$OUT/$name.serial.log"
@@ -44,6 +56,18 @@ start_vm() {
         -smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$PUBKEY_B64"
         -drive "if=none,id=d0,file=$overlay,format=qcow2"
     )
+    for extra in "${VM_CREDENTIALS[@]}"; do
+        case $extra in
+            binary:*) extra=${extra#binary:}; args+=(-smbios "type=11,value=io.systemd.credential.binary:${extra%% *}=${extra#* }") ;;
+            *) args+=(-smbios "type=11,value=io.systemd.credential:${extra%% *}=${extra#* }") ;;
+        esac
+    done
+    for extra in "${VM_DISKS[@]}"; do
+        read -r serial file <<<"$extra"
+        args+=(-drive "if=none,id=x$i,file=$file,format=qcow2" -device "virtio-blk-pci,drive=x$i,id=xdev$i,serial=$serial")
+        i=$((i + 1))
+    done
+    [ -z "$VM_MONITOR" ] || args+=(-monitor "tcp:127.0.0.1:$VM_MONITOR,server,nowait")
     if [ "$fw" = uefi ]; then
         cp "$OVMF_VARS" "$OUT/$name.vars.fd"
         args+=(-drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
@@ -62,6 +86,18 @@ start_vm() {
     esac
     rm -f "$OUT/vm.pid"
     qemu-system-x86_64 "${args[@]}"
+}
+
+# monitor COMMAND...: runs each command in QEMU's monitor (VM_MONITOR); fails
+# when one reports an error. QEMU runs in /, so paths in them are absolute.
+monitor() {
+    local reply
+    exec 3<>"/dev/tcp/127.0.0.1/$VM_MONITOR" || return 1
+    printf '%s\n' "$@" >&3
+    sleep 2
+    reply=$(timeout 2 cat <&3 | tr -d '\033' | grep -ao 'Error: [^(]*')
+    exec 3>&-
+    [ -z "$reply" ] || { echo "$reply" >&2; return 1; }
 }
 
 vm_alive() { [ -f "$OUT/vm.pid" ] && kill -0 "$(cat "$OUT/vm.pid")" 2>/dev/null; }
@@ -95,6 +131,11 @@ diagnose() {
         echo "== containers"; guest podman ps -a
         echo "== journal errors"; guest "journalctl -b -p err --no-pager | tail -n 60"
         echo "== block devices"; guest lsblk
+        echo "== boots"; guest "journalctl --list-boots --no-pager | tail -n 5"
+        echo "== bootc status"; guest "bootc status --format humanreadable"
+        echo "== previous boot: finalize and shutdown"
+        guest "journalctl -b -1 --no-pager -o short-precise -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service"
+        guest "journalctl -b -1 --no-pager -o short-precise | tail -n 120"
     } >"$OUT/$1.diagnose.txt" 2>&1
 }
 
@@ -227,7 +268,8 @@ run_2() { first_boot run2 uefi virtio-scsi virtio; stop_vm; }
 run_3() { first_boot run3 bios lsi e1000; stop_vm; }
 run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
 
-# tests/boot/update.sh sources this file for the helpers above.
+# tests/boot/update.sh and tests/boot/data-disk.sh source this file for the
+# helpers above.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 [ -f "$DISK" ] || { echo "disk image $DISK not found; run 'task disk:build' first" >&2; exit 1; }
