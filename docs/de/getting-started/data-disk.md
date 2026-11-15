@@ -53,7 +53,7 @@ Benenne sie auf einem dieser Wege:
 
     Das schreibt `/var/lib/kamerplanter/disks/naming.env` (root, 0600), die du auch von Hand als `DATA_DISK=…` und `BACKUP_DISK=…` bearbeiten kannst. `disks name backup none` entfernt eine Benennung.
 
-- **In deiner Datei** `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…` oder `BACKUP_DISK=…`, aber nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger, und wer die Platte in den Händen hatte, kann sie geändert haben. Deshalb ignoriert die Appliance dann `DATA_DISK`, `BACKUP_DISK` und ihre `…_FORCE` in dieser Datei und sagt das in `systemctl status kamerplanter-data-disk`; benenne den Sicherungs-Datenträger dann mit `disks name`.
+- **In deiner Datei** `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…` oder `BACKUP_DISK=…`, aber nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger, und wer die Platte in den Händen hatte, kann sie geändert haben. Deshalb ignoriert die Appliance dann `DATA_DISK`, `BACKUP_DISK` und ihre `…_FORCE` in dieser Datei und sagt das in `systemctl status kamerplanter-data-disk`; benenne den Sicherungs-Datenträger dann mit `disks name`. Kopiert die Appliance deine Datei auf den Datenträger, kommentiert sie diese Zeilen dort aus, und die Konfigurationsprüfung prüft sie in der Datei auf dem Datenträger nicht, sodass sie die Dienste nie angehalten lassen.
 
 - **Als System-Credential** `kamerplanter.data-disk` oder `kamerplanter.backup-disk` vom Provisioner, vor dem ersten Start. Siehe [Provisionierung](#provisioning).
 

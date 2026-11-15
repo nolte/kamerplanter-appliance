@@ -52,6 +52,17 @@ disk_path_ok() {
     [[ $1 =~ $re ]] && [ "${1##*/}" != . ] && [ "${1##*/}" != .. ]
 }
 
+# user_file_trusted [RECORD]: whether the user file
+# /etc/kamerplanter/kamerplanter.env may name disks (DATA_DISK, BACKUP_DISK
+# and their *_FORCE): only while it lies on the system disk, since no data
+# disk is set up (RECORD, by default data_disk_record below, is missing) and
+# nothing is mounted onto /etc/kamerplanter. On a data disk it may have been
+# changed elsewhere, so the disk service ignores those keys there, and the
+# configuration check does not check them.
+user_file_trusted() {
+    [ ! -e "${1:-$data_disk_record}" ] && ! mountpoint -q /etc/kamerplanter
+}
+
 # The data disk (spec/distribution-requirements/ E6, E9). It is set up when
 # its record exists and is mounted at data_disk_mount. Each entry of
 # data_disk_places, "DIRECTORY PATH", is a directory on the disk that the

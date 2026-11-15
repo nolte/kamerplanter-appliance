@@ -53,7 +53,7 @@ Name it in one of these ways:
 
     This writes `/var/lib/kamerplanter/disks/naming.env` (root, 0600), which you may also edit by hand as `DATA_DISK=…` and `BACKUP_DISK=…`. `disks name backup none` removes a naming.
 
-- **In your file** `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…` or `BACKUP_DISK=…`, but only while no data disk is set up. Once one is, that file lies on the data disk, and anyone who has had the disk in their hands could have changed it. So the appliance then ignores `DATA_DISK`, `BACKUP_DISK`, and their `…_FORCE` in that file and says so in `systemctl status kamerplanter-data-disk`; name the backup disk with `disks name` instead.
+- **In your file** `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…` or `BACKUP_DISK=…`, but only while no data disk is set up. Once one is, that file lies on the data disk, and anyone who has had the disk in their hands could have changed it. So the appliance then ignores `DATA_DISK`, `BACKUP_DISK`, and their `…_FORCE` in that file and says so in `systemctl status kamerplanter-data-disk`; name the backup disk with `disks name` instead. When the appliance copies your file onto the data disk, it comments these lines out there, and the configuration check doesn't check them in the file on the disk, so they never keep the services stopped.
 
 - **As a system credential** `kamerplanter.data-disk` or `kamerplanter.backup-disk` from the provisioner, before the first boot. See [Provisioning](#provisioning).
 

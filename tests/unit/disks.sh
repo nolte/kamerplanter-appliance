@@ -557,6 +557,124 @@ expect "record: an emptied field is dropped" "" "$(grep '^IGNORED_NAME' "$data_d
 move_write --new STATE=copying
 expect "record: a new move starts from an empty record" "copying||" "$(move_get STATE)|$(move_get UUID)|$(move_get REASON)"
 
+# replace is checked step by step: in a condition, where set -e does not
+# apply, a file it cannot write is a failure, and the file stays as it was.
+if [ "$(id -u)" != 0 ]; then
+    ro=$(mktemp -d "$work/ro.XXXXXX")
+    echo old >"$ro/f"
+    chmod 0500 "$ro"
+    expect "replace: a file that cannot be replaced fails, also in a condition" "failed|old" \
+        "$(if echo new | replace "$ro/f" 2>/dev/null; then echo replaced; else echo failed; fi)|$(cat "$ro/f")"
+    chmod 0700 "$ro"
+fi
+
+# The user file copied onto the data disk names no disk there: its naming is
+# commented out, so the disk service has nothing to report as ignored.
+user_on_disk() {  # user_on_disk: the user file lay_out puts on a new disk, as load reads it, and its comments
+    (
+        sb=$(mktemp -d "$work/layout.XXXXXX")
+        mnt=$sb/disk
+        mkdir -p "$mnt" "$sb/sys/etc" "$sb/sys/pinned" "$sb/bin"
+        data_disk_places=("etc $sb/sys/etc" "pinned $sb/sys/pinned")
+        printf 'DATA_DISK=/dev/disk/by-id/virtio-a\nDATA_DISK_FORCE=1\n  BACKUP_DISK=/dev/disk/by-id/virtio-b\r\nBACKUP_DISK_FORCE=0\nUPDATE_WINDOW=04:00\n' \
+            >"$sb/sys/etc/kamerplanter.env"
+        # Owner root is what lay_out enforces; as any user it is left out.
+        printf '#!/bin/sh\nexit 0\n' >"$sb/bin/chown"
+        chmod 0755 "$sb/bin/chown"
+        PATH=$sb/bin:$PATH
+        install() {
+            local args=()
+            while [ $# -gt 0 ]; do case $1 in -o | -g) shift 2 ;; *) args+=("$1"); shift ;; esac; done
+            command install "${args[@]}"
+        }
+        mountpoint() { return 1; }
+        lay_out || echo "lay_out failed"
+        load "$mnt/etc/kamerplanter.env"
+        printf '%s|%s|%s|%s|%s|%s' "$(get DATA_DISK)" "$(get DATA_DISK_FORCE)" "$(get BACKUP_DISK)" "$(get BACKUP_DISK_FORCE)" \
+            "$(get UPDATE_WINDOW)" "$(grep -c '^# .*_DISK' "$mnt/etc/kamerplanter.env")"
+    )
+}
+expect "lay_out: the user file on a new disk names no disk, the rest is kept" "||||04:00|4" "$(user_on_disk)"
+nfile=$(mktemp "$work/user.XXXXXX")
+printf 'UPDATE_WINDOW=04:00\n' >"$nfile"
+before=$(stat -c %i "$nfile")
+unname_user_file "$nfile"
+expect "unname: a file without disk naming is not rewritten" "$before|UPDATE_WINDOW=04:00" "$(stat -c %i "$nfile")|$(cat "$nfile")"
+
+# A move binds the disk only once its record says moved. move_in runs with
+# set -e in effect, so a record that cannot be written stops the start before
+# anything is bound (it ran in a condition before, and went on to place).
+start_calls=$work/start-calls
+start_move() {  # start_move CASE: cmd_start data on a disk receiving a move: the steps after the copy (start_calls), the record, the naming left in the copied user file, and the exit status
+    : >"$start_calls"
+    (
+        set -e
+        sb=$(mktemp -d "$work/start.XXXXXX")
+        records=$sb/records data_disk_move=$sb/records/move.env lock=$sb/lock
+        mkdir -p "$records" "$sb/sys/etc" "$sb/sys/pinned" "$sb/disk"
+        printf 'DATA_DISK=/dev/disk/by-id/virtio-a\nUPDATE_WINDOW=04:00\n' >"$sb/sys/etc/kamerplanter.env"
+        echo s >"$sb/sys/etc/secrets.env"
+        data_disk_places=("etc $sb/sys/etc" "pinned $sb/sys/pinned")
+        touch "$records/data.env"
+        move_write --new STATE=copying UUID=u NAMED=/dev/disk/by-id/virtio-a
+        # cmd_start sources /usr/lib/kamerplanter/env.sh, sourced here already.
+        .() { :; }
+        eval "real_role_vars() $(declare -f role_vars | tail -n +2)"
+        eval "real_replace() $(declare -f replace | tail -n +2)"
+        role_vars() { real_role_vars "$@"; mnt=$sb/disk; }
+        naming() { name='' conflict='' other_name='' force=0; }
+        forget_key() { :; }
+        supplied_keys() { supplied=(); }
+        find_and_mount() { :; }
+        services_running() { :; }
+        mountpoint() { return 1; }
+        log_event() { :; }
+        report() { :; }
+        undo() { :; }
+        die() { echo "die: $1"; exit 1; }
+        place() { echo placed >>"$start_calls"; }
+        refresh_window() { :; }
+        request_check() { echo check >>"$start_calls"; }
+        case $1 in
+            record-fails) replace() { if [ "$1" = "$data_disk_move" ]; then cat >/dev/null; return 1; fi; real_replace "$@"; } ;;
+            no-space) stat() { if [ "$1" = -f ]; then echo '1 * 1'; else command stat "$@"; fi; } ;;
+        esac
+        cmd_start data >/dev/null 2>&1
+        printf '%s|%s' "$(move_get STATE)" "$(grep -c '^DATA_DISK=' "$sb/disk/etc/kamerplanter.env" 2>/dev/null)"
+    )
+    printf '|%s|%s' "$?" "$(paste -sd, "$start_calls")"
+}
+expect "move: copied and recorded as moved, then placed and checked; the copied user file names no disk" \
+    "moved|0|0|placed,check" "$(start_move ok)"
+expect "move: the record cannot say moved: the start fails, nothing is placed" "|1|" "$(start_move record-fails)"
+expect "move: abandoned for lack of space: the services start, nothing is placed" "failed||0|" "$(start_move no-space)"
+
+# The configuration check checks the disk naming of the user file only where
+# the disk service reads it: not on the data disk.
+# shellcheck source=tests/unit/lib/sandbox.sh
+. "$root/tests/unit/lib/sandbox.sh"
+configure_with() {  # configure_with DATA_DISK_SET_UP USER_FILE: the exit status of configure in a sandbox
+    (
+        sb=$(mktemp -d "$work/configure.XXXXXX")
+        sandbox_install "$sb" "$root/image/rootfs" /usr/libexec/kamerplanter/configure /usr/lib/kamerplanter/env.sh
+        mkdir -p "$sb/usr/share/kamerplanter" "$sb/etc/kamerplanter" "$sb/var/lib/kamerplanter/disks" \
+            "$sb/var/lib/kamerplanter/pinned" "$sb/var/mnt/kamerplanter-data" \
+            "$sb/var/lib/containers/storage/volumes/arangodb_data" "$sb/var/lib/containers/storage/volumes/valkey_data"
+        cp "$root/image/rootfs/usr/share/kamerplanter/kamerplanter.env" "$sb/usr/share/kamerplanter/"
+        printf '%s\n' "$2" >"$sb/etc/kamerplanter/kamerplanter.env"
+        MOUNTED=
+        if [ "$1" = yes ]; then touch "$sb/var/lib/kamerplanter/disks/data.env"; MOUNTED=1; fi
+        sandbox_mounts
+        bash "$sb/usr/libexec/kamerplanter/configure" >"$sb/out" 2>&1
+        echo "$?"
+    )
+}
+bad=$'DATA_DISK=/dev/sdb\nDATA_DISK_FORCE=yes\nBACKUP_DISK=/dev/sdc'
+expect "configure: no data disk, a valid naming passes" 0 "$(configure_with no 'DATA_DISK=/dev/disk/by-id/virtio-a')"
+expect "configure: no data disk, an invalid naming keeps the services stopped" 1 "$(configure_with no "$bad")"
+expect "configure: user file on the data disk, its naming is not checked" 0 "$(configure_with yes "$bad")"
+expect "configure: user file on the data disk, other settings are still checked" 1 "$(configure_with yes 'UPDATE_WINDOW=25:00')"
+
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
     exit 1

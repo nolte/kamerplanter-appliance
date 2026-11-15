@@ -144,13 +144,17 @@ fi
 [[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]*$ ]] ||
     fail "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
 # Checked for their form only; kamerplanter-data-disk.service and
-# kamerplanter-backup-disk.service decide whether a named disk is used.
-for key in DATA_DISK BACKUP_DISK; do
-    value=$(get "$key")
-    [ -z "$value" ] || disk_path_ok "$value" ||
-        fail "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path"
-    [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
-done
+# kamerplanter-backup-disk.service decide whether a named disk is used. Not
+# checked when the user file lies on the data disk: the disk service ignores
+# them there (user_file_trusted), so they cannot keep the services stopped.
+if user_file_trusted; then
+    for key in DATA_DISK BACKUP_DISK; do
+        value=$(get "$key")
+        [ -z "$value" ] || disk_path_ok "$value" ||
+            fail "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path"
+        [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
+    done
+fi
 case $(get ARANGODB_PASSWORD) in '' | rootpassword | changeme) fail "ARANGODB_PASSWORD is empty or a known default" ;; esac
 
 for key in "${!pinned[@]}"; do

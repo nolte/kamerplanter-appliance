@@ -28,8 +28,10 @@
 # disk is set up: it then lies on the system disk. Once a data disk is set
 # up, the user file lies on that disk, which may have been changed elsewhere
 # (a USB stick), so its DATA_DISK, BACKUP_DISK and *_FORCE are ignored, and
-# the journal says where to set them instead. Nothing else is ever formatted
-# or adopted, also not a disk that only carries the label.
+# the journal says where to set them instead; where the user file is copied
+# onto the disk, they are commented out (unname_user_file), so a naming that
+# set the disk up is not reported at every start. Nothing else is ever
+# formatted or adopted, also not a disk that only carries the label.
 #
 # Set-up. A named disk that is not set up yet is
 #   - adopted when it carries an ext4 file system with its label already,
@@ -634,13 +636,17 @@ log_event() {  # log_event EVENT DETAIL
 }
 
 # Replaces a file with what stdin delivers, durably (as configure does).
+# Checked step by step, since it is also called where set -e does not apply
+# (lay_out): a failed step leaves the file as it was, and fails.
 replace() {
     local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
-    cat >"$tmp"
-    sync "$tmp"
-    mv "$tmp" "$1"
-    sync "$(dirname "$1")"
+    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
+    if cat >"$tmp" && sync "$tmp" && mv "$tmp" "$1"; then
+        sync "$(dirname "$1")"
+        return
+    fi
+    rm -f -- "$tmp"
+    return 1
 }
 
 # credential NAME: a system credential imported by the unit; empty without.
@@ -652,12 +658,9 @@ credential() {
     printf '%s' "${value%"${value##*[![:space:]]}"}"
 }
 
-# user_file_trusted: whether the user file may name disks: it lies on the
-# system disk, since no data disk is set up and nothing is mounted onto
-# /etc/kamerplanter (see Naming).
-user_file_trusted() {
-    [ ! -e "$records/data.env" ] && ! mountpoint -q /etc/kamerplanter
-}
+# user_file_trusted RECORD (whether the user file may name disks, see Naming)
+# is in /usr/lib/kamerplanter/env.sh: the configuration check decides with it
+# whether it checks those keys.
 
 # naming: sets name and force for this role, other_name for the other one,
 # and conflict when two sources name different disks. The sources, first
@@ -673,7 +676,7 @@ naming() {
     load "$naming_file"
     f_name=$(get "$key") f_force=$(get "${key}_FORCE") f_other=$(get "$other_key")
     load "$user"
-    if user_file_trusted; then
+    if user_file_trusted "$records/data.env"; then
         u_name=$(get "$key") u_force=$(get "${key}_FORCE") u_other=$(get "$other_key")
     else
         if [ -n "$(get "$key")" ]; then ignored+=("$key"); fi
@@ -1338,8 +1341,10 @@ undo() {
 # lay_out: creates the locations the disk lacks and enforces root as owner,
 # 0700 for the locations and 0600 for the files in etc and pinned (E9). A new
 # etc starts with the user file of the system disk, so settings made before
-# the first start (spec/distribution-requirements/ D11) stay in effect.
-# Sets created to the locations it created.
+# the first start (spec/distribution-requirements/ D11) stay in effect; its
+# disk naming is commented out there (unname_user_file). Sets created to the
+# locations it created. Called in a condition, where set -e does not apply,
+# so every step is checked.
 lay_out() {
     local place dir path d part parts new
     created=()
@@ -1359,10 +1364,32 @@ lay_out() {
         if [ "$dir" = etc ] && [ "$new" = 1 ] &&
             [ -f "$path/kamerplanter.env" ] && [ ! -L "$path/kamerplanter.env" ] && ! mountpoint -q "$path"; then
             install -m 0600 -o root -g root "$path/kamerplanter.env" "$mnt/etc/kamerplanter.env" || return 1
+            unname_user_file "$mnt/etc/kamerplanter.env" || return 1
         fi
         find "$mnt/$dir" -mindepth 1 -maxdepth 1 -type f -exec chown root:root {} + -exec chmod 0600 {} + || return 1
     done
     sync -f "$mnt"
+}
+
+# unname_user_file FILE: comments out the disk naming (naming_keys) in FILE,
+# the user file as it is copied onto the data disk, with a line that says
+# why. There it names no disk (see Naming), so left as it was, the disk
+# service would report it as ignored at every start. Nothing changes in a
+# file without such a line. Fails, leaving FILE as it was, when it cannot be
+# rewritten.
+unname_user_file() {
+    local re
+    re="^[[:space:]]*($(IFS='|'; echo "${naming_keys[*]}"))="
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    grep -Eq -- "$re" "$1" || return 0
+    awk -v re="$re" '
+        $0 ~ re {
+            if (!noted) print "# This file lies on the data disk, where it names no disk; name disks on the system disk: /usr/libexec/kamerplanter/disks name ROLE PATH [force]"
+            noted = 1
+            print "# " $0
+            next
+        }
+        { print }' "$1" | replace "$1"
 }
 
 # bind_places: binds every location onto its path. A path bound from the disk
@@ -1488,7 +1515,7 @@ move_write() {
         for f in "${move_fields[@]}"; do m[$f]=$(move_get "$f"); done
     fi
     for arg in "$@"; do m[${arg%%=*}]=$(shown "${arg#*=}"); done
-    install -d -m 0700 "$records"
+    install -d -m 0700 "$records" || return 1
     {
         echo "# The move of the data from the system disk onto the data disk,"
         echo "# kept by /usr/libexec/kamerplanter/disks; see its comments."
@@ -1634,8 +1661,12 @@ abandon_move() {
 
 # move_in: the copy of a move (state copying), after the disk is mounted and
 # before anything is bound. Empties the disk's locations and the release
-# marker, then copies, compares and syncs; records the move as moved. Fails
-# when the move is abandoned instead (abandon_move): then nothing is placed.
+# marker, then copies, compares and syncs, comments out the disk naming in
+# the copied user file (unname_user_file); records the move as moved. When
+# the move is abandoned instead (abandon_move), the record says failed, and
+# nothing is placed. Called as a command of its own, never in a condition, so
+# that set -e holds for every step, the record above all: the disk's
+# locations are bound only once it says moved (cmd_start).
 move_in() {
     local place dir path running entry need free
     running=$(services_running)
@@ -1659,27 +1690,31 @@ move_in() {
     fi
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
-        rm -rf -- "${mnt:?}/$entry" || { move_failed "the copy left on the disk could not be removed"; return 1; }
+        rm -rf -- "${mnt:?}/$entry" || { move_failed "the copy left on the disk could not be removed"; return 0; }
     done < <(top_entries "$mnt")
-    sync -f "$mnt" || { move_failed "the disk could not be synced"; return 1; }
+    sync -f "$mnt" || { move_failed "the disk could not be synced"; return 0; }
     need=$(move_bytes) || { undo; die "the size of the data on the system disk could not be determined; nothing is moved"; }
     # Room for the copy, and 10 % and 32 MiB more for the databases to go on.
     need=$((need * 11 / 10 + 32 * 1024 * 1024))
     free=$(($(stat -f -c '%a * %S' "$mnt")))
     if [ "$free" -lt "$need" ]; then
         abandon_move "the $label disk has $free bytes free, $need are needed"
-        return 1
+        return 0
     fi
     echo "copying the data of the system disk onto the $label disk"
     for place in "${data_disk_places[@]}"; do
         read -r dir path <<<"$place"
-        copy_place "$dir" "$path" || { move_failed "$path could not be copied"; return 1; }
+        copy_place "$dir" "$path" || { move_failed "$path could not be copied"; return 0; }
     done
-    sync -f "$mnt" || { move_failed "the copy could not be synced"; return 1; }
+    sync -f "$mnt" || { move_failed "the copy could not be synced"; return 0; }
     for place in "${data_disk_places[@]}"; do
         read -r dir path <<<"$place"
-        same_place "$dir" "$path" || { move_failed "the copy of $path differs from the original"; return 1; }
+        same_place "$dir" "$path" || { move_failed "the copy of $path differs from the original"; return 0; }
     done
+    if ! unname_user_file "$mnt/etc/kamerplanter.env" || ! sync -f "$mnt"; then
+        move_failed "the disk naming in the copy of the user file could not be commented out"
+        return 0
+    fi
     move_advance copied MOVED="$(now)"
     log_event move-copied "the data of the system disk is on the disk, compared and synced; the services start from it, and the copy on the system disk is kept until they passed the health check and UPDATE_BACKUP_KEEP_DAYS have passed"
     first_use=1
@@ -1949,7 +1984,15 @@ cmd_start() {
     if [ "$role" = data ]; then
         # The disk's locations are bound only once a move into them is
         # complete (E11).
-        if [ "$(move_get STATE)" = copying ]; then move_in || return 0; fi
+        if [ "$(move_get STATE)" = copying ]; then
+            move_in
+            # Abandoned: the services start from the copy on the system disk.
+            [ "$(move_get STATE)" != failed ] || return 0
+        fi
+        if [ "$(move_get STATE)" = copying ]; then
+            undo
+            die "the move onto the $label disk is recorded as copying still; its locations are not bound"
+        fi
         place
         refresh_window
         if [ "$(move_get STATE)" = moved ]; then request_check; fi
