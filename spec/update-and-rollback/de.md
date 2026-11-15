@@ -104,6 +104,7 @@ Leser: der Maintainer, der Updates umsetzt und veröffentlicht, und die Autoren 
 - **F2 MUSS [MUST]** D2 bis D6 auf einen manuellen Rollback genauso anwenden wie auf einen automatischen.
 - **F3 MUSS [MUST]** angeben, dass für einen Rollback nur die vorherige Version zur Verfügung steht.
 - **F4 MUSS [MUST]** verhindern, dass eine manuell zurückgerollte Appliance erneut auf dasselbe gescheiterte Release aktualisiert wird, wie E4 es für automatische Rollbacks verlangt.
+- **F5 MUSS [MUST]** einen manuellen Rollback ablehnen und den Grund melden, solange ein Datenträger eingerichtet ist (`spec/distribution-requirements/` E6) und die vorherige Version keine Datenträger unterstützt oder sich ihre Unterstützung nicht feststellen lässt, da diese Version ohne die Daten auf dem Datenträger liefe. Ein automatischer Rollback (E2) **DARF NICHT [MUST NOT]** aus diesem Grund abgelehnt werden; unterstützt sein Ziel keine Datenträger oder lässt sich das nicht feststellen, **MUSS [MUST]** ein Umzug auf den Datenträger, der seine Gesundheitsprüfung noch nicht bestanden hat (dort E11), zuerst zur Kopie auf der Systemplatte zurückkehren.
 
 ### G. Sichtbarkeit
 
@@ -146,6 +147,7 @@ Die Kriterien fassen mehrere Anforderungen zusammen; jede Anforderung bleibt fü
 - [ ] Nach einem Update und einem Rollback liegen Update-Protokoll, nie wieder angewendete Releases sowie Ort und Prüfsumme jeder Sicherung auf der Systemplatte; eine Sicherung mit falscher Prüfsumme wird nicht wiederhergestellt (D9, D10).
 - [ ] Mit verschlüsseltem Datenträger und unverschlüsseltem Sicherungs-Datenträger geht die Sicherung auf den verschlüsselten Datenträger, und das Protokoll nennt den Grund (D8).
 - [ ] Ein manueller Rollback mit dem dokumentierten Kommando stellt das vorherige Release und seine Daten wieder her, und das gescheiterte Release wird nicht erneut versucht (F1, F2, F4).
+- [ ] Mit eingerichtetem Datenträger wird ein manueller Rollback zu einem Release ohne Datenträger-Unterstützung mit Grund abgelehnt; ein automatischer Rollback zu einem solchen Release führt einen nicht bestätigten Umzug zuerst zur Systemkopie zurück (F5).
 - [ ] Die Konsole zeigt laufende Version, bereitgelegte Version und nächstes Fenster; das dokumentierte Kommando liefert dasselbe in maschinenlesbarer Form (G1, G2).
 - [ ] Die Release Notes jedes Releases nennen Kamerplanter-Version, Basis-Version, Konfigurationsänderungen und ob ein Rollback eine Wiederherstellung braucht (A6, G3).
 - [ ] Die Dokumentationsseite behandelt Updates, das Wartungsfenster, das Update-Protokoll, den manuellen Rollback, den Datenverlust bei der Wiederherstellung und die Umstellung einer Appliance, die sich nicht aktualisiert (D6, I1, I2, I3).

@@ -111,7 +111,7 @@ Eine Appliance, die bereits Daten auf ihrer Systemplatte hält, zieht sie einmal
 
 Die Appliance kopiert `/etc/kamerplanter`, die Aufzeichnungen und beide Volumes auf den Datenträger, vergleicht die Kopie und schreibt sie fest, bevor sie den Datenträger verwendet. Der Datenträger braucht Platz für die Daten plus 10 % und 32 MiB; mit weniger wird der Umzug abgebrochen, und die Dienste starten von der Systemplatte. Nach einem Stromausfall während des Kopierens läuft die Appliance weiter von der Systemplatte und kopiert erneut.
 
-Danach müssen die Dienste dieselbe Gesundheitsprüfung bestehen wie nach einem Update. Die Kopie auf der Systemplatte bleibt, bis sie bestanden ist, und danach noch `UPDATE_BACKUP_KEEP_DAYS` Tage (mindestens 3); dann wird sie gelöscht. Fallen die Dienste durch die Prüfung, kehrt die Appliance zur Kopie auf der Systemplatte zurück und verwendet den Datenträger nicht mehr.
+Danach müssen die Dienste dieselbe Gesundheitsprüfung bestehen wie nach einem Update. Die Kopie auf der Systemplatte bleibt, bis sie bestanden ist, und danach noch `UPDATE_BACKUP_KEEP_DAYS` Tage (mindestens 3); dann wird sie gelöscht. Fallen die Dienste durch die Prüfung, kehrt die Appliance zur Kopie auf der Systemplatte zurück und verwendet den Datenträger nicht mehr. Dasselbe tut sie, wenn im selben Start ein Update scheitert und die Appliance selbst zu einem Release zurückkehrt, das keine Datenträger kennt; siehe [Updates und Rollback](updates.md#returning-to-the-previous-release-yourself).
 
 Die Aufzeichnung des Umzugs hat diese Zustände, angezeigt von `/usr/libexec/kamerplanter/disks status` und `kamerplanter-update status`:
 
@@ -153,7 +153,7 @@ Ein fehlender Sicherungs-Datenträger hält nichts an: Die Datenbank-Kopie vor e
 
 ## Ein älteres Release auf einem neueren Datenträger
 
-Der Datenträger trägt eine Release-Markierung: das höchste Release, dessen Dienste auf ihm die Gesundheitsprüfung bestanden haben. Ein neueres Kamerplanter kann die Daten so migriert haben, dass ein älteres sie nicht lesen kann. Deshalb hält ein älteres Release, und jeder Entwicklungs-Build, die Dienste auf einem Datenträger angehalten, den ein neueres Release markiert hat. Eine Markierung, die sich nicht lesen lässt, lehnt jedes Release ab. Ein Rollback durch die Appliance ist davon nicht betroffen, denn er stellt die Markierung zusammen mit den Daten wieder her.
+Der Datenträger trägt eine Release-Markierung: das höchste Release, dessen Dienste auf ihm die Gesundheitsprüfung bestanden haben. Ein neueres Kamerplanter kann die Daten so migriert haben, dass ein älteres sie nicht lesen kann. Deshalb hält ein älteres Release, und jeder Entwicklungs-Build, die Dienste auf einem Datenträger angehalten, den ein neueres Release markiert hat. Eine Markierung, die sich nicht lesen lässt, lehnt jedes Release ab. Ein Rollback durch die Appliance ist davon nicht betroffen, denn er stellt die Markierung zusammen mit den Daten wieder her. Ein Rollback zu einem Release, das überhaupt keine Datenträger kennt, wird abgelehnt, solange ein Datenträger eingerichtet ist; siehe [Updates und Rollback](updates.md#returning-to-the-previous-release-yourself).
 
 Die Meldung nennt beide Releases, in `systemctl status kamerplanter-update-guard.service` und in den letzten Ereignissen von `kamerplanter-update status`. Kehre zum neueren Release zurück oder stelle eine Sicherung von davor wieder her. Um das ältere Release trotzdem auf dem Datenträger zu betreiben, auf das Risiko von Daten hin, die das neuere migriert hat, führe als root aus:
 

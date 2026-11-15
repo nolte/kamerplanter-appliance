@@ -50,7 +50,7 @@ Recent events:
 
 `kamerplanter-update status --json` gibt dasselbe als JSON aus. Die Konsole zeigt die laufende Version und das nächste Fenster über der Anmeldung.
 
-## Selbst zum vorherigen Release zurückkehren
+## Selbst zum vorherigen Release zurückkehren { #returning-to-the-previous-release-yourself }
 
 Funktioniert ein Release, stimmt aber etwas damit nicht, kehrst du zum vorherigen zurück:
 
@@ -59,6 +59,8 @@ kamerplanter-update rollback
 ```
 
 Die Appliance startet in das vorherige Release neu und stellt die Datenbank-Kopie von vor dem Update wieder her; alles, was seit dem Update geschrieben wurde, geht verloren. Zur Verfügung steht nur das Release direkt vor dem aktuellen und nur, solange seine Datenbank-Kopie aufbewahrt wird, standardmäßig 7 Tage. Das verlassene Release wird nicht erneut installiert.
+
+Ist ein [Datenträger](data-disk.md) eingerichtet, lehnt das Kommando die Rückkehr zu einem Release ab, das keine Datenträger kennt: Dieses Release würde den Datenträger übergehen und auf dem laufen, was die Systemplatte darunter hält, einer alten Kopie deiner Daten oder keiner, und neue Secrets erzeugen. Bleib dann beim aktuellen Release. Scheitert ein Update und kehrt die Appliance selbst zurück, lehnt sie nie ab; kennt das Release, zu dem sie zurückkehrt, keine Datenträger, wurde der Datenträger während dieses gescheiterten Updates eingerichtet, und die Appliance kehrt zuerst zur Kopie deiner Daten auf der Systemplatte zurück, die unverändert ist. Der Datenträger wird danach nicht mehr verwendet, bis du ihn erneut benennst, wie nach einem [gescheiterten Umzug](data-disk.md#moving-an-appliance-onto-a-data-disk).
 
 ## Einstellungen
 

@@ -94,6 +94,19 @@ data_disk_key=/var/lib/kamerplanter/disks/keys/data.key
 
 die() { echo "kamerplanter-update: $*" >&2; exit 1; }
 
+# update_lock: takes the lock of the update actions ($state/.lock on fd 9)
+# without waiting, once per run: a subshell, and a command run from here,
+# keep it, so that what follows a fetch (cleanup) runs under the same lock.
+# Fails when another action holds it.
+update_locked=0
+update_lock() {
+    [ "$update_locked" = 0 ] || return 0
+    install -d -m 0700 "$state" || return 1
+    exec 9>"$state/.lock" || return 1
+    flock -n 9 || return 1
+    update_locked=1
+}
+
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
@@ -243,8 +256,9 @@ deployment_root() {
     printf '%s' "$deployments/$stateroot/deploy/$checksum.$serial"
 }
 
-# rollback_support FROM: whether the release a rollback returns to finds a
-# backup at every location: supported, unsupported, or unknown when bootc's
+# rollback_support FROM [FEATURE]: whether the release a rollback returns to
+# lists FEATURE (by default backup-locations: it finds a backup at every
+# location) in its features: supported, unsupported, or unknown when bootc's
 # rollback deployment is not FROM, the release that was left, or its tree is
 # not there (rollback_reach in /usr/lib/kamerplanter/env.sh).
 rollback_support() {
@@ -252,7 +266,7 @@ rollback_support() {
     if [ -z "$1" ] || [ "$(slot rollback digest)" != "$1" ]; then echo unknown; return; fi
     root=$(deployment_root rollback)
     if [ -z "$root" ] || [ ! -d "$root/usr" ]; then echo unknown; return; fi
-    if has_feature "$root" backup-locations; then echo supported; else echo unsupported; fi
+    if has_feature "$root" "${2:-backup-locations}"; then echo supported; else echo unsupported; fi
 }
 
 # assess [FROM]: what each location of backup_locations is like for a backup
@@ -793,9 +807,7 @@ backup_list() {
 }
 
 cmd_fetch() {
-    install -d -m 0700 "$state"
-    exec 9>"$state/.lock"
-    flock -n 9 || die "another update action is running"
+    update_lock || die "another update action is running"
     write_issue || true
     [ -z "$(pending)" ] || { echo "an update is being checked; not fetching"; return 0; }
     local ref transport remote booted staged
@@ -845,9 +857,7 @@ cmd_fetch() {
 cmd_apply() {
     local now=0
     [ "${1-}" = --now ] && now=1
-    install -d -m 0700 "$state"
-    exec 9>"$state/.lock"
-    flock -n 9 || die "another update action is running"
+    update_lock || die "another update action is running"
     local booted staged reason
     booted=$(slot booted digest)
     staged=$(slot staged digest)
@@ -897,13 +907,18 @@ cmd_resume() {
 }
 
 cmd_rollback() {
-    exec 9>"$state/.lock"
-    flock -n 9 || die "another update action is running"
+    update_lock || die "another update action is running"
     local booted previous
     booted=$(slot booted digest)
     previous=$(slot rollback digest)
     [ -n "$previous" ] || die "there is no previous version to return to"
     failed "$previous" && die "the previous version $(short "$previous") failed its own update and cannot be returned to"
+    # A release without data disks would ignore the disk set up, and run on
+    # what the system disk holds underneath: an old copy, or nothing, for which
+    # configure would generate new secrets.
+    if [ -e "$data_disk_record" ] && [ "$(rollback_support "$previous" data-disk)" != supported ]; then
+        die "a data disk is set up, and the previous version $(slot rollback version) ($(short "$previous")) does not know data disks, or cannot be checked for them; it would run without the data on that disk, so it is not returned to"
+    fi
     local problem
     if [ -e "$backups/$previous" ]; then
         problem=$(backup_problem "$previous")
@@ -947,9 +962,7 @@ cmd_allow_downgrade() {
     [ $# -eq 2 ] || die "usage: kamerplanter-update allow-downgrade <disk release> <running release>"
     [ -e "$data_disk_record" ] || die "no data disk is set up; there is nothing to allow"
     data_disk_placed || die "the data disk kp-data is missing or not in place (see: systemctl status kamerplanter-data-disk.service)"
-    install -d -m 0700 "$state"
-    exec 9>"$state/.lock"
-    flock -n 9 || die "another update action is running"
+    update_lock || die "another update action is running"
     local disk running named_disk named_running
     disk=$(data_disk_release)
     running=$(running_release)
@@ -1089,8 +1102,10 @@ cmd_health() {
     fi
     # A move onto the data disk and an update on the same boot are decided
     # by this one check. When it fails, the update is rolled back, not the
-    # move: the previous version checks the move again on its boot.
-    if ! problem=$(wait_healthy); then
+    # move: the previous version checks the move again on its boot; one that
+    # does not know data disks gets the system copy back (return_move).
+    if ! healthy_now; then
+        problem=$health_problem
         log health failed "$problem; returning to the previous version" "$from" "$to"
         # The return happens all the same (E2); the previous version then
         # keeps its services stopped until the backup can be restored.
@@ -1099,6 +1114,7 @@ cmd_health() {
         if [ -n "$unreadable" ]; then
             log health warning "the data backup from before the update cannot be restored now: $unreadable; after the return the services stay stopped until it can be" "$from" "$to"
         fi
+        return_move "$from" "$to"
         bootc rollback --apply
         return 1
     fi
@@ -1111,6 +1127,39 @@ cmd_health() {
     raise_marker
     cleanup
     write_issue || true
+}
+
+# return_move FROM TO: before the automatic return to FROM (E2), which is
+# never refused. FROM ran before the update, so a data disk it did not know
+# can only have been set up on this boot, by TO, with the move of the system
+# disk's data onto it not yet verified: the system copy is unchanged then,
+# and FROM runs on it. That move is returned to the system copy (disks move
+# unhealthy), so that a later release does not bind the disk over what FROM
+# writes there; nothing is lost, since the return restores the data from
+# before the update anyway. With FROM knowing data disks, the move stays: FROM
+# checks it on its boot.
+return_move() {
+    [ -e "$data_disk_record" ] || return 0
+    [ "$(rollback_support "$1" data-disk)" != supported ] || return 0
+    if [ "$(data_disk_move_field STATE)" = moved ]; then
+        log health warning "the previous version does not know data disks, or cannot be checked for them; the move onto the data disk kp-data is returned to the copy on the system disk, which that version runs on" "$1" "$2"
+        "$disks_tool" move unhealthy "the update failed, and the version returned to does not know data disks" ||
+            log health error "the move onto the data disk kp-data could not be returned to the system copy" "$1" "$2"
+    else
+        log health warning "a data disk is set up, and the previous version does not know data disks, or cannot be checked for them; it runs without the data on that disk" "$1" "$2"
+    fi
+}
+
+# healthy_now: wait_healthy once per run, its result kept for every later
+# caller (check_move, mark_when_healthy): sets health_problem, and fails when
+# the services are not healthy.
+health_state=
+health_problem=
+healthy_now() {
+    if [ -z "$health_state" ]; then
+        if health_problem=$(wait_healthy); then health_state=ok; else health_state=failed; fi
+    fi
+    [ "$health_state" = ok ]
 }
 
 # wait_healthy: waits up to UPDATE_HEALTH_TIMEOUT minutes for check_health;
@@ -1141,11 +1190,12 @@ wait_healthy() {
 check_move() {
     [ "$(data_disk_move_field STATE)" = moved ] && data_disk_placed || return 0
     local problem
-    if problem=$(wait_healthy); then
+    if healthy_now; then
         "$disks_tool" move healthy ||
             log health error "the move onto the data disk kp-data could not be recorded as healthy; it is checked again at the next boot"
         return 0
     fi
+    problem=$health_problem
     if ! data_disk_present; then
         "$disks_tool" move missing "$problem" || true
     else
@@ -1160,15 +1210,15 @@ check_move() {
 # stopped. A check that fails leaves the marker as it is, and is recorded.
 mark_when_healthy() {
     [ -e "$data_disk_record" ] && data_disk_placed || return 0
-    local disk running problem
+    local disk running
     disk=$(data_disk_release)
     running=$(running_release)
     marker_raises "$running" "$disk" || return 0
     if marker_refuses "$disk" "$running" && ! downgrade_allowed "$disk" "$running" "$state/downgrades"; then
         return 0
     fi
-    if ! problem=$(wait_healthy); then
-        log release unmarked "$problem; the data disk kp-data stays marked by ${disk:-no release}"
+    if ! healthy_now; then
+        log release unmarked "$health_problem; the data disk kp-data stays marked by ${disk:-no release}"
         return 0
     fi
     raise_marker
@@ -1214,6 +1264,12 @@ check_health() {
 # its directory is older than that period.
 cleanup() {
     local keep now protect rec d loc epoch problem base
+    # Under the lock of the update actions, so that no rollback or activation
+    # relies on a backup that is being deleted; fetch takes it before.
+    if ! update_lock; then
+        echo "another update action is running; the backups are cleaned up at the next run" >&2
+        return 0
+    fi
     keep=$(keep_period)
     now=$(date +%s)
     read -r protect _ <<<"$(pending)" || true
@@ -1269,6 +1325,9 @@ case ${1-status} in
     fetch)
         # The cleanup runs also when nothing could be fetched, as on an
         # appliance without network; the fetch keeps set -e in its subshell.
+        # The lock is taken here, so the subshell and the cleanup after it
+        # hold it both; without it, neither runs.
+        update_lock || die "another update action is running"
         set +e
         (set -e; cmd_fetch)
         rc=$?
@@ -1277,7 +1336,11 @@ case ${1-status} in
         exit "$rc"
         ;;
     apply) shift; cmd_apply "$@" ;;
-    apply-now) cmd_fetch && cmd_apply --now ;;
+    # Not cmd_fetch && ...: set -e would not hold inside cmd_fetch there.
+    apply-now)
+        cmd_fetch
+        cmd_apply --now
+        ;;
     postpone) shift; cmd_postpone "$@" ;;
     resume) cmd_resume ;;
     rollback) cmd_rollback ;;

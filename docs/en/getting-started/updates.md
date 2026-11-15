@@ -60,6 +60,8 @@ kamerplanter-update rollback
 
 The appliance restarts into the previous release and restores the database copy from before the update; everything written since the update is lost. Only the release directly before the current one is available, and only while its database copy is kept, by default 7 days. The release you left is not installed again.
 
+With a [data disk](data-disk.md) set up, the command refuses to return to a release that doesn't know data disks: that release would ignore the disk and run on what the system disk holds underneath, an old copy of your data or none, and generate new secrets. Stay on the current release then. When an update fails and the appliance returns on its own, it never refuses; if the release it returns to doesn't know data disks, the data disk was set up during that failed update, and the appliance first returns to the copy of your data on the system disk, which is unchanged. The disk is then no longer used until you name it again, as after a [failed move](data-disk.md#moving-an-appliance-onto-a-data-disk).
+
 ## Settings
 
 Put these into `/etc/kamerplanter/kamerplanter.env`:

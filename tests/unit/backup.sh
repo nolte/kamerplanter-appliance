@@ -251,6 +251,150 @@ expect "keep: zero is the default" 7 "$(keep_days 0)"
 expect "keep: empty is the default" 7 "$(keep_days '')"
 expect "keep: too many digits is the default" 7 "$(keep_days 99999999999999999999)"
 
+# --- the update tool as it ships, in a sandbox (lib/sandbox.sh) ---
+# shellcheck source=tests/unit/lib/sandbox.sh
+. "$root/tests/unit/lib/sandbox.sh"
+OLD=sha256:$(printf '%064d' 7) NEW=sha256:$(printf '%064d' 8)
+checksum=$(printf '%064d' 9)
+# new_sandbox [FEATURES]: a fresh tree for kamerplanter-update in SB, running
+# 1.2 ($NEW) with 1.1 ($OLD) as bootc's rollback deployment, whose tree lists
+# FEATURES (one per line). The disk service is a stub that notes each call,
+# and whether the update lock was held then.
+new_sandbox() {
+    SB=$(mktemp -d "$work/sandbox.XXXXXX")
+    sandbox_install "$SB" "$root/image/rootfs" /usr/bin/kamerplanter-update /usr/lib/kamerplanter/env.sh
+    st=$SB/var/lib/kamerplanter/update
+    mkdir -p "$st/backups" "$st/backup" "$SB/var/lib/kamerplanter/disks" "$SB/var/lib/kamerplanter/pinned" \
+        "$SB/var/mnt/kamerplanter-data" "$SB/etc/kamerplanter" "$SB/usr/share/kamerplanter" "$SB/usr/libexec/kamerplanter" \
+        "$SB/var/lib/containers/storage/volumes/arangodb_data" "$SB/var/lib/containers/storage/volumes/valkey_data" \
+        "$SB/sysroot/ostree/deploy/default/deploy/$checksum.0/usr/lib/kamerplanter"
+    cp "$root/image/rootfs/usr/share/kamerplanter/kamerplanter.env" "$SB/usr/share/kamerplanter/"
+    printf '%s\n' "${1-}" >"$SB/sysroot/ostree/deploy/default/deploy/$checksum.0/usr/lib/kamerplanter/features"
+    cat >"$SB/usr/libexec/kamerplanter/disks" <<STUB
+#!/bin/bash
+if flock -n "$st/.lock" true; then l=unlocked; else l=locked; fi
+echo "\$1 \${2-} \$l" >>"$SB/disks-calls"
+STUB
+    chmod 0755 "$SB/usr/libexec/kamerplanter/disks"
+    jq -n --arg old "$OLD" --arg new "$NEW" --arg sum "$checksum" '{status: {
+        booted: {image: {imageDigest: $new, version: "1.2", image: {image: "ghcr.io/example/appliance:stable", transport: "registry"}}},
+        rollback: {image: {imageDigest: $old, version: "1.1", image: {image: "ghcr.io/example/appliance:stable", transport: "registry"}},
+                   ostree: {stateroot: "default", checksum: $sum, deploySerial: 0}}}}' >"$SB/bootc.json"
+}
+# The commands that reach the system, as the tool calls them.
+bootc() {
+    case $1 in
+        status)
+            echo x >>"$SB/bootc-status"
+            if [ -n "${BOOTC_STATUS_FAILS_FROM-}" ] && [ "$(wc -l <"$SB/bootc-status")" -ge "$BOOTC_STATUS_FAILS_FROM" ]; then return 1; fi
+            cat "$SB/bootc.json"
+            ;;
+        *) echo "bootc $*" >>"$SB/calls" ;;
+    esac
+}
+skopeo() { if [ -n "${SKOPEO_OFFERS-}" ]; then echo "$SKOPEO_OFFERS"; else echo "no network" >&2; return 1; fi; }
+systemctl() {
+    case "$1 ${3-}" in
+        "is-active kamerplanter-config.service") echo x >>"$SB/health-checks"; [ -z "${UNHEALTHY-}" ] ;;
+        is-active*) [ -z "${UNHEALTHY-}" ] ;;
+        *) return 0 ;;
+    esac
+}
+podman() { echo healthy; }
+curl() { return 0; }
+agetty() { return 0; }
+sleep() { return 0; }
+# The clock jumps far ahead after the first look, so a health check that
+# fails has used its time at once.
+date() {
+    if [ "$*" = +%s ]; then
+        if [ -e "$SB/clock" ]; then echo 4000000000; else touch "$SB/clock"; command date +%s; fi
+    else
+        command date "$@"
+    fi
+}
+# tool ARGS...: runs the sandboxed tool; prints its exit status.
+tool() {
+    (
+        sandbox_mounts
+        export SB BOOTC_STATUS_FAILS_FROM SKOPEO_OFFERS UNHEALTHY
+        export -f bootc skopeo systemctl podman curl agetty sleep date
+        bash "$SB/usr/bin/kamerplanter-update" "$@" </dev/null >>"$SB/out" 2>&1
+        echo $?
+    )
+}
+lines() { if [ -e "$1" ]; then paste -sd'|' "$1"; fi; }
+# A pre-update backup on the system disk, due for deletion, and a verified
+# move whose system copy the disk service deletes in the same cleanup.
+due_backup() {
+    printf 'LOCATION=system-disk\nSHA256=x\nTAKEN=2000-01-01T00:00:00Z\n' >"$st/backups/$OLD"
+    mkdir -p "$st/backup/$OLD"
+    printf 'STATE=verified\nVERIFIED=2000-01-01T00:00:00Z\n' >"$SB/var/lib/kamerplanter/disks/move.env"
+}
+
+# The cleanup after a fetch runs under the update lock, and not at all
+# without it (finding: it ran unlocked after the fetch's subshell).
+new_sandbox backup-locations; due_backup
+held_by_other=$( (exec 8>"$st/.lock"; flock -n 8 && tool fetch) )
+expect "fetch: another action holds the lock: it fails" 1 "$held_by_other"
+expect "fetch: another action holds the lock: no cleanup, the backup stays" "yes|" \
+    "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(lines "$SB/disks-calls")"
+new_sandbox backup-locations; due_backup
+expect "fetch: offline, the fetch fails" 1 "$(tool fetch)"
+expect "fetch: offline, the cleanup runs all the same, under the lock" "no|cleanup 7 locked" \
+    "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(lines "$SB/disks-calls")"
+
+# apply-now keeps set -e inside the fetch: bootc failing after the download
+# stops it, instead of recording a staged update that is not known.
+new_sandbox backup-locations
+rc=$(BOOTC_STATUS_FAILS_FROM=2 SKOPEO_OFFERS="sha256:$(printf '%064d' 5) 1.3" tool apply-now)
+expect "apply-now: bootc failing after the download stops the fetch" "failed|" \
+    "$([ "$rc" != 0 ] && echo failed || echo "succeeded ($rc)")|$(grep -o '"event":"fetch","result":"staged"' "$st/log.jsonl" 2>/dev/null)"
+
+# A manual rollback to a release without data disks is refused while one is
+# set up: it would run on the system disk's copy, or on nothing.
+new_sandbox backup-locations
+mkdir -p "$st/backup/$OLD"
+touch "$SB/var/lib/kamerplanter/disks/data.env"
+expect "rollback: data disk set up, target without data-disk: refused" "1||" \
+    "$(tool rollback)|$(lines "$SB/calls")|$(cat "$st/pending" 2>/dev/null)"
+expect "rollback: the refusal says why" yes "$(grep -q 'does not know data disks' "$SB/out" && echo yes)"
+rm -rf "$SB/sysroot"
+expect "rollback: data disk set up, target tree not found: refused" "1|" "$(tool rollback)|$(lines "$SB/calls")"
+new_sandbox "$(printf 'backup-locations\ndata-disk')"
+mkdir -p "$st/backup/$OLD"
+touch "$SB/var/lib/kamerplanter/disks/data.env"
+expect "rollback: target with data-disk: returned to" "0|bootc rollback --apply|$OLD $NEW manual" \
+    "$(tool rollback)|$(lines "$SB/calls")|$(cat "$st/pending")"
+new_sandbox backup-locations
+mkdir -p "$st/backup/$OLD"
+expect "rollback: no data disk, target without data-disk: returned to" "0|bootc rollback --apply" \
+    "$(tool rollback)|$(lines "$SB/calls")"
+
+# The automatic return after a failed update is never refused; a move onto a
+# data disk the target does not know is returned to the system copy first.
+new_sandbox backup-locations
+printf '%s %s checking\n' "$OLD" "$NEW" >"$st/pending"
+touch "$SB/var/lib/kamerplanter/disks/data.env"
+printf 'STATE=moved\n' >"$SB/var/lib/kamerplanter/disks/move.env"
+expect "health: failed update, target without data-disk: the move is returned, then the version" \
+    "1|move unhealthy unlocked|bootc rollback --apply" "$(UNHEALTHY=1 tool health)|$(lines "$SB/disks-calls")|$(lines "$SB/calls")"
+new_sandbox "$(printf 'backup-locations\ndata-disk')"
+printf '%s %s checking\n' "$OLD" "$NEW" >"$st/pending"
+touch "$SB/var/lib/kamerplanter/disks/data.env"
+printf 'STATE=moved\n' >"$SB/var/lib/kamerplanter/disks/move.env"
+expect "health: failed update, target with data-disk: only the version returns" \
+    "1||bootc rollback --apply" "$(UNHEALTHY=1 tool health)|$(lines "$SB/disks-calls")|$(lines "$SB/calls")"
+
+# After a move, one health check decides the move and the release marker.
+new_sandbox backup-locations
+touch "$SB/var/lib/kamerplanter/disks/data.env"
+printf 'STATE=moved\n' >"$SB/var/lib/kamerplanter/disks/move.env"
+expect "health: after a move, healthy" 0 "$(MOUNTED=1 tool health)"
+expect "health: after a move, the services are checked once" 1 "$(wc -l <"$SB/health-checks")"
+expect "health: after a move, the move is verified and the disk marked" "move healthy unlocked|1.2" \
+    "$(lines "$SB/disks-calls")|$(cat "$SB/var/mnt/kamerplanter-data/release")"
+
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
     exit 1

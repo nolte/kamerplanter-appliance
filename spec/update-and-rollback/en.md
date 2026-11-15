@@ -104,6 +104,7 @@ Readers: the maintainer, who implements and releases updates, and the authors of
 - **F2 MUST** apply D2 to D6 to a manual rollback as to an automatic one.
 - **F3 MUST** state that only the previous version is available for a rollback.
 - **F4 MUST** keep a manually rolled-back version from being updated to the same failed release again, as E4 requires for automatic rollbacks.
+- **F5 MUST** refuse a manual rollback, and report why, while a data disk is set up (`spec/distribution-requirements/` E6) and the previous version does not support data disks or its support cannot be determined, since that version would run without the data on the disk. An automatic rollback (E2) MUST NOT be refused for this reason; when its target does not support data disks, or its support cannot be determined, a move onto the data disk that has not passed its health check (E11 there) MUST first return to the copy on the system disk.
 
 ### G. Visibility
 
@@ -146,6 +147,7 @@ The criteria roll several requirements together; every requirement stays normati
 - [ ] After an update and a rollback, the update record, the releases never applied again, and the location and checksum of each backup are on the system disk; a backup with a wrong checksum is not restored (D9, D10).
 - [ ] With an encrypted data disk and an unencrypted backup disk, the backup goes to the encrypted data disk and the record says why (D8).
 - [ ] A manual rollback with the documented command restores the previous release and its data, and the failed release is not retried (F1, F2, F4).
+- [ ] With a data disk set up, a manual rollback to a release without data disk support is refused with a reason; an automatic rollback to such a release returns an unverified move to the system copy first (F5).
 - [ ] The console shows running version, staged version, and next window; the documented command returns the same in machine-readable form (G1, G2).
 - [ ] The release notes of each release state Kamerplanter version, base version, configuration changes, and whether a rollback needs a restore (A6, G3).
 - [ ] The documentation page covers updates, the maintenance window, the update record, manual rollback, data loss on restore, and moving an appliance that does not update (D6, I1, I2, I3).

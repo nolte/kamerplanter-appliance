@@ -111,7 +111,7 @@ An appliance that already holds data on its system disk moves it onto a newly na
 
 The appliance copies `/etc/kamerplanter`, the records, and both volumes onto the disk, compares the copy, and syncs it before it uses the disk. The disk needs room for the data plus 10 % and 32 MiB; with less, the move is abandoned and the services start from the system disk. After a power cut during the copy, the appliance still runs from the system disk and copies again.
 
-The services then have to pass the same health check as after an update. The copy on the system disk is kept until they have, and for `UPDATE_BACKUP_KEEP_DAYS` days after (at least 3); then it's deleted. If they fail the check, the appliance returns to the copy on the system disk and stops using the disk.
+The services then have to pass the same health check as after an update. The copy on the system disk is kept until they have, and for `UPDATE_BACKUP_KEEP_DAYS` days after (at least 3); then it's deleted. If they fail the check, the appliance returns to the copy on the system disk and stops using the disk. It does the same when an update on the same boot fails and the appliance returns on its own to a release that doesn't know data disks; see [Updates and rollback](updates.md#returning-to-the-previous-release-yourself).
 
 The record of the move has these states, shown by `/usr/libexec/kamerplanter/disks status` and `kamerplanter-update status`:
 
@@ -153,7 +153,7 @@ A missing backup disk stops nothing: the pre-update backup goes to the next loca
 
 ## An older release on a newer data disk
 
-The data disk carries a release marker: the highest release whose services passed the health check on it. A newer Kamerplanter may have migrated the data in a way an older one can't read. So an older release, and any development build, keeps the services stopped on a disk marked by a newer release. A marker that can't be read refuses every release. A rollback by the appliance isn't affected, since it restores the marker together with the data.
+The data disk carries a release marker: the highest release whose services passed the health check on it. A newer Kamerplanter may have migrated the data in a way an older one can't read. So an older release, and any development build, keeps the services stopped on a disk marked by a newer release. A marker that can't be read refuses every release. A rollback by the appliance isn't affected, since it restores the marker together with the data. A rollback to a release that doesn't know data disks at all is refused while a data disk is set up; see [Updates and rollback](updates.md#returning-to-the-previous-release-yourself).
 
 The message names both releases, in `systemctl status kamerplanter-update-guard.service` and in the recent events of `kamerplanter-update status`. Return to the newer release, or restore a backup from before it. To run the older release on the disk all the same, at the risk of data the newer one has migrated, run as root:
 
