@@ -206,7 +206,7 @@ jobs:
         if: always()
         run: tests/boot/results.sh .build/boot/results.tsv
 
-      # Results and serial consoles only: never the SSH key next to them.
+      # Results, serial consoles and diagnoses only: never the SSH key next to them.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -214,6 +214,8 @@ jobs:
           path: |
             .build/boot/*.tsv
             .build/boot/*.serial.log
+            .build/boot/*.diagnose.txt
+            .build/boot/*.update-log.txt
           if-no-files-found: warn
           retention-days: 14
 
@@ -280,7 +282,7 @@ jobs:
         if: always()
         run: tests/boot/results.sh .build/boot/update-results.tsv
 
-      # Results and serial consoles only: the run's signing keys and their
+      # Results, serial consoles and diagnoses only: the run's signing keys and their
       # passphrases lie in .build/update and stay there.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -289,6 +291,8 @@ jobs:
           path: |
             .build/boot/*.tsv
             .build/boot/*.serial.log
+            .build/boot/*.diagnose.txt
+            .build/boot/*.update-log.txt
           if-no-files-found: warn
           retention-days: 14
 
@@ -374,7 +378,7 @@ jobs:
         if: always()
         run: tests/boot/results.sh .build/boot/data-disk-results.tsv
 
-      # Results and serial consoles only: the login token and the disks lie
+      # Results, serial consoles and diagnoses only: the login token and the disks lie
       # in .build/data-disk and stay there.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -383,6 +387,8 @@ jobs:
           path: |
             .build/boot/*.tsv
             .build/boot/*.serial.log
+            .build/boot/*.diagnose.txt
+            .build/boot/*.update-log.txt
           if-no-files-found: warn
           retention-days: 14
 

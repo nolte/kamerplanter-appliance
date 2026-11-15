@@ -131,6 +131,11 @@ diagnose() {
         echo "== containers"; guest podman ps -a
         echo "== journal errors"; guest "journalctl -b -p err --no-pager | tail -n 60"
         echo "== block devices"; guest lsblk
+        echo "== boots"; guest "journalctl --list-boots --no-pager | tail -n 5"
+        echo "== bootc status"; guest "bootc status --format humanreadable"
+        echo "== previous boot: finalize and shutdown"
+        guest "journalctl -b -1 --no-pager -o short-precise -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service"
+        guest "journalctl -b -1 --no-pager -o short-precise | tail -n 120"
     } >"$OUT/$1.diagnose.txt" 2>&1
 }
 
