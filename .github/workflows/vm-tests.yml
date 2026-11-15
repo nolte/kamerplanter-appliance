@@ -38,18 +38,20 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request or a new dispatch on the same ref supersedes
-# the running tests. Adding any other label to the pull request gets a group
-# of its own, so it neither starts tests nor cancels running ones. Every merge
-# to develop gets a group of its own as well and is never cancelled, so each
-# merge has a result.
+# A newer push to a pull request supersedes the running tests. Label events
+# never cancel: opening a pull request with several labels fires one labeled
+# event per label at the same moment, and a cancelling event in the same group
+# would stop the run that the vm-tests label started. Adding any other label
+# gets a group of its own, so it neither starts tests nor waits for them.
+# Every merge to develop gets a group of its own and is never cancelled, so
+# each merge has a result.
 concurrency:
   group: >-
     vm-tests-${{ github.event_name }}-${{ github.ref }}-${{
     (github.event_name == 'push' && github.sha) ||
     (github.event.action == 'labeled' && github.event.label.name != 'vm-tests' && github.run_id) ||
     'latest' }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}
 
 env:
   TOOLS_IMAGE: kamerplanter-appliance-tools:poc
