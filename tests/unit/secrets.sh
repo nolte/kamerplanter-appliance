@@ -260,6 +260,10 @@ reject "a number is no text" \
     'the value of ARANGODB_PASSWORD is a number, not a text; quote it'
 reject "an empty value" '{"kamerplanter": {"secrets": {"JWT_SECRET_KEY": ""}}}' 'JWT_SECRET_KEY is empty (supplied by kamerplanter: -> secrets:'
 reject "a null value" '{"kamerplanter": {"secrets": {"JWT_SECRET_KEY": null}}}' 'the value of JWT_SECRET_KEY is empty, not a text'
+reject "a JWT_SECRET_KEY below 32 characters (D12)" '{"kamerplanter": {"secrets": {"JWT_SECRET_KEY": "only-thirty-one-characters-long"}}}' \
+    'JWT_SECRET_KEY is shorter than 32 characters (supplied by kamerplanter: -> secrets:'
+reject "an ARANGODB_PASSWORD below 16 characters (D12)" '{"kamerplanter": {"secrets": {"ARANGODB_PASSWORD": "fifteen-chars-x"}}}' \
+    'ARANGODB_PASSWORD is shorter than 16 characters (supplied by kamerplanter: -> secrets:'
 reject "a value that fails the check of its key" \
     '{"kamerplanter": {"secrets": {"FERNET_KEY": "not-a-fernet-key"}}}' \
     'FERNET_KEY is not a Fernet key (32 bytes, URL-safe base64, 44 characters) (supplied by kamerplanter: -> secrets: of the provisioning data)'
@@ -292,6 +296,8 @@ reject_credential "a NUL byte" "$cred_jwt\\x00tail" \
     'JWT_SECRET_KEY holds a character that is not printable ASCII (supplied by the system credential' JWT_SECRET_KEY
 reject_credential "the upstream placeholder" change-me-in-production-use-openssl-rand-hex-32 \
     'JWT_SECRET_KEY is empty or the upstream placeholder (supplied by the system credential kamerplanter.secret.JWT_SECRET_KEY)' JWT_SECRET_KEY
+reject_credential "a JWT_SECRET_KEY below 32 characters (D12)" 'only-thirty-one-characters-long' \
+    'JWT_SECRET_KEY is shorter than 32 characters (supplied by the system credential kamerplanter.secret.JWT_SECRET_KEY)' JWT_SECRET_KEY
 reject_credential "longer than 4096 characters" "$(printf 'x%.0s' {1..4100})" \
     'JWT_SECRET_KEY is longer than 4096 characters' JWT_SECRET_KEY
 

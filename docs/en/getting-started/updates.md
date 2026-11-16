@@ -69,8 +69,8 @@ Put these into `/etc/kamerplanter/kamerplanter.env`:
 | Setting | Default | Meaning |
 |---|---|---|
 | `UPDATE_WINDOW` | `03:00` | Start of the maintenance window, `HH:MM` in the appliance's time; the restart happens within 30 minutes after it |
-| `UPDATE_HEALTH_TIMEOUT` | `20` | Minutes a new release has to become healthy |
-| `UPDATE_BACKUP_KEEP_DAYS` | `7` | Days a database copy from before an update is kept; at least 3, a smaller number counts as 3 |
+| `UPDATE_HEALTH_TIMEOUT` | `20` | Minutes a new release has to become healthy; 1 to 9999 |
+| `UPDATE_BACKUP_KEEP_DAYS` | `7` | Days a database copy from before an update is kept; at least 3, a smaller number counts as 3; at most six digits |
 
 After changing `UPDATE_WINDOW`, run `systemctl daemon-reload`. The appliance's time zone is UTC unless you set another one with `timedatectl set-timezone`.
 

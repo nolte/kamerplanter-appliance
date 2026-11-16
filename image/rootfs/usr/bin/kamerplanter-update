@@ -108,20 +108,21 @@ update_lock() {
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
-# count KEY DEFAULT: KEY as a whole number of at least 1 from the layers of
-# the configuration (load_config), read like the configuration check reads
-# them; DEFAULT when it is anything else, which the configuration check
-# reports.
+# count KEY DEFAULT DIGITS: KEY as a whole number of at least 1 and at most
+# DIGITS digits from the layers of the configuration (load_config), bounded
+# like the configuration check bounds it; DEFAULT when it is anything else,
+# which the configuration check reports. The bound keeps the arithmetic on it
+# from overflowing.
 count() {
     local value
     load_config
     value=$(get "$1")
-    if [[ $value =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
+    if [[ $value =~ ^[1-9][0-9]{0,$(($3 - 1))}$ ]]; then printf '%s' "$value"; else printf '%s' "$2"; fi
 }
 
 # keep_period: UPDATE_BACKUP_KEEP_DAYS, at least the minimum of keep_days in
 # /usr/lib/kamerplanter/env.sh: with a data disk the user file is on it.
-keep_period() { keep_days "$(count UPDATE_BACKUP_KEEP_DAYS 7)"; }
+keep_period() { keep_days "$(count UPDATE_BACKUP_KEEP_DAYS 7 6)"; }
 
 log() {  # log EVENT RESULT DETAIL [FROM] [TO] [JSON]; JSON, an object, is added
     install -d -m 0700 "$state"
@@ -1165,7 +1166,7 @@ healthy_now() {
 # fails with the last problem found when the time is up.
 wait_healthy() {
     local budget deadline problem
-    budget=$(count UPDATE_HEALTH_TIMEOUT 20)
+    budget=$(count UPDATE_HEALTH_TIMEOUT 20 4)
     deadline=$(($(date +%s) + budget * 60))
     until problem=$(check_health); do
         if [ "$(date +%s)" -ge "$deadline" ]; then

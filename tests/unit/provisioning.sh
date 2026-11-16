@@ -141,6 +141,39 @@ run_configure >/dev/null
 expect "configure: each message names the layer its value came from" "yes|yes" \
     "$(has 'TENANT_EXPORT_SIGNING_SECRET is set but shorter than 32 characters (set in the provisioning layer' "$(cat "$SB/out")")|$(grep -qx '  - UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)' "$SB/out" && echo yes)"
 
+# --- bounds of secrets and whole numbers (D12, #29, #32) ---
+configure_case
+prov_map "JWT_SECRET_KEY=$(printf 's%.0s' {1..31})"
+expect "configure: a provisioned JWT_SECRET_KEY below 32 characters keeps the services stopped" "1|yes" \
+    "$(run_configure)|$(has 'JWT_SECRET_KEY is shorter than 32 characters (set in the provisioning layer' "$(cat "$SB/out")")"
+
+configure_case
+user_file "JWT_SECRET_KEY=$(printf 'u%.0s' {1..31})" ARANGODB_PASSWORD=short-password
+rc=$(run_configure)
+out=$(cat "$SB/out")
+expect "configure: short secrets in the user file are warned about by key only, the services start" "0|yes|yes|no|no" \
+    "$rc|$(has 'warning: JWT_SECRET_KEY is shorter than 32 characters' "$out")|$(has 'warning: ARANGODB_PASSWORD is shorter than 16 characters' "$out")|$(has short-password "$out")|$(has uuuuuuuu "$out")"
+
+configure_case
+user_file "JWT_SECRET_KEY=$(printf 'u%.0s' {1..32})" ARANGODB_PASSWORD=sixteen-chars-ok
+expect "configure: secrets of the minimum length pass without a warning" "0|no" \
+    "$(run_configure)|$(has warning "$(cat "$SB/out")")"
+
+configure_case
+prov_map UPDATE_HEALTH_TIMEOUT=153722867280912931
+expect "configure: an UPDATE_HEALTH_TIMEOUT beyond 9999 minutes keeps the services stopped" "1|yes" \
+    "$(run_configure)|$(has 'UPDATE_HEALTH_TIMEOUT is not a whole number of minutes from 1 to 9999 (set in the provisioning layer' "$(cat "$SB/out")")"
+
+configure_case
+user_file UPDATE_HEALTH_TIMEOUT=9999 UPDATE_BACKUP_KEEP_DAYS=999999
+expect "configure: the largest bounded values pass" "0|9999|999999" \
+    "$(run_configure)|$(app UPDATE_HEALTH_TIMEOUT)|$(app UPDATE_BACKUP_KEEP_DAYS)"
+
+configure_case
+user_file UPDATE_BACKUP_KEEP_DAYS=1000000
+expect "configure: an UPDATE_BACKUP_KEEP_DAYS of seven digits is rejected, as the update tool would not use it" "1|yes" \
+    "$(run_configure)|$(has 'UPDATE_BACKUP_KEEP_DAYS is not a whole number of days from 1 to 999999' "$(cat "$SB/out")")"
+
 configure_case
 prov_file 'not a setting'
 expect "configure: a line of the write_files file that is not KEY=VALUE keeps the services stopped" 1 "$(run_configure)"
@@ -197,7 +230,7 @@ window() {  # the window the sandboxed generator sets
     bash "$SB/usr/lib/systemd/system-generators/kamerplanter-update-window" "$SB/gen" &&
         sed -n 's/^OnCalendar=\*-\*-\* \(.*\):00$/\1/p' "$SB/gen/kamerplanter-update-apply.timer.d/50-window.conf"
 }
-count_of() {  # count_of KEY DEFAULT: count() of the sandboxed update tool
+count_of() {  # count_of KEY DEFAULT DIGITS: count() of the sandboxed update tool
     (
         # shellcheck source=/dev/null
         . "$SB/usr/lib/kamerplanter/env.sh"
@@ -206,13 +239,18 @@ count_of() {  # count_of KEY DEFAULT: count() of the sandboxed update tool
     )
 }
 reader_case 'UPDATE_WINDOW=01:15\nUPDATE_HEALTH_TIMEOUT=31\n' '' ''
-expect "readers: the write_files file sets the window and the health timeout" "01:15|31" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20)"
+expect "readers: the write_files file sets the window and the health timeout" "01:15|31" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20 4)"
 reader_case 'UPDATE_WINDOW=01:15\nUPDATE_HEALTH_TIMEOUT=31\n' 'UPDATE_WINDOW=02:45\nUPDATE_HEALTH_TIMEOUT=41\n' ''
-expect "readers: the map wins in the generator and the update tool" "02:45|41" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20)"
+expect "readers: the map wins in the generator and the update tool" "02:45|41" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20 4)"
 reader_case '' 'UPDATE_WINDOW=02:45\nUPDATE_HEALTH_TIMEOUT=41\n' 'UPDATE_WINDOW=05:05\nUPDATE_HEALTH_TIMEOUT=51\n'
-expect "readers: the user file wins in the generator and the update tool" "05:05|51" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20)"
+expect "readers: the user file wins in the generator and the update tool" "05:05|51" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20 4)"
 reader_case '' 'UPDATE_WINDOW=25:00\nUPDATE_HEALTH_TIMEOUT=x\n' ''
-expect "readers: an invalid provisioned value falls back to the default" "03:00|20" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20)"
+expect "readers: an invalid provisioned value falls back to the default" "03:00|20" "$(window)|$(count_of UPDATE_HEALTH_TIMEOUT 20 4)"
+reader_case '' 'UPDATE_HEALTH_TIMEOUT=153722867280912931\nUPDATE_BACKUP_KEEP_DAYS=1000000\n' ''
+expect "readers: values beyond their bound fall back to the default instead of overflowing" "20|7" \
+    "$(count_of UPDATE_HEALTH_TIMEOUT 20 4)|$(count_of UPDATE_BACKUP_KEEP_DAYS 7 6)"
+reader_case '' 'UPDATE_HEALTH_TIMEOUT=9999\n' ''
+expect "readers: the largest timeout is used" 9999 "$(count_of UPDATE_HEALTH_TIMEOUT 20 4)"
 
 # --- the provisioning step as it ships (provisioning) ---
 # step_case: a sandbox for the step with cloud-init's run directory; the

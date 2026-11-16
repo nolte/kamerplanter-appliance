@@ -114,9 +114,48 @@ secret_problem() {
     esac
 }
 
+# The minimum length of a secret that secret_problem accepts in any length
+# (spec/distribution-requirements/ D12): a short HS256 key can be guessed
+# offline from one token, a short password online. The generated values are
+# far longer (hex 32 and hex 24 below).
+declare -A secret_min=([JWT_SECRET_KEY]=32 [ARANGODB_PASSWORD]=16)
+
+# short_secret KEY VALUE: sets problem when VALUE is shorter than the minimum
+# length of the secret KEY, empty otherwise. Never a value in problem.
+short_secret() {
+    problem=
+    local min=${secret_min[$1]-}
+    [ -z "$min" ] || [ "${#2}" -ge "$min" ] || problem="$1 is shorter than $min characters"
+}
+
+# check_secret KEY: checks the value of the secret KEY in the effective
+# configuration. What secret_problem finds keeps the services stopped; a value
+# below the minimum length does so only when the provisioning layer supplies
+# it. One in the user file or the secrets file is only warned about, so that
+# an installation keeps starting with it: the database keeps the password it
+# was created with (D12, L14).
+check_secret() {
+    local value from
+    value=$(get "$1")
+    secret_problem "$1" "$value"
+    if [ -n "$problem" ]; then
+        fail_key "$1" "$problem"
+        return
+    fi
+    short_secret "$1" "$value"
+    [ -n "$problem" ] || return 0
+    from=$(source_of "$1")
+    if [ -n "$from" ] && provisioning_source "$from"; then
+        fail_key "$1" "$problem"
+    else
+        echo "warning: $problem and can be guessed; replace it with a longer value (see the configuration reference)" >&2
+    fi
+}
+
 # provisioned_problem KEY VALUE: as secret_problem, for a provisioned secret,
 # which must also be one line of 1 to 4096 printable ASCII characters, so it
-# is taken into the secrets file literally and as one line.
+# is taken into the secrets file literally and as one line, and at least as
+# long as the minimum length of KEY.
 provisioned_problem() {
     local LC_ALL=C
     problem=
@@ -128,6 +167,7 @@ provisioned_problem() {
         problem="$1 holds a character that is not printable ASCII, such as a line break"
     else
         secret_problem "$1" "$2"
+        [ -n "$problem" ] || short_secret "$1" "$2"
     fi
 }
 
@@ -371,15 +411,16 @@ fi
 cfg[ARANGO_ROOT_PASSWORD]=$(get ARANGODB_PASSWORD)
 
 for key in JWT_SECRET_KEY FERNET_KEY ERASURE_TOMBSTONE_SALT LOG_PSEUDONYM_SALT TENANT_EXPORT_SIGNING_SECRET; do
-    secret_problem "$key" "$(get "$key")"
-    [ -z "$problem" ] || fail_key "$key" "$problem"
+    check_secret "$key"
 done
 [[ $(get UPDATE_WINDOW) =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] ||
     fail_key UPDATE_WINDOW "UPDATE_WINDOW is not a time of day as HH:MM (the window starts at 03:00 until it is fixed)"
-[[ $(get UPDATE_HEALTH_TIMEOUT) =~ ^[1-9][0-9]*$ ]] ||
-    fail_key UPDATE_HEALTH_TIMEOUT "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes"
-[[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]*$ ]] ||
-    fail_key UPDATE_BACKUP_KEEP_DAYS "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days"
+# Bounded like kamerplanter-update reads them (count there): a larger
+# timeout would overflow its arithmetic, a longer keeping period is not used.
+[[ $(get UPDATE_HEALTH_TIMEOUT) =~ ^[1-9][0-9]{0,3}$ ]] ||
+    fail_key UPDATE_HEALTH_TIMEOUT "UPDATE_HEALTH_TIMEOUT is not a whole number of minutes from 1 to 9999"
+[[ $(get UPDATE_BACKUP_KEEP_DAYS) =~ ^[1-9][0-9]{0,5}$ ]] ||
+    fail_key UPDATE_BACKUP_KEEP_DAYS "UPDATE_BACKUP_KEEP_DAYS is not a whole number of days from 1 to 999999"
 # Checked for their form only; kamerplanter-data-disk.service and
 # kamerplanter-backup-disk.service decide whether a named disk is used. Not
 # checked when the user file lies on the data disk: the disk service ignores
@@ -392,8 +433,7 @@ if user_file_trusted; then
         [[ $(get "${key}_FORCE") =~ ^[01]?$ ]] || fail "${key}_FORCE is neither 0 nor 1"
     done
 fi
-secret_problem ARANGODB_PASSWORD "$(get ARANGODB_PASSWORD)"
-[ -z "$problem" ] || fail_key ARANGODB_PASSWORD "$problem"
+check_secret ARANGODB_PASSWORD
 
 for key in "${!pinned[@]}"; do
     [ -e "$pins/$key" ] || continue

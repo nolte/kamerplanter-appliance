@@ -155,8 +155,8 @@ The appliance takes over these keys only:
 
 | Key | Rule beyond 1 to 4096 printable ASCII characters on one line |
 |---|---|
-| `ARANGODB_PASSWORD` | Not a known default |
-| `JWT_SECRET_KEY` | Not the upstream placeholder |
+| `ARANGODB_PASSWORD` | At least 16 characters, not a known default |
+| `JWT_SECRET_KEY` | At least 32 characters, not the upstream placeholder |
 | `FERNET_KEY` | A Fernet key: 44 characters, URL-safe base64 |
 | `ERASURE_TOMBSTONE_SALT` | At least 32 characters |
 | `LOG_PSEUDONYM_SALT` | At least 32 characters |

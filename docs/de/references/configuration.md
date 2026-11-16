@@ -42,7 +42,7 @@ Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerp
 
 ## Updates
 
-`UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT` und `UPDATE_BACKUP_KEEP_DAYS` legen fest, wann Updates aktiviert und wie sie geprüft werden; siehe [Updates und Rollback](../getting-started/updates.md#einstellungen). Die Konfigurationsprüfung lehnt ein Fenster ab, das nicht `HH:MM` ist, und eine Frist oder Aufbewahrungsdauer, die keine ganze Zahl ist.
+`UPDATE_WINDOW`, `UPDATE_HEALTH_TIMEOUT` und `UPDATE_BACKUP_KEEP_DAYS` legen fest, wann Updates aktiviert und wie sie geprüft werden; siehe [Updates und Rollback](../getting-started/updates.md#einstellungen). Die Konfigurationsprüfung lehnt ein Fenster ab, das nicht `HH:MM` ist, und eine Frist oder Aufbewahrungsdauer, die keine ganze Zahl ist, eine Frist über 9999 Minuten oder eine Aufbewahrungsdauer mit mehr als sechs Stellen.
 
 ## Datenträger und Sicherungs-Datenträger
 
@@ -70,6 +70,7 @@ Die Dienste bleiben gestoppt, mit einer Meldung in `systemctl status kamerplante
 - `FERNET_KEY` kein gültiger Fernet-Schlüssel ist (44 Zeichen, URL-sicheres Base64)
 - `ERASURE_TOMBSTONE_SALT`, `LOG_PSEUDONYM_SALT` oder ein gesetztes `TENANT_EXPORT_SIGNING_SECRET` kürzer als 32 Zeichen ist
 - `JWT_SECRET_KEY` oder das Datenbankpasswort leer oder ein bekannter Standardwert ist
+- ein [provisionierter](provisioning.md) `JWT_SECRET_KEY` kürzer als 32 Zeichen oder ein provisioniertes Datenbankpasswort kürzer als 16 Zeichen ist; steht ein so kurzer Wert in deiner Datei oder in `secrets.env`, gibt es nur eine Warnung, die den Schlüssel nennt, damit eine bestehende Installation weiter startet; ersetze ihn durch einen längeren
 - `ARANGODB_USERNAME` einen anderen Wert als `root` hat: Das Datenbank-Image legt nur seinen Root-Nutzer an, und `ARANGO_ROOT_PASSWORD` wird immer aus `ARANGODB_PASSWORD` übernommen
 - eine Zeile in einer der Dateien nicht `KEY=VALUE` ist
 - sich einer der Werte unten geändert hat oder fehlt, nachdem ein Dienst damit gestartet ist

@@ -52,3 +52,23 @@ jobs:
 
       - name: Run every hook
         run: pre-commit run --all-files --show-diff-on-failure
+
+  unit:
+    # The shell unit tests of tests/unit/: the image's scripts as they ship,
+    # in a sandbox with stubs (tests/unit/lib/sandbox.sh); no root, no VM.
+    # Not a required check yet: add `unit-tests` to `.github/settings.yml`
+    # once it has run green on develop.
+    name: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Run every unit test
+        run: |
+          status=0
+          for test in tests/unit/*.sh; do
+            echo "::group::$test"
+            bash "$test" || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"

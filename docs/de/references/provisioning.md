@@ -155,8 +155,8 @@ Die Appliance übernimmt nur diese Schlüssel:
 
 | Schlüssel | Regel über 1 bis 4096 druckbare ASCII-Zeichen auf einer Zeile hinaus |
 |---|---|
-| `ARANGODB_PASSWORD` | Kein bekannter Standardwert |
-| `JWT_SECRET_KEY` | Nicht der Platzhalter von Upstream |
+| `ARANGODB_PASSWORD` | Mindestens 16 Zeichen, kein bekannter Standardwert |
+| `JWT_SECRET_KEY` | Mindestens 32 Zeichen, nicht der Platzhalter von Upstream |
 | `FERNET_KEY` | Ein Fernet-Schlüssel: 44 Zeichen, URL-sicheres Base64 |
 | `ERASURE_TOMBSTONE_SALT` | Mindestens 32 Zeichen |
 | `LOG_PSEUDONYM_SALT` | Mindestens 32 Zeichen |

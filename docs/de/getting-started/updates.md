@@ -69,8 +69,8 @@ Trage sie in `/etc/kamerplanter/kamerplanter.env` ein:
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
 | `UPDATE_WINDOW` | `03:00` | Beginn des Wartungsfensters, `HH:MM` in der Zeit der Appliance; der Neustart erfolgt innerhalb von 30 Minuten danach |
-| `UPDATE_HEALTH_TIMEOUT` | `20` | Minuten, die ein neues Release hat, um gesund zu werden |
-| `UPDATE_BACKUP_KEEP_DAYS` | `7` | Tage, die eine Datenbank-Kopie von vor einem Update aufbewahrt wird; mindestens 3, eine kleinere Zahl gilt als 3 |
+| `UPDATE_HEALTH_TIMEOUT` | `20` | Minuten, die ein neues Release hat, um gesund zu werden; 1 bis 9999 |
+| `UPDATE_BACKUP_KEEP_DAYS` | `7` | Tage, die eine Datenbank-Kopie von vor einem Update aufbewahrt wird; mindestens 3, eine kleinere Zahl gilt als 3; höchstens sechs Stellen |
 
 Nach einer Änderung von `UPDATE_WINDOW` führe `systemctl daemon-reload` aus. Die Zeitzone der Appliance ist UTC, solange du keine andere mit `timedatectl set-timezone` einstellst.
 
