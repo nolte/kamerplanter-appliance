@@ -22,6 +22,9 @@ machine.
 - The delivery artefacts (raw disk image, later the installer ISO), their
   checksums and signatures, and the build and release workflows
 - The update path through the system image in the container registry
+- Provisioning data at first boot and later boots: cloud-init with its
+  datasources, the provisioning layer, and the secret channels, systemd
+  credentials among them (spec/distribution-requirements/ §L)
 - The documentation (`docs/`) and the specifications (`spec/`)
 
 **Outside the boundary**
@@ -47,20 +50,27 @@ Portfolio-baseline track defaults: `user` → `user-docs`; `contributor` /
 
 - **Infrastructure-as-code automation** — _category_: direct-consumer ·
   _surface_: release assets (disk image, checksum file, signatures) fetched by
-  URL; provisioning data passed to the appliance at first boot ·
+  URL; provisioning data passed to the appliance through cloud-init (a NoCloud
+  drive labelled `CIDATA`, a seed URL, seed files; the metadata service of
+  Hetzner Cloud or OpenStack/OVHcloud, a ConfigDrive) under `kamerplanter:` →
+  `settings:` / `secrets:`, and secrets as systemd credentials
+  `kamerplanter.secret.<KEY>` ·
   _expects_: stable, versioned asset names, a checksum and signature to verify
   against, documented provisioning inputs (SSH key, host name, own values) ·
   _track_: `developer-docs` · _status_: `assumed` · _criticality_: secondary
-  - Open questions: which provisioning mechanism the appliance accepts (cloud-init
-    is not in the image yet); whether the Terraform modules live in
+  - Open questions: whether the Terraform modules live in
     `terraform-proxmox-kamerplanter-appliance` or `kamerplanter-tf-infrastructure`.
+    (Resolved 2026-11-16: the appliance accepts cloud-init provisioning data and
+    systemd credentials, issue #17.)
 
 ### Operators
 
 - **Self-hoster** (ID `self-hoster`) — _category_: operator ·
   _surface_: release page and download verification, the installation guide per
   target, the web UI on port 8080, the API on port 8000, the configuration file
-  `/etc/kamerplanter/kamerplanter.env`, `systemctl restart kamerplanter.target` ·
+  `/etc/kamerplanter/kamerplanter.env`, provisioning data (a NoCloud drive or
+  seed files; the provider's metadata service on hosted targets),
+  `systemctl restart kamerplanter.target` ·
   _expects_: a verified download, a fast first start, no operating-system
   administration (no patching, no user management, no hardening), updates that
   apply and roll back by themselves, clear messages when a setting is wrong,

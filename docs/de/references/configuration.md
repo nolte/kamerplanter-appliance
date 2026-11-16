@@ -3,22 +3,23 @@ title: Konfiguration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-15
+last_updated: 2026-11-16
 ---
 
 # Konfiguration
 
-Die Kamerplanter-Einstellungen stammen aus drei Dateien. Ein Wert in einer späteren Datei gewinnt gegenüber demselben Schlüssel in einer früheren.
+Die Kamerplanter-Einstellungen stammen aus vier Schichten. Ein Wert in einer späteren Schicht gewinnt gegenüber demselben Schlüssel in einer früheren.
 
-| Datei | Inhalt | Wer schreibt sie |
+| Schicht | Datei | Wer schreibt sie |
 |---|---|---|
-| `/usr/share/kamerplanter/kamerplanter.env` | Standardwerte | Das Image; jedes Update ersetzt sie |
-| `/etc/kamerplanter/secrets.env` | Erzeugte Secrets | Die Appliance, einmal je Schlüssel |
-| `/etc/kamerplanter/kamerplanter.env` | Deine eigenen Werte | Du; bleibt über Updates und Rollbacks erhalten |
+| Standardwerte | `/usr/share/kamerplanter/kamerplanter.env` | Das Image; jedes Update ersetzt sie |
+| [Provisionierung](provisioning.md) | `/var/lib/kamerplanter/provisioning/provisioning.env`, danach `/var/lib/kamerplanter/provisioning/settings.env` | cloud-init, aus den Provisionierungsdaten; ohne sie leer |
+| Secrets | `/etc/kamerplanter/secrets.env` | Die Appliance, einmal je Schlüssel: erzeugt oder provisioniert |
+| Deine eigenen Werte | `/etc/kamerplanter/kamerplanter.env` | Du; bleibt über Updates und Rollbacks erhalten |
 
-Mit einem [Datenträger](../getting-started/data-disk.md) liegen `/etc/kamerplanter/` und `/var/lib/kamerplanter/pinned/` auf diesem; die Pfade bleiben dieselben.
+Mit einem [Datenträger](../getting-started/data-disk.md) liegen `/etc/kamerplanter/` und `/var/lib/kamerplanter/pinned/` auf diesem; die Pfade bleiben dieselben. Die Provisionierungsschicht bleibt auf der Systemplatte.
 
-Jede Zeile ist `KEY=VALUE` und wird wörtlich übernommen: Anführungszeichen werden nicht entfernt, führende Leerzeichen und Zeilen mit `#` am Anfang werden übersprungen. Bei jedem Boot führt die Appliance die drei Dateien zusammen, prüft sie und schreibt das Ergebnis nach `/run/kamerplanter/`; die Dienste lesen nur dieses Ergebnis. Eine Änderung übernimmst du mit:
+Jede Zeile ist `KEY=VALUE` und wird wörtlich übernommen: Anführungszeichen werden nicht entfernt, führende Leerzeichen und Zeilen mit `#` am Anfang werden übersprungen. Bei jedem Boot führt die Appliance die Schichten zusammen, prüft sie und schreibt das Ergebnis nach `/run/kamerplanter/`; die Dienste lesen nur dieses Ergebnis. Eine Änderung übernimmst du mit:
 
 ```bash
 systemctl restart kamerplanter.target
@@ -37,7 +38,7 @@ FRONTEND_URL=http://kamerplanter.local:8080
 
 Bei jedem Boot erzeugt die Appliance jedes verlangte Secret, das noch fehlt: `ARANGODB_PASSWORD`, `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT` und `LOG_PSEUDONYM_SALT`. Ein Secret, das ein späteres Release neu verlangt, entsteht beim ersten Boot dieses Releases. Ausgenommen sind die drei Werte unter [Werte, die sich nicht ändern dürfen](#werte-die-sich-nicht-andern-durfen): Ist ein Dienst einmal mit einem davon gestartet, wird er nicht neu erzeugt, sondern muss aus einem Backup kommen. Ein neuer `JWT_SECRET_KEY` beendet nur alle Sitzungen, ein neuer `LOG_PSEUDONYM_SALT` trennt nur die Zuordnung zu älteren Logzeilen.
 
-Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerplanter.env` ein, am besten vor dem ersten Start.
+Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerplanter.env` ein, am besten vor dem ersten Start. Um ihn schon vor dem ersten Boot mitzugeben, nutze die Provisionierungsdaten (`kamerplanter:` → `secrets:`) oder das System-Credential `kamerplanter.secret.<KEY>`; siehe [Provisionierung](provisioning.md#secrets).
 
 ## Updates
 
@@ -52,7 +53,7 @@ Willst du stattdessen einen eigenen Wert, trage ihn in `/etc/kamerplanter/kamerp
 | `BACKUP_DISK` | leer | Der Sicherungs-Datenträger, ebenso benannt |
 | `BACKUP_DISK_FORCE` | `0` | `1` formatiert einen benannten Sicherungs-Datenträger, der ein anderes Dateisystem oder eine Partitionstabelle trägt, einmal je Gerät |
 
-Diese vier Einstellungen gelten in dieser Datei nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger; die Appliance ignoriert sie dann hier und sagt das in `systemctl status kamerplanter-data-disk`. Setze sie stattdessen als root auf der Systemplatte:
+Diese vier Einstellungen gelten in deiner eigenen Datei nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger; die Appliance ignoriert sie dann dort und sagt das in `systemctl status kamerplanter-data-disk`. In der [Provisionierungsschicht](provisioning.md#lifecycle-of-the-settings) werden sie immer ignoriert. Setze sie stattdessen als root auf der Systemplatte:
 
 ```bash
 /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123

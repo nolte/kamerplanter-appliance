@@ -3,12 +3,13 @@ title: References
 audience: [self-hoster, maintainer]
 content_mode: meta
 track: developer-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-16
 ---
 
 # References
 
 - [Configuration](configuration.md) — the files that configure the Kamerplanter services on an installed appliance
+- [Provisioning](provisioning.md) — the host name, network, SSH key, settings, and secrets an appliance takes from cloud-init at boot
 - [Verifying a download](verify.md) — how to check that a disk image comes from this repository's release workflow
 - [Related repositories](repositories.md) — every Kamerplanter repository and what it means for the appliance, including the ones needed only indirectly
 

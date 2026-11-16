@@ -3,22 +3,23 @@ title: Configuration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-15
+last_updated: 2026-11-16
 ---
 
 # Configuration
 
-The Kamerplanter settings come from three files. A value in a later file wins over the same key in an earlier one.
+The Kamerplanter settings come from four layers. A value in a later layer wins over the same key in an earlier one.
 
-| File | Content | Who writes it |
+| Layer | File | Who writes it |
 |---|---|---|
-| `/usr/share/kamerplanter/kamerplanter.env` | Defaults | The image; replaced by every update |
-| `/etc/kamerplanter/secrets.env` | Generated secrets | The appliance, once per key |
-| `/etc/kamerplanter/kamerplanter.env` | Your own values | You; kept across updates and rollbacks |
+| Defaults | `/usr/share/kamerplanter/kamerplanter.env` | The image; replaced by every update |
+| [Provisioning](provisioning.md) | `/var/lib/kamerplanter/provisioning/provisioning.env`, then `/var/lib/kamerplanter/provisioning/settings.env` | cloud-init, from the provisioning data; empty without it |
+| Secrets | `/etc/kamerplanter/secrets.env` | The appliance, once per key: generated or provisioned |
+| Your own values | `/etc/kamerplanter/kamerplanter.env` | You; kept across updates and rollbacks |
 
-With a [data disk](../getting-started/data-disk.md), `/etc/kamerplanter/` and `/var/lib/kamerplanter/pinned/` lie on that disk; the paths stay the same.
+With a [data disk](../getting-started/data-disk.md), `/etc/kamerplanter/` and `/var/lib/kamerplanter/pinned/` lie on that disk; the paths stay the same. The provisioning layer stays on the system disk.
 
-Each line is `KEY=VALUE`, taken literally: quotes are not removed, leading whitespace and lines starting with `#` are skipped. On every boot the appliance merges and checks the three files and writes the result to `/run/kamerplanter/`; the services read only that result. Apply a change with:
+Each line is `KEY=VALUE`, taken literally: quotes are not removed, leading whitespace and lines starting with `#` are skipped. On every boot the appliance merges and checks the layers and writes the result to `/run/kamerplanter/`; the services read only that result. Apply a change with:
 
 ```bash
 systemctl restart kamerplanter.target
@@ -37,7 +38,7 @@ FRONTEND_URL=http://kamerplanter.local:8080
 
 On every boot the appliance generates each required secret that is still missing: `ARANGODB_PASSWORD`, `JWT_SECRET_KEY`, `FERNET_KEY`, `ERASURE_TOMBSTONE_SALT`, and `LOG_PSEUDONYM_SALT`. A secret that a later release newly requires is generated on that release's first boot. The exception are the three values under [Values that must not change](#values-that-must-not-change): once a service has started with one of them, it is not generated again but has to come back from a backup. A new `JWT_SECRET_KEY` only ends all sessions, a new `LOG_PSEUDONYM_SALT` only breaks the correlation with older log lines.
 
-To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`, ideally before the first start.
+To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`, ideally before the first start. To supply it before the first boot, use the provisioning data (`kamerplanter:` → `secrets:`) or the system credential `kamerplanter.secret.<KEY>`; see [Provisioning](provisioning.md#secrets).
 
 ## Updates
 
@@ -52,7 +53,7 @@ To use your own value instead, put it into `/etc/kamerplanter/kamerplanter.env`,
 | `BACKUP_DISK` | empty | The backup disk, named the same way |
 | `BACKUP_DISK_FORCE` | `0` | `1` formats a named backup disk that carries another file system or partition table, once per device |
 
-These four settings count in this file only while no data disk is set up. Once one is, this file lies on the data disk, so the appliance ignores them here and says so in `systemctl status kamerplanter-data-disk`. Set them on the system disk instead, as root:
+These four settings count in your own file only while no data disk is set up. Once one is, that file lies on the data disk, so the appliance ignores them there and says so in `systemctl status kamerplanter-data-disk`. In the [provisioning layer](provisioning.md#lifecycle-of-the-settings) they're always ignored. Set them on the system disk instead, as root:
 
 ```bash
 /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123

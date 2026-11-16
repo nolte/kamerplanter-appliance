@@ -74,6 +74,7 @@ plugins:
             Getting Started: Erste Schritte
             References: Referenzen
             Configuration: Konfiguration
+            Provisioning: Provisionierung
             Updates and rollback: Updates und Rollback
             Data disk and backup disk: Datenträger und Sicherungs-Datenträger
             Verifying a download: Einen Download prüfen
@@ -137,5 +138,6 @@ nav:
   - References:
       - en/references/index.md
       - Configuration: en/references/configuration.md
+      - Provisioning: en/references/provisioning.md
       - Verifying a download: en/references/verify.md
       - Related repositories: en/references/repositories.md

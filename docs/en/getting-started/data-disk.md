@@ -200,6 +200,8 @@ The backup goes to the backup disk, else to the data disk, else to the system di
 
 ## Provisioning
 
+The disks are never named through cloud-init provisioning data; for settings and secrets from cloud-init, see [Provisioning](../references/provisioning.md).
+
 A provisioner, such as a Terraform module, passes these as systemd credentials, for example as SMBIOS type 11 strings of a VM. Name the disks by a `/dev/disk/by-id/` or `/dev/disk/by-uuid/` path that's stable inside the guest:
 
 | Credential | Value |

@@ -200,6 +200,8 @@ Die Kopie geht auf den Sicherungs-Datenträger, sonst auf den Datenträger, sons
 
 ## Provisionierung { #provisioning }
 
+Die Platten werden nie über Provisionierungsdaten von cloud-init benannt; für Einstellungen und Secrets aus cloud-init siehe [Provisionierung](../references/provisioning.md).
+
 Ein Provisioner, etwa ein Terraform-Modul, übergibt diese Werte als systemd-Credentials, zum Beispiel als SMBIOS-Typ-11-Zeichenketten einer VM. Benenne die Platten über einen Pfad unter `/dev/disk/by-id/` oder `/dev/disk/by-uuid/`, der im Gast stabil ist:
 
 | Credential | Wert |
