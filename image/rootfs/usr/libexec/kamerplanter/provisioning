@@ -139,15 +139,17 @@ instance_id() {
 
 # stage_secrets: stages kamerplanter: -> secrets: of this boot's provisioning
 # data for the configuration check, unless the map of this instance was
-# taken over already. Whatever was staged before is removed first.
+# taken over already. Whatever was staged before is removed first, once this
+# boot's provisioning data is there: a restart of the step after the scrub
+# keeps what is staged for the configuration check.
 stage_secrets() {
     local id tmp count
     if [ -L "$provisioning_staging" ] || { [ -e "$provisioning_staging" ] && [ ! -d "$provisioning_staging" ]; }; then
         echo "$provisioning_staging is not a directory; no provisioned secret is staged" >&2
         return 0
     fi
-    rm -rf -- "$provisioning_staging"
     provided || return 0
+    rm -rf -- "$provisioning_staging"
     id=$(instance_id)
     if [ -f "$secrets_taken" ] && [ ! -L "$secrets_taken" ] && [ "$(head -n1 -- "$secrets_taken")" = "$id" ]; then
         echo "the secrets of this provisioning instance were taken over on an earlier boot; kamerplanter: -> secrets: is not taken over again"

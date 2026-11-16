@@ -166,6 +166,10 @@ report_invalid() {
     printf '  - %s\n' "${errors[@]}" >&2
     if [ "$secret_errors" = 1 ]; then
         printf 'Fix the provisioned secret, in the provisioning data (kamerplanter: -> secrets: is read again at the next boot until it is taken over) or as the system credential %s<KEY>, and reboot; nothing provisioned is written to %s until then\n' "$secret_credentials" "$secrets" >&2
+    elif [ "${provisioned_lines-0}" = 1 ]; then
+        # A line that is no KEY=VALUE has no key that another layer could
+        # set instead: only the provisioning data itself can fix it.
+        printf 'Fix the entry in the provisioning data (kamerplanter: -> settings: is read again at the next boot; %s is written once per instance and may be edited in place), and reboot\n' "$provisioning_file" >&2
     elif [ "$provisioned_errors" = 1 ]; then
         printf 'Fix a provisioned value in the provisioning data (kamerplanter: -> settings: is read again at the next boot; %s is written once per instance and may be edited in place), or set it in %s, which wins over it, and run: systemctl restart kamerplanter.target\n' "$provisioning_file" "$user" >&2
     else
@@ -345,7 +349,7 @@ if [ ${#generated[@]} -gt 0 ]; then
 fi
 load_config
 for line in "${cfg_invalid[@]}"; do
-    case $line in "line "*" of $provisioning_dir/"*) provisioned_errors=1 line="$line, in the provisioning layer" ;; esac
+    case $line in "line "*" of $provisioning_dir/"*) provisioned_errors=1 provisioned_lines=1 line="$line, in the provisioning layer" ;; esac
     fail "$line"
 done
 # Never a value in these messages: they go to the journal.

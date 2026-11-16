@@ -464,11 +464,11 @@ EOF
         stop_vm; return
     fi
     record run9-reboot PASS "${secs}s" "reboot with the NoCloud drive still attached"
-    expect_rec run9-reboot-settings "$url|$written" \
-        "$(guest podman exec backend printenv FRONTEND_URL)|$(guest stat -c %Y "$sem")" \
+    expect_rec run9-reboot-settings "$url|yes|$written" \
+        "$(guest podman exec backend printenv FRONTEND_URL)|$([ -n "$written" ] && echo yes)|$(guest stat -c %Y "$sem")" \
         "after the reboot the settings apply and once-per-instance steps did not run again"
-    expect_rec run9-reboot-secrets "1|1|no" \
-        "$(guest "grep -c '^JWT_SECRET_KEY=' $secrets")|$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")|$(guest "test -e /run/kamerplanter-provisioning/secrets.env && echo yes || echo no")" \
+    expect_rec run9-reboot-secrets "1|1|1" \
+        "$(guest "grep -c '^JWT_SECRET_KEY=' $secrets")|$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")|$(guest "journalctl -b --no-pager -u kamerplanter-provisioning.service | grep -c 'were taken over on an earlier boot'")" \
         "after the reboot the secret is not taken over or staged again"
     expect_rec run9-reboot-scrub "active|0 0" \
         "$(guest systemctl is-active kamerplanter-cloud-init-scrub.service)|$(no_copies "$jwt" "$cred")" \

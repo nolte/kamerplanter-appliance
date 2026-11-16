@@ -102,6 +102,8 @@ patterns() {
     for ((i = 0; i + 1 < ${#pairs[@]}; i += 2)); do
         key=${pairs[i]}
         value=${pairs[i + 1]}
+        # Shown in the journal: a key that is no KEY name may hold anything.
+        [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || key="a key that is no KEY name"
         while IFS= read -r line || [ -n "$line" ]; do
             if [ "${#line}" -lt "$min_secret" ]; then
                 [ -z "$line" ] || echo "the provisioned value of $key, or a line of it, is shorter than $min_secret characters; it is not searched for in cloud-init's files and logs" >&2
