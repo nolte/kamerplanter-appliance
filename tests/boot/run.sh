@@ -259,7 +259,7 @@ check_provisioned() {
     expect_rec "$name-hostname" "$host" "$(guest hostnamectl hostname)" "hostname from the provisioning data"
     record "$name-ssh-key" PASS - "root login with the key from the user-data only"
     expect_rec "$name-ssh-policy" "passwordauthentication no|" \
-        "$(guest "sshd -T 2>/dev/null | grep -i '^passwordauthentication '; echo \"|\$(getent passwd fedora cloud-user | cut -d: -f1)\"" | tr -d '\n')" \
+        "$(guest "sshd -T 2>/dev/null | grep -i '^passwordauthentication '; echo \"|\$(getent passwd fedora cloud-user | cut -d: -f1)\"" | tr -d '\n' | tr '[:upper:]' '[:lower:]')" \
         "password login refused although the user-data asks for it; no default user"
     [ -n "$iface" ] || return 0
     expect_rec "$name-network" "$addr/24 static | 10.0.2.2 $iface | 10.0.2.3" \
@@ -446,7 +446,8 @@ EOF
         "$(guest podman exec backend printenv FRONTEND_URL)|$(guest podman exec backend printenv REGISTRATION_MODE)|$(guest systemctl show kamerplanter-backend.service -p NRestarts --value)|$(guest "systemctl show kamerplanter-update-apply.timer -p TimersCalendar --value | grep -q '04:15:00' && echo 1")" \
         "settings at the first start without a restart: the map wins over write_files, write_files applies, UPDATE_WINDOW sets the window" ||
         diagnose run9
-    expect_rec run9-secrets "1|1|run9" \
+    # secrets-taken holds the instance id as one line of JSON.
+    expect_rec run9-secrets '1|1|"run9"' \
         "$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")|$(guest "grep -cxF 'LOG_PSEUDONYM_SALT=$cred' $secrets")|$(guest cat /var/lib/kamerplanter/provisioning/secrets-taken)" \
         "secrets from kamerplanter: -> secrets: and from the credential taken into the secrets file, the instance recorded"
     expect_rec run9-scrub "active|0 0" \
