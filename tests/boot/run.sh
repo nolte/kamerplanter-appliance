@@ -34,28 +34,39 @@ record() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" | tee -a "$RESULTS"; }
 
 new_overlay() { qemu-img create -q -f qcow2 -F raw -b "$DISK" "$1" 20G; }
 
-# Extras for the next start_vm, empty for the runs here:
-#   VM_DISKS        "SERIAL FILE" per further qcow2 disk, attached as
-#                   virtio-blk with that serial, so the guest names it
-#                   /dev/disk/by-id/virtio-SERIAL (at most 20 characters)
+# Extras for the next start_vm, empty for most runs here:
+#   VM_DISKS        "SERIAL FILE [FORMAT]" per further disk (FORMAT qcow2 when
+#                   left out, or raw), attached as virtio-blk with that serial,
+#                   so the guest names it /dev/disk/by-id/virtio-SERIAL (at
+#                   most 20 characters)
 #   VM_CREDENTIALS  "NAME VALUE" per further systemd credential, as the SSH
 #                   key is passed; VALUE is taken as text, or as base64 when
 #                   NAME is written binary:NAME
+#   VM_SMBIOS       further -smbios values, such as a NoCloud seed URL as the
+#                   system serial number: "type=1,serial=ds=nocloud;s=URL"
+#   VM_NIC          further properties of the network device, such as
+#                   "mac=52:54:00:12:34:56" or "acpi-index=1"
+#   VM_GUEST_ADDR   the guest address the ports are forwarded to; empty for the
+#                   address QEMU hands out by DHCP (10.0.2.15)
+#   VM_SSH_KEY      off: the SSH key is not passed as a credential, so only a
+#                   key that the provisioning data supplies lets guest in
 #   VM_MONITOR      a TCP port on 127.0.0.1 for QEMU's monitor (monitor below)
-VM_DISKS=() VM_CREDENTIALS=() VM_MONITOR=
+VM_DISKS=() VM_CREDENTIALS=() VM_SMBIOS=() VM_NIC='' VM_GUEST_ADDR='' VM_SSH_KEY=on VM_MONITOR=''
 
 # start_vm <name> <firmware: bios|uefi> <disk: virtio-scsi|lsi|virtio-blk>
 #          <net: virtio|e1000> <internet: on|off> <overlay>
 start_vm() {
-    local name=$1 fw=$2 disk=$3 net=$4 internet=$5 overlay=$6 extra serial file i=1
+    local name=$1 fw=$2 disk=$3 net=$4 internet=$5 overlay=$6 extra serial file format i=1
     local args=(
         -machine pc,accel=kvm -cpu host -smp 2 -m 4096 -display none
         -serial "file:$OUT/$name.serial.log"
         -pidfile "$OUT/vm.pid" -daemonize
-        # The key reaches the guest as a systemd credential; test use only.
-        -smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$PUBKEY_B64"
         -drive "if=none,id=d0,file=$overlay,format=qcow2"
     )
+    # The key reaches the guest as a systemd credential; test use only.
+    [ "$VM_SSH_KEY" = off ] ||
+        args+=(-smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$PUBKEY_B64")
+    for extra in "${VM_SMBIOS[@]}"; do args+=(-smbios "$extra"); done
     for extra in "${VM_CREDENTIALS[@]}"; do
         case $extra in
             binary:*) extra=${extra#binary:}; args+=(-smbios "type=11,value=io.systemd.credential.binary:${extra%% *}=${extra#* }") ;;
@@ -63,8 +74,8 @@ start_vm() {
         esac
     done
     for extra in "${VM_DISKS[@]}"; do
-        read -r serial file <<<"$extra"
-        args+=(-drive "if=none,id=x$i,file=$file,format=qcow2" -device "virtio-blk-pci,drive=x$i,id=xdev$i,serial=$serial")
+        read -r serial file format <<<"$extra"
+        args+=(-drive "if=none,id=x$i,file=$file,format=${format:-qcow2}" -device "virtio-blk-pci,drive=x$i,id=xdev$i,serial=$serial")
         i=$((i + 1))
     done
     [ -z "$VM_MONITOR" ] || args+=(-monitor "tcp:127.0.0.1:$VM_MONITOR,server,nowait")
@@ -78,11 +89,12 @@ start_vm() {
         lsi)         args+=(-device lsi53c895a,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0) ;;
         virtio-blk)  args+=(-device virtio-blk-pci,drive=d0) ;;
     esac
-    local netdev="user,id=n0,hostfwd=tcp:127.0.0.1:18080-:8080,hostfwd=tcp:127.0.0.1:18000-:8000,hostfwd=tcp:127.0.0.1:10022-:22"
+    local g=$VM_GUEST_ADDR
+    local netdev="user,id=n0,hostfwd=tcp:127.0.0.1:18080-$g:8080,hostfwd=tcp:127.0.0.1:18000-$g:8000,hostfwd=tcp:127.0.0.1:10022-$g:22"
     [ "$internet" = off ] && netdev+=",restrict=on"
     case $net in
-        virtio) args+=(-netdev "$netdev" -device virtio-net-pci,netdev=n0) ;;
-        e1000)  args+=(-netdev "$netdev" -device e1000,netdev=n0) ;;
+        virtio) args+=(-netdev "$netdev" -device "virtio-net-pci,netdev=n0${VM_NIC:+,$VM_NIC}") ;;
+        e1000)  args+=(-netdev "$netdev" -device "e1000,netdev=n0${VM_NIC:+,$VM_NIC}") ;;
     esac
     rm -f "$OUT/vm.pid"
     qemu-system-x86_64 "${args[@]}"
@@ -147,6 +159,90 @@ stop_vm() {
 
 kill_vm() { vm_alive && kill -9 "$(cat "$OUT/vm.pid")"; sleep 2; }
 
+# --- provisioning data (spec/distribution-requirements/ §L) ---
+
+# Bounded guest command: a hung command must not stall the run.
+guest_bounded() { timeout 900 ssh -o ServerAliveInterval=15 -i "$KEY" -p 10022 -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o IdentitiesOnly=yes root@127.0.0.1 "$@"; }
+
+# Prints the seconds until guest answers over SSH.
+wait_ssh() {
+    local timeout=$1 start=$SECONDS
+    while ((SECONDS - start < timeout)); do
+        guest true 2>/dev/null && { echo $((SECONDS - start)); return 0; }
+        vm_alive || return 2
+        sleep 5
+    done
+    return 1
+}
+
+# Waits until cloud-init has run all its stages. "degraded done" counts as
+# done: the key kamerplanter: makes cloud-init report it on every boot (L8).
+cloud_init_done() {
+    local rc
+    guest_bounded "timeout 600 cloud-init status --wait" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" = 0 ] || [ "$rc" = 2 ]
+}
+
+# nocloud_seed DIR HOSTNAME INSTANCE: meta-data and user-data of a NoCloud
+# source in DIR. The user-data authorises the harness key for root, so with
+# VM_SSH_KEY=off guest only gets in when cloud-init applied it, and asks for
+# password login, which the appliance keeps refused (L5). Lines on stdin are
+# appended to the user-data, network-config and the like are written by the
+# caller.
+nocloud_seed() {
+    rm -rf "$1"; mkdir -p "$1"
+    printf 'instance-id: %s\nlocal-hostname: %s\n' "$3" "$2" >"$1/meta-data"
+    {
+        printf '#cloud-config\nhostname: %s\nssh_pwauth: true\nssh_authorized_keys:\n  - %s\n' "$2" "$(cat "$KEY.pub")"
+        [ -t 0 ] || cat
+    } >"$1/user-data"
+}
+
+# nocloud_drive DIR IMAGE: a vfat drive labelled CIDATA holding the files of
+# DIR, as a user would write it to a USB stick or a hypervisor attaches it.
+nocloud_drive() {
+    rm -f "$2"
+    truncate -s 4M "$2" && mkfs.vfat -n CIDATA "$2" >/dev/null && mcopy -i "$2" "$1"/* ::/
+}
+
+# static_network ID ADDRESS [MATCH-MAC]: a network-config version 2 with a
+# static IPv4 address, the gateway and DNS server of QEMU's user network, in
+# one of the two forms of L6: keyed by the interface name ID, or matched by
+# MAC and renamed to ID.
+static_network() {
+    printf 'version: 2\nethernets:\n  %s:\n' "$1"
+    [ -z "${3-}" ] || printf '    match:\n      macaddress: "%s"\n    set-name: %s\n' "$3" "$1"
+    printf '    dhcp4: false\n    addresses: [%s/24]\n    routes:\n      - to: default\n        via: 10.0.2.2\n    nameservers:\n      addresses: [10.0.2.3]\n' "$2"
+}
+
+# expect_rec NAME EXPECTED ACTUAL WHAT: records NAME as PASS when ACTUAL is
+# EXPECTED, as FAIL with both otherwise; fails then.
+expect_rec() {
+    if [ "$3" = "$2" ]; then record "$1" PASS - "$4"; return 0; fi
+    record "$1" FAIL - "$4: expected '$2', got '$3'"
+    return 1
+}
+
+# check_provisioned NAME HOSTNAME [IFACE ADDRESS]: records whether the
+# hostname, the SSH key of the user-data (VM_SSH_KEY=off, so guest only gets
+# in with it), the SSH policy and, with IFACE, the static IPv4 address,
+# gateway and DNS server of the provisioning data are in effect (L5, L6).
+check_provisioned() {
+    local name=$1 host=$2 iface=${3-} addr=${4-}
+    expect_rec "$name-hostname" "$host" "$(guest hostnamectl hostname)" "hostname from the provisioning data"
+    record "$name-ssh-key" PASS - "root login with the key from the user-data only"
+    expect_rec "$name-ssh-policy" "passwordauthentication no|" \
+        "$(guest "sshd -T 2>/dev/null | grep -i '^passwordauthentication '; echo \"|\$(getent passwd fedora cloud-user | cut -d: -f1)\"" | tr -d '\n')" \
+        "password login refused although the user-data asks for it; no default user"
+    [ -n "$iface" ] || return 0
+    expect_rec "$name-network" "$addr/24 static | 10.0.2.2 $iface | 10.0.2.3" \
+        "$(guest "ip -4 -o addr show dev $iface scope global | awk '{print \$4, (/dynamic/ ? \"dynamic\" : \"static\")}' | tr '\n' ' ';
+            echo \"| \$(ip -4 route show default | awk '{print \$3, \$5}') | \$(nmcli -g IP4.DNS device show $iface)\"")" \
+        "$iface: static $addr/24, gateway 10.0.2.2, DNS 10.0.2.3" || diagnose "$name"
+}
+
 # first_boot <name> <firmware> <disk> <net>: fresh disk, first start with pulls.
 first_boot() {
     local name=$1 overlay=$OUT/$1.qcow2 secs
@@ -179,6 +275,16 @@ run_1() {
         record run1-source PASS - "update source is $source"
     else
         record run1-source FAIL - "update source is $source, not the release channel"
+    fi
+    # spec/distribution-requirements/ L4: without provisioning data cloud-init
+    # stays disabled and the address comes from DHCP.
+    local ci addr
+    ci=$(guest "cloud-init status 2>/dev/null | sed -n 's/^status: //p'")
+    addr=$(guest "ip -4 -o addr show scope global | grep -c dynamic")
+    if [ "$ci" = disabled ] && [ "$addr" -ge 1 ]; then
+        record run1-noprov PASS - "no provisioning data: cloud-init disabled, address from DHCP"
+    else
+        record run1-noprov FAIL - "no provisioning data: cloud-init '$ci', dynamic addresses $addr"
     fi
 }
 
@@ -264,6 +370,71 @@ run_6() {
     stop_vm
 }
 
+# Provisioning data on a NoCloud drive (CIDATA, vfat): hostname, SSH key,
+# and a static address in the form matched by MAC and renamed (L2, L5, L6).
+run_9() {
+    local VM_DISKS VM_NIC=mac=52:54:00:12:34:56 VM_GUEST_ADDR=10.0.2.50 VM_SSH_KEY=off
+    local seed=$OUT/run9-seed drive=$OUT/run9-cidata.img overlay=$OUT/run9.qcow2 secs
+    nocloud_seed "$seed" kp-run9 run9 </dev/null
+    static_network lan0 10.0.2.50 52:54:00:12:34:56 >"$seed/network-config"
+    nocloud_drive "$seed" "$drive" || { record run9 FAIL - "the NoCloud drive could not be built"; return; }
+    VM_DISKS=("cidata $drive raw")
+    new_overlay "$overlay"
+    start_vm run9 bios virtio-scsi virtio on "$overlay" || { record run9 FAIL - "qemu did not start"; return; }
+    if ! secs=$(wait_ssh "$REBOOT_TIMEOUT") || ! cloud_init_done; then
+        diagnose run9
+        record run9 FAIL - "NoCloud drive: no SSH with the user-data key at 10.0.2.50, or cloud-init did not finish"
+        kill_vm; return
+    fi
+    record run9 PASS "${secs}s" "NoCloud drive: SSH with the user-data key at the static address"
+    check_provisioned run9 kp-run9 lan0 10.0.2.50
+    stop_vm
+}
+
+# Provisioning data from a seed URL in the SMBIOS system serial number,
+# served from the tool container: hostname and SSH key (L2, L5).
+run_10() {
+    local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8099/") VM_SSH_KEY=off
+    local seed=$OUT/run10-seed overlay=$OUT/run10.qcow2 server secs
+    nocloud_seed "$seed" kp-run10 run10 </dev/null
+    python3 -m http.server 8099 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
+    server=$!
+    new_overlay "$overlay"
+    if ! start_vm run10 bios virtio-scsi virtio on "$overlay"; then
+        kill "$server"; record run10 FAIL - "qemu did not start"; return
+    fi
+    if secs=$(wait_ssh "$REBOOT_TIMEOUT") && cloud_init_done; then
+        record run10 PASS "${secs}s" "seed URL: SSH with the user-data key"
+        check_provisioned run10 kp-run10
+    else
+        diagnose run10
+        record run10 FAIL - "seed URL: no SSH with the user-data key, or cloud-init did not finish"
+    fi
+    kill "$server" 2>/dev/null
+    stop_vm
+}
+
+# Provisioning data on a NoCloud drive with a static address in the form
+# keyed by the interface name (L6); acpi-index pins that name to eno1.
+run_11() {
+    local VM_DISKS VM_NIC=acpi-index=1 VM_GUEST_ADDR=10.0.2.51 VM_SSH_KEY=off
+    local seed=$OUT/run11-seed drive=$OUT/run11-cidata.img overlay=$OUT/run11.qcow2 secs
+    nocloud_seed "$seed" kp-run11 run11 </dev/null
+    static_network eno1 10.0.2.51 >"$seed/network-config"
+    nocloud_drive "$seed" "$drive" || { record run11 FAIL - "the NoCloud drive could not be built"; return; }
+    VM_DISKS=("cidata $drive raw")
+    new_overlay "$overlay"
+    start_vm run11 bios virtio-scsi virtio off "$overlay" || { record run11 FAIL - "qemu did not start"; return; }
+    if ! secs=$(wait_ssh "$REBOOT_TIMEOUT") || ! cloud_init_done; then
+        diagnose run11
+        record run11 FAIL - "NoCloud drive: no SSH with the user-data key at 10.0.2.51, or cloud-init did not finish"
+        kill_vm; return
+    fi
+    record run11 PASS "${secs}s" "NoCloud drive: SSH with the user-data key at the static address"
+    check_provisioned run11 kp-run11 eno1 10.0.2.51
+    stop_vm
+}
+
 run_2() { first_boot run2 uefi virtio-scsi virtio; stop_vm; }
 run_3() { first_boot run3 bios lsi e1000; stop_vm; }
 run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
@@ -276,7 +447,7 @@ run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
 kill_vm 2>/dev/null
 : >"$RESULTS"
 runs=("$@")
-[ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4)
+[ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4 9 10 11)
 for run in "${runs[@]}"; do "run_$run"; done
 kill_vm 2>/dev/null
 chmod -R a+rX "$OUT"

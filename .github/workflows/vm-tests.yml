@@ -33,6 +33,7 @@ on:
       - 'image/**'
       - 'build/**'
       - 'tests/boot/**'
+      - 'tests/image/**'
       - '.github/workflows/vm-tests.yml'
 
 permissions:
@@ -92,6 +93,11 @@ jobs:
             --annotation org.opencontainers.image.created="$created" \
             -t "$IMAGE_REF" image
 
+      # spec/distribution-requirements/ L16: the metadata rules of the image,
+      # loaded with its own nft in a container without a network of its own.
+      - name: Check the metadata rules
+        run: build/in-tools.sh tests/image/metadata-guard.sh "$IMAGE_REF"
+
       - name: Build the development disk
         run: build/in-tools.sh build/disk.sh "$IMAGE_REF"
 
@@ -145,7 +151,9 @@ jobs:
         run: df -h /
 
   # tests/boot/run.sh: runs 7 and 8 need the running VM of run 1, run 5 its
-  # disk and run 6 the running VM of run 5, so they stay with run 1.
+  # disk and run 6 the running VM of run 5, so they stay with run 1. Runs 9
+  # to 11 boot with provisioning data (NoCloud drive, seed URL); 10 and 11
+  # wait only for SSH and cloud-init, so they share a job.
   boot:
     name: boot (${{ matrix.name }})
     needs: build
@@ -168,6 +176,12 @@ jobs:
           - name: run 4
             id: run4
             runs: '4'
+          - name: run 9
+            id: run9
+            runs: '9'
+          - name: runs 10 11
+            id: run10
+            runs: 10 11
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
