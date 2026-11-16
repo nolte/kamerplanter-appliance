@@ -10,10 +10,14 @@ Requires=kamerplanter-data-disk.service kamerplanter-update-guard.service
 After=kamerplanter-data-disk.service kamerplanter-update-guard.service
 # The provisioning layer of this boot is in place, and the secrets of the
 # provisioning data are staged, before the check
-# (spec/distribution-requirements/ L17). After= only: without provisioning
-# data that unit keeps the layer as it is and finishes at once. configure
-# writes a staged secret into the secrets file only after the data disk is
-# mounted and bound, as everything else it writes.
+# (spec/distribution-requirements/ L17). Without provisioning data that unit
+# keeps the layer as it is and finishes at once; it never waits for
+# cloud-init. When it fails, the check does not run: it would otherwise
+# generate the secrets that the provisioning data was to supply, and keep
+# them over the provisioned ones from then on. configure writes a staged
+# secret into the secrets file only after the data disk is mounted and
+# bound, as everything else it writes.
+Requires=kamerplanter-provisioning.service
 After=kamerplanter-provisioning.service
 
 [Service]

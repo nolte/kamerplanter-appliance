@@ -325,8 +325,8 @@ expect "step: no reload when the generator saw the window already" "0||UPDATE_WI
 
 # --- ordering of the units (L17) ---
 units=$image/usr/lib/systemd/system
-expect "units: the configuration check is ordered after the provisioning step, with After= only" "yes|no" \
-    "$(grep -Eq '^After=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Requires|Wants|Requisite|BindsTo)=.*kamerplanter-provisioning' "$units/kamerplanter-config.service" && echo yes || echo no)"
+expect "units: the configuration check runs after the provisioning step and not when it failed" "yes|yes" \
+    "$(grep -Eq '^After=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^Requires=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the step is ordered after cloud-init's network stage and never pulls cloud-init in" "yes|no" \
     "$(grep -Eq '^After=.*\bcloud-init-network\.service\b' "$units/kamerplanter-provisioning.service" 2>/dev/null && echo yes)|$(grep -Eq '^(Requires|Wants|Requisite|BindsTo)=.*cloud' "$units/kamerplanter-provisioning.service" 2>/dev/null && echo yes || echo no)"
 expect "units: the step is started with the services and enabled in the image" "yes|yes" \

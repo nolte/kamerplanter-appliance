@@ -249,6 +249,9 @@ reject "a key that is not a secret, such as a disk's naming (L19)" \
 reject "a key that is no KEY name is not shown" \
     "{\"kamerplanter\": {\"secrets\": {\"bad key=$map_salt\": \"x\"}}}" \
     'invalid entry of kamerplanter: -> secrets:, a key that is no KEY name'
+reject "a key ending in a line break is not shown and splits no line" \
+    "{\"kamerplanter\": {\"secrets\": {\"JWT_SECRET_KEY\\n\": \"$map_jwt\"}}}" \
+    'invalid entry of kamerplanter: -> secrets:, a key that is no KEY name'
 reject "a value with a line break cannot inject a line" \
     "{\"kamerplanter\": {\"secrets\": {\"JWT_SECRET_KEY\": \"$map_jwt\\nDATA_DISK=/dev/sdb\"}}}" \
     'the value of JWT_SECRET_KEY holds a line break or another control character'

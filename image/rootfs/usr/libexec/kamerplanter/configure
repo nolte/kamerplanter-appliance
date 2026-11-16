@@ -230,8 +230,11 @@ if [ -f "$staged_secrets" ] && [ ! -L "$staged_secrets" ]; then
         key=${line%%=*}
         if [[ $line == *=* && $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             offer "$key" "${line#*=}" "kamerplanter: -> secrets: of the provisioning data"
-        else
+        elif [[ $line == "invalid entry of "* ]]; then
             fail_secret "$line"  # the provisioning step's message, never a value
+        else
+            # Never shown: a line that is neither may hold a value.
+            fail_secret "invalid entry of kamerplanter: -> secrets:, a line that is no KEY=VALUE line (not shown)"
         fi
     done <"$staged_secrets"
 fi

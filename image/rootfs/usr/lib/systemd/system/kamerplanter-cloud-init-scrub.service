@@ -2,7 +2,8 @@
 Description=Delete the copies of the provisioning data that cloud-init keeps
 Documentation=file:///usr/libexec/kamerplanter/scrub-cloud-init
 # On every boot, once the provisioning step has renewed the provisioning layer
-# and staged the secrets, and once cloud-init's last stage is through, which
+# and staged the secrets, the configuration check has taken them over (or
+# failed), and once cloud-init's last stage is through, which
 # still reads its cache, the copies of the user-data that cloud-init keeps
 # under /var/lib/cloud and /run/cloud-init are deleted and the provisioned
 # secrets removed from its logs (spec/distribution-requirements/ L15).
@@ -14,7 +15,7 @@ Documentation=file:///usr/libexec/kamerplanter/scrub-cloud-init
 # part of kamerplanter.target, which multi-user.target does not wait for.
 # The staged secrets in /run/kamerplanter-provisioning/ are not touched: the
 # configuration check takes them over and deletes them.
-After=kamerplanter-provisioning.service cloud-final.service
+After=kamerplanter-provisioning.service kamerplanter-config.service cloud-final.service
 
 [Service]
 Type=oneshot

@@ -222,7 +222,13 @@ main() {
             rc=0
             printf '%s\0' "${pats[@]}" | redact "$f" || rc=$?
             case $rc in
-                0) redacted=$((redacted + 1)); echo "provisioned secrets replaced in $f" ;;
+                0)
+                    redacted=$((redacted + 1))
+                    # The rewritten file takes the label of its directory;
+                    # give it back its own, such as that of cloud-init's log.
+                    ! command -v restorecon >/dev/null || restorecon -F -- "$f" 2>/dev/null || true
+                    echo "provisioned secrets replaced in $f"
+                    ;;
                 3 | 4) ;;
                 *) left+=("$f") ;;
             esac

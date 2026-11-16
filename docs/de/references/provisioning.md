@@ -47,6 +47,8 @@ Eine Seed-URL als Seriennummer einer QEMU-VM, die URL endet auf `/`:
 -smbios 'type=1,serial=ds=nocloud;s=http://10.0.2.2:8099/'
 ```
 
+Wer unter einer Seed-URL antwortet, bestimmt bei jedem Boot, was die Appliance als root ausführt. Liefere sie über `https://` von einem Host, den du kontrollierst, oder über einfaches HTTP nur in einem Netz, dem du vertraust, und entferne die URL, sobald die Appliance gestartet ist.
+
 ### Seed-Dateien { #seed-files }
 
 Seed-Dateien brauchen eine eigene Konfigurationsdatei in `/etc/cloud/cloud.cfg.d/`, zum Beispiel `90-nocloud-seed.cfg`, mit genau dieser Zeile:
@@ -182,6 +184,8 @@ args: -smbios type=11,value=io.systemd.credential:kamerplanter.secret.JWT_SECRET
 
 Nur `root@pam` darf `args` setzen.
 
+Übergib ein Secret nicht mit `systemd.set_credential=` auf der Kernel-Kommandozeile: Jeder lokale Nutzer und jeder Container kann `/proc/cmdline` lesen.
+
 Ein Credential wird bei jedem Boot gelesen und füllt einen Schlüssel, den `secrets.env` nicht enthält, mit denselben Schlüsseln und Regeln wie die Map. Liefern ein Credential und die Map denselben fehlenden Schlüssel, gewinnt das Credential.
 
 !!! warning "Credentials bleiben lesbar"
@@ -195,7 +199,9 @@ Ein Credential wird bei jedem Boot gelesen und füllt einen Schlüssel, den `sec
 systemctl status kamerplanter-cloud-init-scrub
 ```
 
-Seed-Dateien unter `/var/lib/cloud/seed/` sind deine Quelle, keine Kopie, und bleiben unberührt. Enthalten sie ein Secret, warnt die Appliance.
+Seed-Dateien unter `/var/lib/cloud/seed/` sind deine Quelle, keine Kopie, und bleiben unberührt. Enthalten sie ein Secret, warnt die Appliance. Das Verzeichnis ist nur für root lesbar.
+
+Die Appliance kann nur Secrets ersetzen, die sie in der von cloud-init gelesenen User-Data findet. Ist die User-Data kein gültiges YAML, etwa weil ein Secret, das mit `*`, `&` oder `@` beginnt, nicht in Anführungszeichen steht, liest cloud-init nichts davon und kann die fehlerhafte Zeile in seinem Log und im Journal zitieren, wo sie bleibt. Setze jedes Secret in Anführungszeichen.
 
 **Nur root erreicht den Metadatendienst.** Die Adresse `169.254.169.254` gibt die Provisionierungsdaten samt Secrets an jeden heraus, der fragt. Nur root erreicht sie, schon bevor der erste Container startet. Andere lokale Nutzer und die Container erreichen sie nicht.
 

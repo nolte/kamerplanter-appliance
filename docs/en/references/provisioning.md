@@ -47,6 +47,8 @@ A seed URL as the system serial number of a QEMU VM, the URL ending in `/`:
 -smbios 'type=1,serial=ds=nocloud;s=http://10.0.2.2:8099/'
 ```
 
+Whoever answers at a seed URL decides what the appliance runs as root, on every boot. Serve it over `https://` from a host you control, or over plain HTTP only inside a network you trust, and remove the URL once the appliance has started.
+
 ### Seed files
 
 Seed files need a configuration file of your own in `/etc/cloud/cloud.cfg.d/`, for example `90-nocloud-seed.cfg`, with this single line:
@@ -182,6 +184,8 @@ args: -smbios type=11,value=io.systemd.credential:kamerplanter.secret.JWT_SECRET
 
 Only `root@pam` may set `args`.
 
+Don't pass a secret with `systemd.set_credential=` on the kernel command line: every local user and every container can read `/proc/cmdline`.
+
 A credential is read on every boot and fills a key that `secrets.env` doesn't hold, under the same keys and rules as the map. When a credential and the map supply the same missing key, the credential wins.
 
 !!! warning "Credentials stay readable"
@@ -195,7 +199,9 @@ A credential is read on every boot and fills a key that `secrets.env` doesn't ho
 systemctl status kamerplanter-cloud-init-scrub
 ```
 
-Seed files under `/var/lib/cloud/seed/` are your source, not a copy, and are left alone. When they hold a secret, the appliance warns.
+Seed files under `/var/lib/cloud/seed/` are your source, not a copy, and are left alone. When they hold a secret, the appliance warns. The directory is readable for root only.
+
+The appliance can only replace secrets it found in the user-data that cloud-init read. When the user-data isn't valid YAML, for example because a secret starting with `*`, `&`, or `@` isn't quoted, cloud-init reads none of it and can quote the faulty line in its log and in the journal, where it stays. Quote every secret.
 
 **Only root reaches the metadata service.** The address `169.254.169.254` hands out the provisioning data, secrets included, to whoever asks. Only root reaches it, from before the first container starts. Other local users and the containers don't.
 

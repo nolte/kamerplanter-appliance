@@ -79,12 +79,14 @@ provided() {
 }
 
 # settings_lines: the lines of settings.env from the combined cloud-config on
-# stdin. Fails when it is not JSON.
+# stdin. Fails when it is not JSON. A key is matched with \A and \z: jq's $
+# also matches before a final line break, which would split the line. jq's
+# messages are dropped: they could quote the input.
 settings_lines() {
     jq -r '
         def entry:
             .key as $k | .value as $v
-            | if ($k | test("^[A-Za-z_][A-Za-z0-9_]*$") | not) then
+            | if ($k | test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not) then
                 "invalid entry of kamerplanter: -> settings:, the key \($k | @json) is no KEY name"
               elif $v == null then "\($k)="
               elif ($v | type) == "string" then
@@ -99,7 +101,7 @@ settings_lines() {
           | if ($s | type) != "object" then "invalid entry of the provisioning data: kamerplanter: -> settings: is not a map"
             else $s | to_entries[] | entry
             end
-          end'
+          end' 2>/dev/null
 }
 
 # secret_lines: the lines of staged_secrets from the combined cloud-config on
@@ -110,7 +112,7 @@ secret_lines() {
     jq -r '
         def entry:
             .key as $k | .value as $v
-            | if ($k | test("^[A-Za-z_][A-Za-z0-9_]*$") | not) then
+            | if ($k | test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not) then
                 "invalid entry of kamerplanter: -> secrets:, a key that is no KEY name"
               elif ($v | type) != "string" then
                 "invalid entry of kamerplanter: -> secrets:, the value of \($k) is \(if $v == null then "empty" else "a \($v | type)" end), not a text; quote it"
