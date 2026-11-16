@@ -217,6 +217,31 @@ static_network() {
     printf '    dhcp4: false\n    addresses: [%s/24]\n    routes:\n      - to: default\n        via: 10.0.2.2\n    nameservers:\n      addresses: [10.0.2.3]\n' "$2"
 }
 
+# marker PREFIX: a provisioned test value, recognisable wherever it lands.
+marker() { printf '%s%s' "$1" "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"; }
+
+# reboot_vm TIMEOUT: an orderly reboot of the running VM, the drives staying
+# attached; prints the seconds until the services answer again.
+reboot_vm() {
+    local id now
+    id=$(guest cat /proc/sys/kernel/random/boot_id)
+    guest systemctl reboot >/dev/null 2>&1
+    for _ in $(seq 120); do
+        sleep 5
+        now=$(guest cat /proc/sys/kernel/random/boot_id 2>/dev/null) && [ -n "$now" ] && [ "$now" != "$id" ] && break
+    done
+    [ -n "$now" ] && [ "$now" != "$id" ] || return 1
+    wait_up "$1"
+}
+
+# no_copies MARKER...: the number of cloud-init's files and logs, and of the
+# journal's lines, that hold one of the markers (L12, L15).
+no_copies() {
+    local args=() m
+    for m in "$@"; do args+=(-e "$m"); done
+    guest "echo \$(grep -rlF ${args[*]} /var/lib/cloud /run/cloud-init /var/log/cloud-init*.log 2>/dev/null | wc -l) \$(journalctl -b --no-pager | grep -cF ${args[*]})"
+}
+
 # expect_rec NAME EXPECTED ACTUAL WHAT: records NAME as PASS when ACTUAL is
 # EXPECTED, as FAIL with both otherwise; fails then.
 expect_rec() {
@@ -371,14 +396,36 @@ run_6() {
 }
 
 # Provisioning data on a NoCloud drive (CIDATA, vfat): hostname, SSH key,
-# and a static address in the form matched by MAC and renamed (L2, L5, L6).
+# and a static address in the form matched by MAC and renamed (L2, L5, L6);
+# then the Kamerplanter settings and secrets of the provisioning data at the
+# first start, a secret as a system credential, the scrub of cloud-init's
+# copies, and all of it again after a reboot with the drive still attached;
+# last, a boot with the drive detached keeps the settings (L9, L10, L12, L13,
+# L15, L17).
 run_9() {
-    local VM_DISKS VM_NIC=mac=52:54:00:12:34:56 VM_GUEST_ADDR=10.0.2.50 VM_SSH_KEY=off
+    local VM_DISKS VM_CREDENTIALS VM_NIC=mac=52:54:00:12:34:56 VM_GUEST_ADDR=10.0.2.50 VM_SSH_KEY=off
     local seed=$OUT/run9-seed drive=$OUT/run9-cidata.img overlay=$OUT/run9.qcow2 secs
-    nocloud_seed "$seed" kp-run9 run9 </dev/null
+    local jwt cred url=http://kp-run9.example:8080 secrets=/etc/kamerplanter/secrets.env
+    local sem=/var/lib/cloud/instance/sem/config_write_files written
+    jwt=$(marker run9jwt) cred=$(marker run9salt)
+    nocloud_seed "$seed" kp-run9 run9 <<EOF
+kamerplanter:
+  settings:
+    FRONTEND_URL: "$url"
+    UPDATE_WINDOW: "04:15"
+  secrets:
+    JWT_SECRET_KEY: "$jwt"
+write_files:
+  - path: /var/lib/kamerplanter/provisioning/provisioning.env
+    permissions: '0600'
+    content: |
+      FRONTEND_URL=http://from-write-files.example
+      REGISTRATION_MODE=invite_only
+EOF
     static_network lan0 10.0.2.50 52:54:00:12:34:56 >"$seed/network-config"
     nocloud_drive "$seed" "$drive" || { record run9 FAIL - "the NoCloud drive could not be built"; return; }
     VM_DISKS=("cidata $drive raw")
+    VM_CREDENTIALS=("kamerplanter.secret.LOG_PSEUDONYM_SALT $cred")
     new_overlay "$overlay"
     start_vm run9 bios virtio-scsi virtio on "$overlay" || { record run9 FAIL - "qemu did not start"; return; }
     if ! secs=$(wait_ssh "$REBOOT_TIMEOUT") || ! cloud_init_done; then
@@ -388,6 +435,57 @@ run_9() {
     fi
     record run9 PASS "${secs}s" "NoCloud drive: SSH with the user-data key at the static address"
     check_provisioned run9 kp-run9 lan0 10.0.2.50
+
+    if ! secs=$(wait_up "$FIRST_BOOT_TIMEOUT"); then
+        diagnose run9
+        record run9-first-start FAIL - "no answer within ${FIRST_BOOT_TIMEOUT}s"
+        kill_vm; return
+    fi
+    record run9-first-start PASS "${secs}s" "first start with provisioning data to web UI and API"
+    expect_rec run9-settings "$url|invite_only|0|1" \
+        "$(guest podman exec backend printenv FRONTEND_URL)|$(guest podman exec backend printenv REGISTRATION_MODE)|$(guest systemctl show kamerplanter-backend.service -p NRestarts --value)|$(guest "systemctl show kamerplanter-update-apply.timer -p TimersCalendar --value | grep -q '04:15:00' && echo 1")" \
+        "settings at the first start without a restart: the map wins over write_files, write_files applies, UPDATE_WINDOW sets the window" ||
+        diagnose run9
+    expect_rec run9-secrets "1|1|run9" \
+        "$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")|$(guest "grep -cxF 'LOG_PSEUDONYM_SALT=$cred' $secrets")|$(guest cat /var/lib/kamerplanter/provisioning/secrets-taken)" \
+        "secrets from kamerplanter: -> secrets: and from the credential taken into the secrets file, the instance recorded"
+    expect_rec run9-scrub "active|0 0" \
+        "$(guest systemctl is-active kamerplanter-cloud-init-scrub.service)|$(no_copies "$jwt" "$cred")" \
+        "no copy of a provisioned secret in cloud-init's files and logs or in the journal" ||
+        diagnose run9
+    expect_rec run9-guard "yes" "$(guest "nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")" \
+        "the metadata rules are loaded"
+    written=$(guest stat -c %Y "$sem")
+
+    if ! secs=$(reboot_vm "$REBOOT_TIMEOUT"); then
+        diagnose run9
+        record run9-reboot FAIL - "no answer after a reboot with the drive attached"
+        stop_vm; return
+    fi
+    record run9-reboot PASS "${secs}s" "reboot with the NoCloud drive still attached"
+    expect_rec run9-reboot-settings "$url|$written" \
+        "$(guest podman exec backend printenv FRONTEND_URL)|$(guest stat -c %Y "$sem")" \
+        "after the reboot the settings apply and once-per-instance steps did not run again"
+    expect_rec run9-reboot-secrets "1|1|no" \
+        "$(guest "grep -c '^JWT_SECRET_KEY=' $secrets")|$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")|$(guest "test -e /run/kamerplanter-provisioning/secrets.env && echo yes || echo no")" \
+        "after the reboot the secret is not taken over or staged again"
+    expect_rec run9-reboot-scrub "active|0 0" \
+        "$(guest systemctl is-active kamerplanter-cloud-init-scrub.service)|$(no_copies "$jwt" "$cred")" \
+        "after the reboot with the drive attached no copy of a provisioned secret is left" ||
+        diagnose run9
+
+    # The drive detached, as the documentation asks: the settings stay (L10).
+    stop_vm
+    VM_DISKS=()
+    start_vm run9-detached bios virtio-scsi virtio on "$overlay" || { record run9-detached FAIL - "qemu did not start"; return; }
+    if secs=$(wait_up "$REBOOT_TIMEOUT"); then
+        expect_rec run9-detached "$url|1" \
+            "$(guest podman exec backend printenv FRONTEND_URL)|$(guest "grep -cxF 'JWT_SECRET_KEY=$jwt' $secrets")" \
+            "with the drive detached the provisioned settings and the secret stay"
+    else
+        diagnose run9-detached
+        record run9-detached FAIL - "no answer after a boot with the drive detached"
+    fi
     stop_vm
 }
 
@@ -415,11 +513,22 @@ run_10() {
 }
 
 # Provisioning data on a NoCloud drive with a static address in the form
-# keyed by the interface name (L6); acpi-index pins that name to eno1.
+# keyed by the interface name (L6); acpi-index pins that name to eno1. The
+# settings hold an invalid UPDATE_WINDOW, which keeps the services stopped
+# and is named with the provisioning layer, a DATA_DISK, which is ignored with
+# a message, and a FERNET_KEY, which is passed through with a warning that
+# names only the key (L11, L19). No internet: nothing is pulled.
 run_11() {
     local VM_DISKS VM_NIC=acpi-index=1 VM_GUEST_ADDR=10.0.2.51 VM_SSH_KEY=off
-    local seed=$OUT/run11-seed drive=$OUT/run11-cidata.img overlay=$OUT/run11.qcow2 secs
-    nocloud_seed "$seed" kp-run11 run11 </dev/null
+    local seed=$OUT/run11-seed drive=$OUT/run11-cidata.img overlay=$OUT/run11.qcow2 secs fernet
+    fernet="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-43)="
+    nocloud_seed "$seed" kp-run11 run11 <<EOF
+kamerplanter:
+  settings:
+    UPDATE_WINDOW: "25:00"
+    DATA_DISK: /dev/disk/by-id/virtio-run11
+    FERNET_KEY: "$fernet"
+EOF
     static_network eno1 10.0.2.51 >"$seed/network-config"
     nocloud_drive "$seed" "$drive" || { record run11 FAIL - "the NoCloud drive could not be built"; return; }
     VM_DISKS=("cidata $drive raw")
@@ -432,6 +541,13 @@ run_11() {
     fi
     record run11 PASS "${secs}s" "NoCloud drive: SSH with the user-data key at the static address"
     check_provisioned run11 kp-run11 eno1 10.0.2.51
+
+    local waited=0
+    until settled || ((waited >= 300)); do sleep 5; waited=$((waited + 5)); done
+    expect_rec run11-invalid "failed|stopped|1|1|1|0" \
+        "$(guest systemctl is-failed kamerplanter-config.service)|$(guest "systemctl is-active --quiet kamerplanter-backend.service && echo running || echo stopped")|$(guest "journalctl -b --no-pager -u kamerplanter-config.service | grep -c 'UPDATE_WINDOW is not a time of day.*provisioning layer'")|$(guest "journalctl -b --no-pager -u kamerplanter-config.service | grep -c 'DATA_DISK in the provisioning layer.*is ignored'")|$(guest "journalctl -b --no-pager -u kamerplanter-config.service | grep -c 'warning: the secret FERNET_KEY is set in the provisioning layer'")|$(guest "journalctl -b --no-pager | grep -cF '$fernet'")" \
+        "invalid provisioned UPDATE_WINDOW keeps the services stopped and names the provisioning layer; DATA_DISK ignored; FERNET_KEY warned by key only" ||
+        diagnose run11
     stop_vm
 }
 
