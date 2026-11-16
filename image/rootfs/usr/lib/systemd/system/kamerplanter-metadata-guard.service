@@ -1,0 +1,24 @@
+[Unit]
+Description=Let only root reach the metadata service
+Documentation=file:///usr/share/kamerplanter/nftables/metadata-guard.nft
+# Loads the rules that keep every user but root, and every container, from
+# the metadata address 169.254.169.254 (spec/distribution-requirements/ L16).
+# Early in the boot, before the network is configured (network-pre.target)
+# and so before cloud-init's network stage and any container; the containers
+# also require this unit (kamerplanter-.container.d/10-kamerplanter.conf), so
+# none starts while the rules are not in place.
+# Not nftables.service: that loads /etc/sysconfig/nftables.conf and, when
+# stopped or reloaded, flushes the whole ruleset, Podman's included. This
+# unit replaces only its own table, and stopping it leaves the rules in place.
+DefaultDependencies=no
+Before=network-pre.target sysinit.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/share/kamerplanter/nftables/metadata-guard.nft
+
+[Install]
+WantedBy=sysinit.target

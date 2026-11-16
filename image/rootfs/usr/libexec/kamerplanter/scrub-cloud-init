@@ -1,0 +1,249 @@
+#!/usr/bin/bash
+# Deletes the copies of the provisioning data that cloud-init keeps, and the
+# provisioned secrets in its files and logs (spec/distribution-requirements/
+# L15). Run by kamerplanter-cloud-init-scrub.service on every boot, after the
+# provisioning step (/usr/libexec/kamerplanter/provisioning) has renewed the
+# provisioning layer and staged the secrets, and after cloud-init's last stage.
+# cloud-init stores the user-data again on every boot while its source stays
+# attached, so this runs on every boot; a boot without provisioning data finds
+# nothing to delete.
+#
+# Deleted, in every instance directory under /var/lib/cloud/instances/, as
+# cloud-init 26.2 names them (cloudinit/helpers.py, Paths.lookups):
+#   user-data.txt      the user-data as the source supplied it
+#   user-data.txt.i    the user-data as cloud-init processed it
+#   cloud-config.txt   the cloud-config part of the user-data
+#   obj.pkl            the pickled datasource, user-data included
+# and in /run/cloud-init/:
+#   combined-cloud-config.json     the cloud-config combined from the image's
+#                                  configuration, vendor-data and user-data
+#   instance-data-sensitive.json   the instance data with the user-data
+# cloud-init reads obj.pkl again in its later stages of the same boot
+# (stages.py, fetch with existing="trust"), hence the order after
+# cloud-final.service. On the next boot its local stage finds no cache and
+# reads the source anew, as on the first boot; a boot without a source does
+# not run cloud-init at all (ds-identify).
+#
+# Kept: cloud-init's record of the instance it has set up, which decides
+# whether once-per-instance steps run again (stages.py, Init.is_new_instance
+# compares the datasource's instance id with data/instance-id; the modules
+# record their runs in instances/<id>/sem/), the instance link, the network
+# configuration, vendor-data, status and result. None of them is a copy of the
+# user-data. The seed files in /var/lib/cloud/seed/ are the source itself, not
+# a copy (L3): with them cloud-init would find no provisioning data on the
+# next boot and the provisioning layer would be renewed without the settings.
+# They are left alone; when they hold a provisioned secret, this says so, and
+# the documentation asks to delete them after the first boot (L20).
+#
+# The provisioned secrets are then searched for, as values, in everything that
+# is left under /var/lib/cloud (the seed files apart) and /run/cloud-init, and
+# in cloud-init's logs /var/log/cloud-init*.log, and every occurrence is
+# replaced by "REDACTED" in place: the values of kamerplanter: -> secrets:,
+# and those of the secret keys under kamerplanter: -> settings: (L11), from
+# this boot's combined cloud-config, read before it is deleted. A value that
+# spans lines is searched for line by line. A value or line shorter than
+# min_secret characters is not searched for: replacing it would garble the
+# logs; its key is named. A file that still holds a value afterwards is named
+# and the unit fails.
+#
+# Nothing is followed: only regular files are deleted or rewritten, found
+# without following symbolic links and without leaving the file system of the
+# directory they are found in; a directory that is a symbolic link is not
+# entered. Values are never printed, passed on a command line or written to
+# a file of their own: they go from jq to Python through pipes only.
+set -euo pipefail
+umask 077
+
+cloud_lib=/var/lib/cloud/
+cloud_run=/run/cloud-init/
+cloud_log=/var/log/
+combined=${cloud_run}combined-cloud-config.json
+min_secret=8
+user_data_copies=(user-data.txt user-data.txt.i cloud-config.txt obj.pkl)
+run_copies=(combined-cloud-config.json instance-data-sensitive.json)
+
+# shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+. /usr/lib/kamerplanter/env.sh
+
+# own_dir DIR: whether DIR is a directory of its own, not a symbolic link;
+# says so when it is something else.
+own_dir() {
+    if [ -L "${1%/}" ]; then
+        echo "${1%/} is a symbolic link; it is not scrubbed" >&2
+        return 1
+    fi
+    [ -d "$1" ]
+}
+
+# values: the provisioned secrets of this boot's combined cloud-config, as
+# NUL-separated pairs KEY, VALUE; nothing when there is none or it cannot be
+# read. jq's messages are dropped: they could quote the input.
+values() {
+    [ -f "$combined" ] && [ ! -L "$combined" ] || return 0
+    jq -j --args '
+        def pair: select((.value | type) == "string" or (.value | type) == "number")
+            | .key, (.value | tostring);
+        (.kamerplanter // {}) as $kp
+        | select(($kp | type) == "object")
+        | ((($kp.secrets // {}) | select(type == "object") | to_entries[] | pair),
+           (($kp.settings // {}) | select(type == "object") | to_entries[]
+                | select(.key as $k | $ARGS.positional | index($k)) | pair))
+        | . + "\u0000"' "${provisionable_secret_keys[@]}" <"$combined" 2>/dev/null || true
+}
+
+# patterns: the strings to search for, NUL-separated, longest first, from the
+# pairs of values: each line of a value, and the same as it stands inside a
+# JSON text when that differs. Names a key whose value is not searched for.
+patterns() {
+    local pairs key value line escaped
+    local -A seen=()
+    mapfile -d '' pairs < <(values)
+    local i
+    for ((i = 0; i + 1 < ${#pairs[@]}; i += 2)); do
+        key=${pairs[i]}
+        value=${pairs[i + 1]}
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [ "${#line}" -lt "$min_secret" ]; then
+                [ -z "$line" ] || echo "the provisioned value of $key, or a line of it, is shorter than $min_secret characters; it is not searched for in cloud-init's files and logs" >&2
+                continue
+            fi
+            seen[$line]=1
+            escaped=$(printf '%s' "$line" | jq -Rrs 'tojson | .[1:-1]')
+            seen[$escaped]=1
+        done < <(printf '%s\n' "$value")
+    done
+    for line in "${!seen[@]}"; do printf '%s\t%s\0' "${#line}" "$line"; done |
+        sort -z -t $'\t' -k1,1nr | while IFS= read -r -d '' line; do printf '%s\0' "${line#*$'\t'}"; done
+}
+
+# redact FILE: replaces every pattern (NUL-separated on stdin) in FILE by
+# REDACTED, in place and durably, keeping its owner and mode. Exit status 0
+# when it changed FILE, 3 when FILE holds none, 4 when FILE is no regular
+# file or a symbolic link, 1 on an error.
+redact() {
+    python3 -I -c '
+import os, stat, sys, tempfile
+path = sys.argv[1]
+patterns = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(4)
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(4)
+    data = f.read()
+new = data
+for p in patterns:
+    new = new.replace(p, b"REDACTED")
+if new == data:
+    sys.exit(3)
+d = os.path.dirname(path) or "."
+tfd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".")
+try:
+    with os.fdopen(tfd, "wb") as t:
+        t.write(new)
+        t.flush()
+        os.fchown(t.fileno(), st.st_uid, st.st_gid)
+        os.fchmod(t.fileno(), stat.S_IMODE(st.st_mode))
+        os.fsync(t.fileno())
+    os.rename(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(dfd)
+finally:
+    os.close(dfd)
+' "$1"
+}
+
+# holds FILE: whether FILE holds a pattern (NUL-separated on stdin).
+holds() {
+    python3 -I -c '
+import os, sys
+patterns = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+except OSError:
+    sys.exit(1)
+with os.fdopen(fd, "rb") as f:
+    data = f.read()
+sys.exit(0 if any(p in data for p in patterns) else 1)
+' "$1"
+}
+
+# scanned: the files the provisioned secrets are searched for in,
+# NUL-separated: the regular files under /var/lib/cloud but its seed files,
+# under /run/cloud-init, and cloud-init's logs.
+scanned() {
+    if own_dir "$cloud_lib"; then
+        find "$cloud_lib" -xdev -path "${cloud_lib}seed" -prune -o -type f -print0
+    fi
+    if own_dir "$cloud_run"; then
+        find "$cloud_run" -xdev -type f -print0
+    fi
+    if own_dir "$cloud_log"; then
+        find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type f -name 'cloud-init*.log' -print0
+    fi
+}
+
+# delete_copies: deletes the copies of the user-data, and prints how many.
+delete_copies() {
+    local args=() name f count=0
+    for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
+    if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
+        while IFS= read -r -d '' f; do
+            rm -f -- "$f"
+            count=$((count + 1))
+        done < <(find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0)
+    fi
+    if own_dir "$cloud_run"; then
+        for name in "${run_copies[@]}"; do
+            f=$cloud_run$name
+            if [ -f "$f" ] && [ ! -L "$f" ]; then
+                rm -f -- "$f"
+                count=$((count + 1))
+            fi
+        done
+    fi
+    printf '%s' "$count"
+}
+
+main() {
+    local pats=() f rc redacted=0 left=() seeded=() deleted
+    # Read before the combined cloud-config is deleted.
+    mapfile -d '' pats < <(patterns)
+    deleted=$(delete_copies)
+    if [ "${#pats[@]}" -gt 0 ]; then
+        while IFS= read -r -d '' f; do
+            rc=0
+            printf '%s\0' "${pats[@]}" | redact "$f" || rc=$?
+            case $rc in
+                0) redacted=$((redacted + 1)); echo "provisioned secrets replaced in $f" ;;
+                3 | 4) ;;
+                *) left+=("$f") ;;
+            esac
+        done < <(scanned)
+        while IFS= read -r -d '' f; do
+            if printf '%s\0' "${pats[@]}" | holds "$f"; then left+=("$f"); fi
+        done < <(scanned)
+        if own_dir "$cloud_lib" && own_dir "${cloud_lib}seed"; then
+            while IFS= read -r -d '' f; do
+                if printf '%s\0' "${pats[@]}" | holds "$f"; then seeded+=("$f"); fi
+            done < <(find "${cloud_lib}seed" -xdev -type f -print0)
+        fi
+    fi
+    echo "cloud-init's copies of the provisioning data deleted: $deleted; files with provisioned secrets replaced: $redacted"
+    for f in "${seeded[@]}"; do
+        echo "warning: the seed file $f holds provisioned secrets in plain text; once the appliance has started, delete the seed files and the configuration file that names them (it keeps its settings without them)" >&2
+    done
+    if [ "${#left[@]}" -gt 0 ]; then
+        for f in "${left[@]}"; do echo "$f still holds provisioned secrets" >&2; done
+        return 1
+    fi
+}
+
+main

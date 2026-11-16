@@ -1,0 +1,42 @@
+#!/usr/sbin/nft -f
+# Only root reaches the metadata service (spec/distribution-requirements/
+# L16). On Hetzner Cloud and OpenStack, OVHcloud among them, the metadata
+# service at 169.254.169.254 hands out the provisioning data, and with it the
+# secrets of kamerplanter: -> secrets:, to whoever asks; OpenStack also
+# answers at fe80::a9fe:a9fe. cloud-init, which runs as root, keeps reaching
+# it; other local users and the containers do not. Loaded by
+# kamerplanter-metadata-guard.service at boot, before the network is up and
+# before any container starts, on every target: where there is no metadata
+# service the rules match nothing.
+#
+# The table is the appliance's own. Podman's netavark keeps its rules in a
+# table of its own (inet netavark), and firewalld is not installed; a packet
+# that one base chain drops or rejects stays dropped whatever another table
+# accepts, so the order of the tables does not matter. Reloading this file
+# replaces this table and touches no other: the first two lines create it
+# when it is missing, so that deleting it never fails, all in one transaction.
+#
+# output: packets that local processes send. A socket of uid 0 passes; every
+# other uid, a rootless container's pasta or slirp4netns process included,
+# is refused at once rather than left to time out.
+# forward: packets routed through the appliance, which is how the containers
+# of the Podman bridge networks (kamerplanter.network) reach the outside: they
+# never pass output, and their address is translated only after this hook.
+# Nothing is routed to the metadata service for anyone, so every such packet
+# is refused.
+table inet kamerplanter_metadata
+delete table inet kamerplanter_metadata
+
+table inet kamerplanter_metadata {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 169.254.169.254 meta skuid != 0 counter reject with icmpx admin-prohibited
+        ip6 daddr fe80::a9fe:a9fe meta skuid != 0 counter reject with icmpx admin-prohibited
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        ip daddr 169.254.169.254 counter reject with icmpx admin-prohibited
+        ip6 daddr fe80::a9fe:a9fe counter reject with icmpx admin-prohibited
+    }
+}
