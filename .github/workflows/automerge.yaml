@@ -19,7 +19,7 @@ on:
 
 jobs:
   automerge:
-    uses: nolte/gh-plumbing/.github/workflows/reusable-automerge.yaml@9048eafc8665611b8109e8c5a519b78e0fceffa6 # v2.2.1
+    uses: nolte/gh-plumbing/.github/workflows/reusable-automerge.yaml@0e88a921db456b1939a31b4c15a3b1adf28602e8 # v2.3.0
     with:
       # Mint a portfolio-App token so the action's branch auto-updates are
       # pushed under the App identity. Pushes made with GITHUB_TOKEN do not
