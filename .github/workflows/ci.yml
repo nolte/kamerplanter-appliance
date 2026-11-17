@@ -56,8 +56,7 @@ jobs:
   unit:
     # The shell unit tests of tests/unit/: the image's scripts as they ship,
     # in a sandbox with stubs (tests/unit/lib/sandbox.sh); no root, no VM.
-    # Not a required check yet: add `unit-tests` to `.github/settings.yml`
-    # once it has run green on develop.
+    # A required check on develop (.github/settings.yml), since #42.
     name: unit-tests
     runs-on: ubuntu-latest
     timeout-minutes: 15

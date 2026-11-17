@@ -42,8 +42,10 @@ jobs:
           if skopeo inspect --raw "docker://$TARGET:$tag" >/dev/null 2>&1; then
             echo "$SOURCE is sha256:$digest, already mirrored as $TARGET:$tag"
           else
-            skopeo copy --all --preserve-digests --retry-times 3 \
-              "docker://$SOURCE@sha256:$digest" "docker://$TARGET:$tag"
+            # By digest alone: skopeo refuses a reference with a tag and a
+          # digest (#42).
+          skopeo copy --all --preserve-digests --retry-times 3 \
+              "docker://${SOURCE%:*}@sha256:$digest" "docker://$TARGET:$tag"
           fi
           skopeo copy --all --preserve-digests --retry-times 3 \
             "docker://$TARGET:$tag" "docker://$TARGET:46"

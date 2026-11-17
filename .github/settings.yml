@@ -33,6 +33,7 @@ branches:
         contexts:
           - docs-build
           - pre-commit
+          - unit-tests
       enforce_admins: true
       restrictions: null
 

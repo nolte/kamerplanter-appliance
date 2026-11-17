@@ -60,6 +60,11 @@
         'ghcr.io/nolte/kamerplanter-appliance-base',
       ],
       automerge: false,
+      // A new base changes everything the appliance boots; the VM tests run
+      // on the pull request only with this label (#42).
+      addLabels: [
+        'vm-tests',
+      ],
     },
     {
       // Backend and frontend are released together upstream and run as
