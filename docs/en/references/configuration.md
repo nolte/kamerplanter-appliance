@@ -70,7 +70,7 @@ The services stay stopped, with a message in `systemctl status kamerplanter-conf
 - `FERNET_KEY` is not a valid Fernet key (44 characters, URL-safe base64)
 - `ERASURE_TOMBSTONE_SALT`, `LOG_PSEUDONYM_SALT`, or a set `TENANT_EXPORT_SIGNING_SECRET` is shorter than 32 characters
 - `JWT_SECRET_KEY` or the database password is empty or a known default
-- a [provisioned](provisioning.md) `JWT_SECRET_KEY` is shorter than 32 characters or a provisioned database password shorter than 16 characters; set in your file or kept in `secrets.env`, such a short value only causes a warning that names the key, so an existing installation keeps starting; replace it with a longer one
+- a [provisioned](provisioning.md) `JWT_SECRET_KEY` is shorter than 32 characters or a provisioned database password shorter than 16 characters, before the services first started; set in your file, kept in `secrets.env`, or provisioned to an installation that has already started, such a short value only causes a warning that names the key, so an existing installation keeps starting; replace it with a longer one (for the database password, change it in the database first, then remove its pin as the warning says)
 - `ARANGODB_USERNAME` is set to anything other than `root`: the database image creates only its root user, and `ARANGO_ROOT_PASSWORD` is always taken from `ARANGODB_PASSWORD`
 - a line in one of the files is not `KEY=VALUE`
 - one of the values below changed or went missing after a service started with it

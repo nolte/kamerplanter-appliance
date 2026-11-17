@@ -148,6 +148,19 @@ expect "configure: a provisioned JWT_SECRET_KEY below 32 characters keeps the se
     "$(run_configure)|$(has 'JWT_SECRET_KEY is shorter than 32 characters (set in the provisioning layer' "$(cat "$SB/out")")"
 
 configure_case
+prov_map ARANGODB_PASSWORD=fifteen-chars-x
+expect "configure: a provisioned ARANGODB_PASSWORD below 16 characters keeps a new installation stopped" "1|yes" \
+    "$(run_configure)|$(has 'ARANGODB_PASSWORD is shorter than 16 characters (set in the provisioning layer' "$(cat "$SB/out")")"
+
+configure_case
+prov_map ARANGODB_PASSWORD=fifteen-chars-x "JWT_SECRET_KEY=$(printf 's%.0s' {1..31})"
+printf '%s' fifteen-chars-x | sha256sum | cut -d' ' -f1 >"$SB/var/lib/kamerplanter/pinned/ARANGODB_PASSWORD"
+rc=$(run_configure)
+out=$(cat "$SB/out")
+expect "configure: once a service has started, short provisioned secrets are only warned about, so updates are not rolled back" "0|yes|yes|yes|no" \
+    "$rc|$(has 'warning: JWT_SECRET_KEY is shorter than 32 characters' "$out")|$(has 'warning: ARANGODB_PASSWORD is shorter than 16 characters' "$out")|$(has 'change it in the database first, then set the new value and remove' "$out")|$(has fifteen-chars-x "$out")"
+
+configure_case
 user_file "JWT_SECRET_KEY=$(printf 'u%.0s' {1..31})" ARANGODB_PASSWORD=short-password
 rc=$(run_configure)
 out=$(cat "$SB/out")

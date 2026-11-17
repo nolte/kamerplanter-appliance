@@ -128,12 +128,18 @@ short_secret() {
     [ -z "$min" ] || [ "${#2}" -ge "$min" ] || problem="$1 is shorter than $min characters"
 }
 
+# started: true once a service has started, which pinned its values. From
+# then on a short secret is only warned about, wherever it comes from: the
+# installation already runs with it, and stopping it would roll back every
+# update (D12, L14).
+started() { compgen -G "$pins/*" >/dev/null; }
+
 # check_secret KEY: checks the value of the secret KEY in the effective
 # configuration. What secret_problem finds keeps the services stopped; a value
 # below the minimum length does so only when the provisioning layer supplies
-# it. One in the user file or the secrets file is only warned about, so that
-# an installation keeps starting with it: the database keeps the password it
-# was created with (D12, L14).
+# it to an installation that has not started yet. Otherwise it is only warned
+# about, so that an installation keeps starting with it; the advice for a
+# pinned key names what has to change first.
 check_secret() {
     local value from
     value=$(get "$1")
@@ -145,8 +151,10 @@ check_secret() {
     short_secret "$1" "$value"
     [ -n "$problem" ] || return 0
     from=$(source_of "$1")
-    if [ -n "$from" ] && provisioning_source "$from"; then
+    if [ -n "$from" ] && provisioning_source "$from" && ! started; then
         fail_key "$1" "$problem"
+    elif [ -n "${pinned[$1]+set}" ]; then
+        echo "warning: $problem and can be guessed; ${pinned[$1]}, then set the new value and remove $pins/$1 (see the configuration reference)" >&2
     else
         echo "warning: $problem and can be guessed; replace it with a longer value (see the configuration reference)" >&2
     fi
@@ -155,7 +163,8 @@ check_secret() {
 # provisioned_problem KEY VALUE: as secret_problem, for a provisioned secret,
 # which must also be one line of 1 to 4096 printable ASCII characters, so it
 # is taken into the secrets file literally and as one line, and at least as
-# long as the minimum length of KEY.
+# long as the minimum length of KEY until the installation has started; after
+# that, check_secret warns about a short one.
 provisioned_problem() {
     local LC_ALL=C
     problem=
@@ -167,7 +176,7 @@ provisioned_problem() {
         problem="$1 holds a character that is not printable ASCII, such as a line break"
     else
         secret_problem "$1" "$2"
-        [ -n "$problem" ] || short_secret "$1" "$2"
+        [ -n "$problem" ] || started || short_secret "$1" "$2"
     fi
 }
 
