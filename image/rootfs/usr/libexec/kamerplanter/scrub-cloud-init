@@ -105,8 +105,10 @@ config_copies() {
     find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f -name cloud-config.txt -print0
 }
 
-# as_json FILE: the YAML of FILE, a copy of a cloud-config, as JSON; fails
-# when it cannot be read. Nothing of it is printed on an error.
+# as_json FILE: the YAML of FILE, a copy of a cloud-config, as JSON, every
+# scalar as text (BaseLoader), so a date or a tag that JSON does not know
+# reads all the same; fails when it cannot be read. Nothing of it is printed
+# on an error.
 as_json() {
     python3 -I -c '
 import json, os, sys
@@ -114,7 +116,7 @@ import yaml
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=yaml.BaseLoader)
     json.dump(data, sys.stdout)
 except Exception:
     sys.exit(1)
@@ -168,18 +170,30 @@ patterns() {
         sort -z -t $'\t' -k1,1nr | while IFS= read -r -d '' line; do printf '%s\0' "${line#*$'\t'}"; done
 }
 
-# Python, shared by redact and holds: reads FILE without following a link
-# into data, and decompresses a compressed one; compressed is then its kind,
-# or "unreadable" when it cannot be decompressed.
+# Python, shared by redact and holds: read(path, log) reads the file at path
+# without following a link and returns (stat, data, kind). Only for one of
+# cloud-init's logs (log true) is a compressed file decompressed: kind names
+# the compression, and data is None when it cannot be decompressed. NotAFile
+# is raised for a link or anything but a regular file; any other OSError is
+# a file that cannot be read.
 read_file='
-import bz2, gzip, lzma, os, stat, sys
-def read(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+import bz2, errno, gzip, lzma, os, stat, sys
+class NotAFile(Exception):
+    pass
+def read(path, log):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise NotAFile(path)
+        raise
     with os.fdopen(fd, "rb") as f:
         st = os.fstat(f.fileno())
         if not stat.S_ISREG(st.st_mode):
-            raise IsADirectoryError(path)
+            raise NotAFile(path)
         data = f.read()
+    if not log:
+        return st, data, None
     for magic, kind, open_ in ((b"\x1f\x8b", "gzip", gzip.decompress),
                                (b"\xfd7zXZ\x00", "xz", lzma.decompress),
                                (b"BZh", "bzip2", bz2.decompress),
@@ -192,20 +206,23 @@ def read(path):
     return st, data, None
 '
 
-# redact FILE: replaces every pattern (NUL-separated on stdin) in FILE by
-# REDACTED, in place and durably, keeping its owner and mode. A compressed
-# FILE is deleted instead when it holds a pattern or cannot be decompressed.
-# Exit status 0 when it changed FILE, 5 when it deleted it, 3 when FILE holds
-# none, 4 when FILE is no regular file or a symbolic link, 1 on an error.
+# redact FILE [log]: replaces every pattern (NUL-separated on stdin) in FILE
+# by REDACTED, in place and durably, keeping its owner and mode. With log, a
+# compressed FILE is deleted instead when it holds a pattern or cannot be
+# decompressed. Exit status 0 when it changed FILE, 5 when it deleted it, 3
+# when FILE holds none, 4 when FILE is no regular file or a symbolic link, 1
+# when it cannot be read or on another error.
 redact() {
     python3 -I -c "$read_file"'
 import tempfile
 path = sys.argv[1]
 patterns = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
 try:
-    st, data, kind = read(path)
-except OSError:
+    st, data, kind = read(path, sys.argv[2:] == ["log"])
+except NotAFile:
     sys.exit(4)
+except OSError:
+    sys.exit(1)
 if kind:
     if data is not None and not any(p in data for p in patterns):
         sys.exit(3)
@@ -239,20 +256,23 @@ try:
     os.fsync(dfd)
 finally:
     os.close(dfd)
-' "$1"
+' "$@"
 }
 
-# holds FILE: whether FILE holds a pattern (NUL-separated on stdin); a
-# compressed FILE that cannot be decompressed counts as holding one.
+# holds FILE [log]: whether FILE holds a pattern (NUL-separated on stdin). A
+# file that cannot be read counts as holding one, and so, with log, does a
+# compressed one that cannot be decompressed.
 holds() {
     python3 -I -c "$read_file"'
 patterns = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
 try:
-    st, data, kind = read(sys.argv[1])
-except OSError:
+    st, data, kind = read(sys.argv[1], sys.argv[2:] == ["log"])
+except NotAFile:
     sys.exit(1)
+except OSError:
+    sys.exit(0)
 sys.exit(0 if data is None or any(p in data for p in patterns) else 1)
-' "$1"
+' "$@"
 }
 
 # scanned: the files the provisioned secrets are searched for in,
@@ -273,6 +293,13 @@ scanned() {
 # logs: cloud-init's logs, rotated ones included, NUL-separated.
 logs() {
     find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type f -name 'cloud-init*.log*' -print0
+}
+
+# log_kind FILE: "log" when FILE is one of cloud-init's logs, so that a
+# compressed one is decompressed; empty for any other file.
+log_kind() {
+    local name=${1##*/}
+    [ "${1%/*}/" = "$cloud_log" ] && [[ $name == cloud-init*.log* ]] && echo log || true
 }
 
 # delete_copies: deletes the copies of the user-data, and prints how many.
@@ -321,7 +348,8 @@ main() {
     if [ "${#pats[@]}" -gt 0 ]; then
         while IFS= read -r -d '' f; do
             rc=0
-            printf '%s\0' "${pats[@]}" | redact "$f" || rc=$?
+            # shellcheck disable=SC2046 # empty or one word
+            printf '%s\0' "${pats[@]}" | redact "$f" $(log_kind "$f") || rc=$?
             case $rc in
                 0)
                     redacted=$((redacted + 1))
@@ -339,7 +367,8 @@ main() {
             esac
         done < <(scanned)
         while IFS= read -r -d '' f; do
-            if printf '%s\0' "${pats[@]}" | holds "$f"; then left+=("$f"); fi
+            # shellcheck disable=SC2046 # empty or one word
+            if printf '%s\0' "${pats[@]}" | holds "$f" $(log_kind "$f"); then left+=("$f"); fi
         done < <(scanned)
         if own_dir "$cloud_lib" && own_dir "${cloud_lib}seed"; then
             while IFS= read -r -d '' f; do
@@ -347,7 +376,9 @@ main() {
             done < <(find "${cloud_lib}seed" -xdev -type f -print0)
         fi
     fi
-    deleted=$(delete_copies)
+    # A file that still holds a value keeps the copies, so that the next boot
+    # can learn the values again and retry.
+    if [ "${#left[@]}" -eq 0 ]; then deleted=$(delete_copies); else deleted=0; fi
     echo "cloud-init's copies of the provisioning data deleted: $deleted; files with provisioned secrets replaced: $redacted"
     [ "$dropped" = 0 ] || echo "compressed logs with provisioned secrets deleted: $dropped"
     for f in "${seeded[@]}"; do
@@ -355,6 +386,7 @@ main() {
     done
     if [ "${#left[@]}" -gt 0 ]; then
         for f in "${left[@]}"; do echo "$f still holds provisioned secrets" >&2; done
+        echo "cloud-init's copies of the provisioning data are kept until the next boot retries" >&2
         return 1
     fi
 }

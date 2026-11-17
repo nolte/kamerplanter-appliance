@@ -214,6 +214,33 @@ expect "an unreadable copy: cloud-init's logs are deleted, rotated ones too, oth
 expect "an unreadable copy: the scrub names it and says why the logs go" yes \
     "$(has "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt cannot be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" "$(out)")"
 
+# A copy with a date and a tag JSON does not know is still read: the logs
+# are scrubbed, not deleted.
+new_appliance
+booted iid-1
+printf 'expires: 2026-12-01\nblob: !!binary aGVsbG8=\n' >>"$SB/var/lib/cloud/instances/iid-1/cloud-config.txt"
+expect "a copy with a date and a binary tag: read, the logs are scrubbed and kept" "0|yes|none" \
+    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(found "$SB"/var/log/cloud-init*.log)"
+
+# Without the YAML module the copies cannot be read: the unit fails, nothing
+# is deleted.
+new_appliance
+booted iid-1
+mkdir -p "$SB/stub"
+printf '#!/usr/bin/env bash\ncase "$*" in *"import yaml"*) exit 1 ;; esac\nexec %q "$@"\n' "$(command -v python3)" >"$SB/stub/python3"
+chmod +x "$SB/stub/python3"
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "no YAML module: the scrub fails, says so, and deletes nothing" "1|yes|yes|yes" \
+    "$rc|$(has "Python has no YAML module" "$(out)")|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
+
+# A file outside the logs that starts like a compressed one is searched as it
+# is, never deleted.
+new_appliance
+booted iid-1
+printf '\x1f\x8bnot really gzip' >"$SB/var/lib/cloud/data/instance-id.bak"
+expect "a non-log file that looks compressed is kept" "0|yes" \
+    "$(run_scrub)|$(exists "$SB/var/lib/cloud/data/instance-id.bak")"
+
 # --- rotated logs (#30): plain ones are scrubbed, compressed ones that hold a
 # value or cannot be read are deleted, the others kept ---
 new_appliance
@@ -293,8 +320,8 @@ rc=$(run_scrub)
 chmod 0700 "$SB/var/lib/cloud/data"
 expect "a file that cannot be rewritten: the scrub fails and names it, never the value" "1|yes|no" \
     "$rc|$(has "$SB/var/lib/cloud/data/status.json still holds provisioned secrets" "$(out)")|$(has "$quoted" "$(out)")"
-expect "a file that cannot be rewritten: the rest is scrubbed all the same" "no|none" \
-    "$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(found "$SB"/var/log/cloud-init*.log "$SB/run/cloud-init")"
+expect "a file that cannot be rewritten: the rest is scrubbed, the copies are kept for the next boot to retry" "yes|none|yes" \
+    "$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(found "$SB"/var/log/cloud-init*.log)|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
 
 # --- the units (L15, L16) ---
 units=$image/usr/lib/systemd/system
