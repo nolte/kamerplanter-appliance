@@ -27,13 +27,16 @@ branches:
       required_status_checks:
         strict: true
         # disk-image (.github/workflows/disk-image.yml) is left out on
-        # purpose: it runs only on changes under image/ and build/, and until
-        # the base image is mirrored, Fedora removing superseded digests within
-        # about a day would turn it red for every pull request.
+        # purpose: it runs only on changes under image/ and build/, so a
+        # required context would never report on other pull requests. The
+        # image is covered by vm-gate, whose VM tests build it as well.
         contexts:
           - docs-build
           - pre-commit
           - unit-tests
+          # A commit status, not a job: .github/workflows/vm-gate.yml and the
+          # report job of vm-tests.yml set it (#43).
+          - vm-gate
       enforce_admins: true
       restrictions: null
 

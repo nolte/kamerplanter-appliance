@@ -1,0 +1,64 @@
+name: vm-gate
+
+# Sets the commit status `vm-gate`, a required check on develop
+# (.github/settings.yml), on the head of every pull request (#43):
+#   success  the pull request changes nothing the VM tests cover;
+#   failure  it changes what they cover but lacks the label `vm-tests`;
+#   pending  it has the label: the report job of vm-tests.yml sets the
+#            result once the VM suites of that commit are through.
+# The VM tests cover what vm-tests.yml runs on after a merge to develop: the
+# image, the build, the boot and image tests, and the workflow itself.
+# Only the GitHub API is read; the pull request's code is never checked out.
+
+on:
+  pull_request:
+    branches: [develop]
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: vm-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: vm-gate-decision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      ACTION: ${{ github.event.action }}
+      LABEL: ${{ github.event.label.name }}
+      HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'vm-tests') }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Set the vm-gate status
+        run: |
+          set -euo pipefail
+          status() {
+            gh api -X POST "repos/$REPO/statuses/$SHA" -f context=vm-gate \
+              -f state="$1" -f description="$2" -f target_url="$RUN_URL" >/dev/null
+            echo "vm-gate: $1 ($2)"
+          }
+          covered=$(gh api --paginate "repos/$REPO/pulls/$NUMBER/files" --jq '.[].filename' |
+            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-tests\.yml$)' || true)
+          if [ "$covered" = 0 ]; then
+            status success "no change the VM tests cover"
+          elif [ "$HAS_LABEL" != true ]; then
+            status failure "changes the image, build or boot tests: add the label vm-tests"
+          elif [ "$ACTION" != labeled ] && [ "$ACTION" != unlabeled ] || [ "$LABEL" = vm-tests ]; then
+            # A new head or the label just set: the VM tests start now.
+            status pending "waiting for the VM tests of this commit"
+          elif [ -z "$(gh api "repos/$REPO/commits/$SHA/statuses" --jq '[.[] | select(.context == "vm-gate")] | first | .state // empty')" ]; then
+            status pending "waiting for the VM tests of this commit"
+          else
+            # Another label changed: the result of the VM tests stands.
+            echo "vm-gate: unchanged"
+          fi
