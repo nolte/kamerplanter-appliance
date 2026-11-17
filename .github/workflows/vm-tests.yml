@@ -425,7 +425,6 @@ jobs:
     # status vm-gate, a required check (.github/workflows/vm-gate.yml, #43).
     permissions:
       contents: read
-      actions: read
       statuses: write
     steps:
       - name: Set the vm-gate status of the pull request

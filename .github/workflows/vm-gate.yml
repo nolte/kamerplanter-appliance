@@ -7,11 +7,14 @@ name: vm-gate
 #   pending  it has the label: the report job of vm-tests.yml sets the
 #            result once the VM suites of that commit are through.
 # The VM tests cover what vm-tests.yml runs on after a merge to develop: the
-# image, the build, the boot and image tests, and the workflow itself.
-# Only the GitHub API is read; the pull request's code is never checked out.
+# image, the build, the boot and image tests, and the two workflows.
+#
+# pull_request_target: the gate runs as develop has it, so a pull request
+# cannot rewrite the gate it is judged by. That is safe here because only the
+# GitHub API is read; the pull request's code is never checked out.
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [develop]
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
@@ -34,6 +37,7 @@ jobs:
       REPO: ${{ github.repository }}
       NUMBER: ${{ github.event.pull_request.number }}
       SHA: ${{ github.event.pull_request.head.sha }}
+      BASE: ${{ github.event.pull_request.base.sha }}
       ACTION: ${{ github.event.action }}
       LABEL: ${{ github.event.label.name }}
       HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'vm-tests') }}
@@ -47,18 +51,26 @@ jobs:
               -f state="$1" -f description="$2" -f target_url="$RUN_URL" >/dev/null
             echo "vm-gate: $1 ($2)"
           }
-          covered=$(gh api --paginate "repos/$REPO/pulls/$NUMBER/files" --jq '.[].filename' |
-            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-tests\.yml$)' || true)
+          # The files of exactly this head, not of whatever the pull request
+          # shows by now. The comparison lists at most 300 files; a larger
+          # change counts as covered.
+          files=$(gh api "repos/$REPO/compare/$BASE...$SHA" --jq '.files | length, (.[].filename)')
+          covered=$(tail -n +2 <<<"$files" |
+            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-(tests|gate)\.yml$)' || true)
+          [ "$(head -n1 <<<"$files")" -lt 300 ] || covered=many
           if [ "$covered" = 0 ]; then
             status success "no change the VM tests cover"
           elif [ "$HAS_LABEL" != true ]; then
             status failure "changes the image, build or boot tests: add the label vm-tests"
-          elif [ "$ACTION" != labeled ] && [ "$ACTION" != unlabeled ] || [ "$LABEL" = vm-tests ]; then
+          elif [ "$ACTION" = opened ] || [ "$ACTION" = synchronize ] ||
+            { [ "$ACTION" = labeled ] && [ "$LABEL" = vm-tests ]; }; then
             # A new head or the label just set: the VM tests start now.
             status pending "waiting for the VM tests of this commit"
           elif [ -z "$(gh api "repos/$REPO/commits/$SHA/statuses" --jq '[.[] | select(.context == "vm-gate")] | first | .state // empty')" ]; then
-            status pending "waiting for the VM tests of this commit"
+            # No result for this head, and nothing starts the VM tests now.
+            status failure "no VM test result for this commit: remove and add the label vm-tests"
           else
-            # Another label changed: the result of the VM tests stands.
+            # Reopened, or another label changed: vm-tests.yml does not run
+            # again, so the result of its last run for this head stands.
             echo "vm-gate: unchanged"
           fi
