@@ -1,6 +1,6 @@
 {
   extends: [
-    'github>nolte/gh-plumbing//renovate-configs/common#v2.2.1',
+    'github>nolte/gh-plumbing//renovate-configs/common#v2.3.0',
   ],
   mode: 'full',
   separateMajorMinor: true,
