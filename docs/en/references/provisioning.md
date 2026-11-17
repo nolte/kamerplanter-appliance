@@ -203,7 +203,7 @@ Seed files under `/var/lib/cloud/seed/` are your source, not a copy, and are lef
 
 The appliance can only replace secrets it found in the user-data that cloud-init read. When the user-data isn't valid YAML, for example because a secret starting with `*`, `&`, or `@` isn't quoted, cloud-init reads none of it and can quote the faulty line in its log and in the journal, where it stays. Quote every secret.
 
-**Only root reaches the metadata service.** The address `169.254.169.254` hands out the provisioning data, secrets included, to whoever asks. Only root reaches it, from before the first container starts. Other local users and the containers don't.
+**Only root reaches the metadata service.** The address `169.254.169.254` hands out the provisioning data, secrets included, to whoever asks. Only root reaches it, from before the first container starts. Other local users and the containers don't, and the containers reach no other link-local address (`169.254.0.0/16`) either. The appliance masks `nftables.service`, whose start would remove these rules, and loads them again every minute, so that they are back within a minute when something else removes or changes them.
 
 ## After the first boot
 

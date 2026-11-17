@@ -8,7 +8,8 @@
 # Inside, three network namespaces stand for the appliance (the container's
 # own), a Podman container on a bridge network ("ctr", routed through the
 # appliance like netavark's containers) and the metadata service ("md",
-# answering on 169.254.169.254 and, as a control, on 192.0.2.10). A table
+# answering on 169.254.169.254, on another link-local address, 169.254.10.10,
+# and, as a control, on 192.0.2.10). A table
 # that accepts everything, as Podman's netavark keeps its own, is loaded
 # first. The checks run once without the rules, so that they can fail, and
 # once with them, loaded twice as on a restart of the unit.
@@ -52,6 +53,7 @@ ip addr add 192.0.2.1/30 dev br-md
 ip link set br-ctr up
 ip link set br-md up
 ip route add 169.254.169.254/32 via 192.0.2.2 dev br-md
+ip route add 169.254.10.10/32 via 192.0.2.2 dev br-md
 ip route add 192.0.2.10/32 via 192.0.2.2 dev br-md
 ip netns exec ctr ip link set lo up
 ip netns exec ctr ip addr add 10.88.0.2/24 dev eth0
@@ -60,6 +62,7 @@ ip netns exec ctr ip route add default via 10.88.0.1
 ip netns exec md ip link set lo up
 ip netns exec md ip addr add 192.0.2.2/30 dev eth0
 ip netns exec md ip addr add 169.254.169.254/32 dev lo
+ip netns exec md ip addr add 169.254.10.10/32 dev lo
 ip netns exec md ip addr add 192.0.2.10/32 dev lo
 ip netns exec md ip link set eth0 up
 ip netns exec md ip route add 10.88.0.0/24 via 192.0.2.1
@@ -78,6 +81,7 @@ EOF
 
 expect "without the rules: root, another user and a container reach the metadata service" "yes|yes|yes" \
     "$(get root 169.254.169.254)|$(get nobody 169.254.169.254)|$(get ctr 169.254.169.254)"
+expect "without the rules: a container reaches another link-local address" yes "$(get ctr 169.254.10.10)"
 
 nft -f "$rules" && nft -f "$rules"
 expect "the rules load, also a second time, as one table beside the other" "yes|1|yes" \
@@ -85,6 +89,7 @@ expect "the rules load, also a second time, as one table beside the other" "yes|
 expect "with the rules: root reaches the metadata service" yes "$(get root 169.254.169.254)"
 expect "with the rules: another user does not" no "$(get nobody 169.254.169.254)"
 expect "with the rules: a container routed through the appliance does not" no "$(get ctr 169.254.169.254)"
+expect "with the rules: nor does it reach another link-local address" no "$(get ctr 169.254.10.10)"
 expect "with the rules: everything else stays reachable, for the user and the container" "yes|yes" \
     "$(get nobody 192.0.2.10)|$(get ctr 192.0.2.10)"
 start=$(date +%s%N)

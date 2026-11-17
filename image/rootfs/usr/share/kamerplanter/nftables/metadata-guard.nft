@@ -19,11 +19,19 @@
 # output: packets that local processes send. A socket of uid 0 passes; every
 # other uid, a rootless container's pasta or slirp4netns process included,
 # is refused at once rather than left to time out.
+# A rootful container in the host's network namespace (Network=host, or
+# rootful pasta) sends with uid 0 and would pass output like cloud-init does.
+# That is why every Quadlet of the appliance joins kamerplanter.network, and
+# tests/unit/scrub.sh fails on one that does not.
 # forward: packets routed through the appliance, which is how the containers
 # of the Podman bridge networks (kamerplanter.network) reach the outside: they
 # never pass output, and their address is translated only after this hook.
-# Nothing is routed to the metadata service for anyone, so every such packet
-# is refused.
+# Nothing is routed to a link-local address for anyone: the whole IPv4 range
+# 169.254.0.0/16 stays on its link (RFC 3927), and the containers' DNS goes to
+# aardvark-dns at the bridge's gateway, which is not forwarded. So every such
+# packet is refused, to the metadata service and to whatever else a cloud
+# offers there, an AWS-style DNS or time server among them. IPv6 link-local
+# addresses are not routed either; only the metadata address is named there.
 table inet kamerplanter_metadata
 delete table inet kamerplanter_metadata
 
@@ -36,7 +44,7 @@ table inet kamerplanter_metadata {
 
     chain forward {
         type filter hook forward priority filter; policy accept;
-        ip daddr 169.254.169.254 counter reject with icmpx admin-prohibited
+        ip daddr 169.254.0.0/16 counter reject with icmpx admin-prohibited
         ip6 daddr fe80::a9fe:a9fe counter reject with icmpx admin-prohibited
     }
 }

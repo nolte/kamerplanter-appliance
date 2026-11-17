@@ -9,7 +9,11 @@ Documentation=file:///usr/share/kamerplanter/nftables/metadata-guard.nft
 # none starts while the rules are not in place.
 # Not nftables.service: that loads /etc/sysconfig/nftables.conf and, when
 # stopped or reloaded, flushes the whole ruleset, Podman's included. This
-# unit replaces only its own table, and stopping it leaves the rules in place.
+# unit replaces only its own table, and stopping it leaves the rules in place;
+# but stopping or restarting it stops or restarts the containers, which
+# require it. The image masks nftables.service, and
+# kamerplanter-metadata-guard-check.timer loads the rules again every minute,
+# in case something removed or changed them, without restarting this unit.
 DefaultDependencies=no
 Before=network-pre.target sysinit.target shutdown.target
 Wants=network-pre.target

@@ -2,8 +2,10 @@
 # Checks the hardening of the provisioning data (spec/distribution-requirements/
 # L15, L16): the scrub of cloud-init's copies
 # (image/rootfs/usr/libexec/kamerplanter/scrub-cloud-init) on a fake cloud-init
-# tree as cloud-init 26.2 leaves it, the units that run the scrub and load the
-# metadata rules, and the rules themselves as text. The script runs as it
+# tree as cloud-init 26.2 leaves it, the units that run the scrub, load the
+# metadata rules and load them again when they were removed, the network of
+# every container (one in the host's network namespace would send as root and
+# pass the rules), and the rules themselves as text. The script runs as it
 # ships, in a sandbox (lib/sandbox.sh); it deletes and rewrites files only
 # below a temporary directory. Needs no root, no cloud-init and no VM. The
 # rules are loaded and tried in an isolated network namespace by
@@ -339,6 +341,17 @@ expect "units: the metadata rules load early, before the network, enabled in the
     "$(grep -qx 'DefaultDependencies=no' "$guard_unit" 2>/dev/null && echo yes)|$(grep -Eq '^Before=.*\bnetwork-pre\.target\b' "$guard_unit" 2>/dev/null && echo yes)|$(grep -qx 'WantedBy=sysinit.target' "$guard_unit" 2>/dev/null && echo yes)|$(grep -q 'kamerplanter-metadata-guard.service' "$root/image/Containerfile" && echo yes)"
 expect "units: the rules are loaded from the image's file, and nothing flushes the whole ruleset" "yes|no" \
     "$(grep -qx 'ExecStart=/usr/sbin/nft -f /usr/share/kamerplanter/nftables/metadata-guard.nft' "$guard_unit" 2>/dev/null && echo yes)|$(grep -v '^#' "$guard_unit" 2>/dev/null | grep -Eqi '^Exec(Stop|Reload)=|flush' && echo yes || echo no)"
+check_unit=$units/kamerplanter-metadata-guard-check.service
+check_timer=$units/kamerplanter-metadata-guard-check.timer
+expect "units: nftables.service, whose start flushes the whole ruleset, is masked in the image" yes \
+    "$(grep -Eq '^\s*(&&\s*)?systemctl mask .*\bnftables\.service\b' "$root/image/Containerfile" && echo yes)"
+expect "units: the check of the metadata rules runs every minute and is enabled in the image" "yes|yes|yes" \
+    "$(grep -qx 'OnUnitActiveSec=1min' "$check_timer" 2>/dev/null && echo yes)|$(grep -qx 'WantedBy=timers.target' "$check_timer" 2>/dev/null && echo yes)|$(grep -q 'kamerplanter-metadata-guard-check.timer' "$root/image/Containerfile" && echo yes)"
+check_exec=$(grep '^ExecStart=' "$check_unit" 2>/dev/null)
+expect "units: the check loads the image's rules file on every run, also over a table flushed or edited, and warns when it was missing" "yes|no|yes" \
+    "$(has 'exec /usr/sbin/nft -f /usr/share/kamerplanter/nftables/metadata-guard.nft' "$check_exec")|$(grep -Eq 'exit|&& *echo' <<<"$check_exec" && echo yes || echo no)|$(grep -Eq 'nft list table inet kamerplanter_metadata [^;]*\|\| *echo' <<<"$check_exec" && echo yes)"
+expect "units: the check never restarts or stops the guard unit, which the containers require, and flushes nothing" "no|no" \
+    "$(grep -v '^#' "$check_unit" 2>/dev/null | grep -Eq 'systemctl|^Exec(Stop|Reload)=' && echo yes || echo no)|$(grep -v '^#' "$check_unit" 2>/dev/null | grep -qi flush && echo yes || echo no)"
 dropin=$image/usr/share/containers/systemd/kamerplanter-.container.d/10-kamerplanter.conf
 expect "units: no container starts without the metadata rules (L16)" "yes|yes" \
     "$(grep -qx 'Requires=kamerplanter-metadata-guard.service' "$dropin" && echo yes)|$(grep -qx 'After=kamerplanter-metadata-guard.service' "$dropin" && echo yes)"
@@ -350,10 +363,61 @@ expect "rules: a table of their own, replaced on reload, no flush of other table
     "$(has $'table inet kamerplanter_metadata\ndelete table inet kamerplanter_metadata' "$body")|$(has 'table inet kamerplanter_metadata {' "$body")|$(has flush "$body")"
 expect "rules: local processes other than root are refused the metadata address" yes \
     "$(grep -Eq '^\s*ip daddr 169\.254\.169\.254 meta skuid != 0 .*(drop|reject)' <<<"$body" && echo yes)"
-expect "rules: traffic routed through the appliance, the containers', is refused it for everyone" yes \
-    "$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip daddr 169\.254\.169\.254 .*(drop|reject)' && echo yes)"
+expect "rules: traffic routed through the appliance, the containers', is refused every link-local address for everyone" yes \
+    "$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip daddr 169\.254\.0\.0/16 .*(drop|reject)' && echo yes)"
+expect "rules: the IPv6 metadata address, too, is refused local processes other than root and routed traffic" "yes|yes" \
+    "$(sed -n '/chain output/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe meta skuid != 0 .*(drop|reject)' && echo yes)|$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe .*(drop|reject)' && echo yes)"
 expect "rules: the output chain hooks output, the forward chain hooks forward" "yes|yes" \
     "$(sed -n '/chain output/,/}/p' <<<"$body" | grep -q 'type filter hook output' && echo yes)|$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -q 'type filter hook forward' && echo yes)"
+
+# --- the containers' network (L16) ---
+# The output rule lets uid 0 pass. A rootful container in the host's network
+# namespace (Network=host, rootful pasta) sends as uid 0 and would reach the
+# metadata service; only on a bridge network, kamerplanter.network, are its
+# packets routed, and so refused by the forward rule. A macvlan or ipvlan
+# network sends past the forward hook as well, and a pod, a kube unit (its
+# hostNetwork) or a build (its RUN steps) carries a network of its own, so
+# none of these ships. A container unit must be named kamerplanter-*.container,
+# or the drop-in that makes it wait for the rules does not apply to it.
+# quadlet_view prints each logical line of a unit as "FILE: LINE": a line
+# ending in a backslash is joined with the next, quotes are stripped and
+# comments dropped, so that `PodmanArgs="--network" host` and an option on a
+# continuation line are seen as Podman reads them. Every finding names its
+# file; /dev/null keeps grep from reading stdin when no unit is found.
+quadlets=$image/usr/share/containers/systemd
+mapfile -t quadlet_files < <(find "$quadlets" -type f \( -name '*.container' -o -name '*.pod' -o -name '*.kube' -o -name '*.build' -o -name '*.network' -o -path '*.d/*.conf' \) 2>/dev/null | sort)
+mapfile -t container_files < <(printf '%s\n' "${quadlet_files[@]}" | grep '\.container$')
+rel() { sed "s|^$root/||"; }
+quadlet_view() {  # quadlet_view FILE...
+    local f
+    for f in "$@"; do
+        awk -v f="$(rel <<<"$f")" '
+            { sub(/\r$/, ""); line = cont ? line " " $0 : $0 }
+            line ~ /\\$/ { sub(/\\$/, "", line); cont = 1; next }
+            { cont = 0; gsub(/["\047]/, "", line); if (line !~ /^[[:space:]]*[#;]/) print f ": " line }
+            END { if (cont) { gsub(/["\047]/, "", line); print f ": " line } }' "$f"
+    done
+}
+view=$(quadlet_view "${quadlet_files[@]}")
+listed() { rel | paste -sd ';' | grep . || echo none; }  # findings, or "none"
+key() { printf '^[^:]*: [[:space:]]*%s[[:space:]]*=' "$1"; }  # key KEY: a regex for KEY= in the view
+expect "network: the container units are found (the test can fail)" yes \
+    "$([ "${#container_files[@]}" -gt 0 ] && echo yes)"
+expect "network: no pod, kube or build unit ships, each would carry a network of its own" none \
+    "$(printf '%s\n' "${quadlet_files[@]}" | grep -E '\.(pod|kube|build)$' | listed)"
+expect "network: every container unit is named kamerplanter-*.container, so it waits for the rules" none \
+    "$(printf '%s\n' "${container_files[@]}" | grep -v '/kamerplanter-[^/]*\.container$' | listed)"
+expect "network: every Network= line, in units and drop-ins, names kamerplanter.network" none \
+    "$(grep -E "$(key Network)" <<<"$view" | grep -vE '=[[:space:]]*kamerplanter\.network[[:space:]]*$' | listed)"
+expect "network: every container unit has exactly one Network= line" none \
+    "$(for f in "${container_files[@]}"; do
+        n=$(quadlet_view "$f" | grep -cE "$(key Network)")
+        [ "$n" = 1 ] || echo "$f: $n Network= lines"
+    done | listed)"
+expect "network: no PodmanArgs= sets a network of its own, and no unit joins a pod" "none|none" \
+    "$(grep -E "$(key PodmanArgs).*--net(work)?([=[:space:]]|$)" <<<"$view" | listed)|$(grep -E "$(key Pod)" <<<"$view" | listed)"
+expect "network: every network is a bridge, none macvlan or ipvlan, which bypass the forward rule" "none|none" \
+    "$(grep -E '^[^:]*\.network(\.d/[^:]*)?: ' <<<"$view" | grep -E "$(key Driver)" | grep -vE '=[[:space:]]*bridge[[:space:]]*$' | listed)|$(grep -E '^[^:]*\.network(\.d/[^:]*)?: ' <<<"$view" | grep -E "$(key '(PodmanArgs|Options)')" | grep -E '(--driver|-d)[=[:space:]]*(macvlan|ipvlan)' | listed)"
 
 # --- no provisioned value in anything the scrub printed (L12) ---
 leaked=none

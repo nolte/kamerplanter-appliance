@@ -64,13 +64,18 @@ RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/libexec/kamerplanter/dis
     && chmod 0700 /etc/kamerplanter && chmod 0600 /etc/kamerplanter/kamerplanter.env \
     && systemctl enable kamerplanter.target \
         kamerplanter-provisioning.service kamerplanter-cloud-init-scrub.service \
-        kamerplanter-metadata-guard.service \
+        kamerplanter-metadata-guard.service kamerplanter-metadata-guard-check.timer \
         kamerplanter-data-disk.service kamerplanter-backup-disk.service \
         kamerplanter-update-guard.service kamerplanter-update-health.service \
         kamerplanter-update-fetch.timer kamerplanter-update-apply.timer \
     # bootc's own timer applies updates with an immediate reboot at any hour;
     # kamerplanter-update-*.timer replace it.
-    && systemctl mask bootc-fetch-apply-updates.timer
+    && systemctl mask bootc-fetch-apply-updates.timer \
+    # nftables.service runs `flush ruleset` when it starts, reloads or stops,
+    # which removes the metadata rules (kamerplanter-metadata-guard.service,
+    # spec/distribution-requirements/ L16) and Podman's tables with them; the
+    # appliance keeps no ruleset of its own in /etc/sysconfig/nftables.conf.
+    && systemctl mask nftables.service
 
 # Updates of the system image must carry a signature by the release key.
 # Fedora's default policy stays as it is for every other image; the

@@ -203,7 +203,7 @@ Seed-Dateien unter `/var/lib/cloud/seed/` sind deine Quelle, keine Kopie, und bl
 
 Die Appliance kann nur Secrets ersetzen, die sie in der von cloud-init gelesenen User-Data findet. Ist die User-Data kein gültiges YAML, etwa weil ein Secret, das mit `*`, `&` oder `@` beginnt, nicht in Anführungszeichen steht, liest cloud-init nichts davon und kann die fehlerhafte Zeile in seinem Log und im Journal zitieren, wo sie bleibt. Setze jedes Secret in Anführungszeichen.
 
-**Nur root erreicht den Metadatendienst.** Die Adresse `169.254.169.254` gibt die Provisionierungsdaten samt Secrets an jeden heraus, der fragt. Nur root erreicht sie, schon bevor der erste Container startet. Andere lokale Nutzer und die Container erreichen sie nicht.
+**Nur root erreicht den Metadatendienst.** Die Adresse `169.254.169.254` gibt die Provisionierungsdaten samt Secrets an jeden heraus, der fragt. Nur root erreicht sie, schon bevor der erste Container startet. Andere lokale Nutzer und die Container erreichen sie nicht, und die Container erreichen auch keine andere Link-Local-Adresse (`169.254.0.0/16`). Die Appliance maskiert `nftables.service`, dessen Start diese Regeln entfernen würde, und lädt sie jede Minute neu, sodass sie innerhalb einer Minute wieder gelten, wenn etwas anderes sie entfernt oder ändert.
 
 ## Nach dem ersten Boot { #after-the-first-boot }
 
