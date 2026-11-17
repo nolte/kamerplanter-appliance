@@ -252,7 +252,7 @@ reboot_vm() {
 no_copies() {
     local args=() m
     for m in "$@"; do args+=(-e "$m"); done
-    guest "echo \$(grep -rlF ${args[*]} /var/lib/cloud /run/cloud-init /var/log/cloud-init*.log 2>/dev/null | wc -l) \$(journalctl -b --no-pager | grep -cF ${args[*]})"
+    guest "echo \$(grep -rlF ${args[*]} /var/lib/cloud /run/cloud-init /var/log/cloud-init*.log* 2>/dev/null | wc -l) \$(journalctl -b --no-pager | grep -cF ${args[*]})"
 }
 
 # expect_rec NAME EXPECTED ACTUAL WHAT: records NAME as PASS when ACTUAL is
