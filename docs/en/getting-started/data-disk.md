@@ -136,7 +136,7 @@ Name the disk before the first boot. Otherwise the first boot generates new secr
 
 When a data disk is set up but absent, the services stay stopped. The appliance generates no secrets and writes nothing to the system disk in its place. The same applies when the disk can't be unlocked, carries the label under another UUID, or shares its label with a second device.
 
-The reason is in the journal:
+The reason is on the console, above the login prompt, and in the journal:
 
 ```bash
 systemctl status kamerplanter-data-disk.service
@@ -155,7 +155,7 @@ A missing backup disk stops nothing: the pre-update backup goes to the next loca
 
 The data disk carries a release marker: the highest release whose services passed the health check on it. A newer Kamerplanter may have migrated the data in a way an older one can't read. So an older release, and any development build, keeps the services stopped on a disk marked by a newer release. A marker that can't be read refuses every release. A rollback by the appliance isn't affected, since it restores the marker together with the data. A rollback to a release that doesn't know data disks at all is refused while a data disk is set up; see [Updates and rollback](updates.md#returning-to-the-previous-release-yourself).
 
-The message names both releases, in `systemctl status kamerplanter-update-guard.service` and in the recent events of `kamerplanter-update status`. Return to the newer release, or restore a backup from before it. To run the older release on the disk all the same, at the risk of data the newer one has migrated, run as root:
+The message names both releases, on the console, in `systemctl status kamerplanter-update-guard.service` and in the recent events of `kamerplanter-update status`. Return to the newer release, or restore a backup from before it. To run the older release on the disk all the same, at the risk of data the newer one has migrated, run as root:
 
 ```bash
 kamerplanter-update allow-downgrade <disk release> <running release>

@@ -136,7 +136,7 @@ Benenne den Datenträger vor dem ersten Start. Sonst erzeugt der erste Start neu
 
 Ist ein Datenträger eingerichtet, aber nicht vorhanden, bleiben die Dienste angehalten. Die Appliance erzeugt keine Secrets und schreibt an seiner Stelle nichts auf die Systemplatte. Dasselbe gilt, wenn sich der Datenträger nicht entsperren lässt, das Label unter einer anderen UUID trägt oder sein Label mit einem zweiten Gerät teilt.
 
-Der Grund steht im Journal:
+Der Grund steht auf der Konsole über der Anmeldung und im Journal:
 
 ```bash
 systemctl status kamerplanter-data-disk.service
@@ -155,7 +155,7 @@ Ein fehlender Sicherungs-Datenträger hält nichts an: Die Datenbank-Kopie vor e
 
 Der Datenträger trägt eine Release-Markierung: das höchste Release, dessen Dienste auf ihm die Gesundheitsprüfung bestanden haben. Ein neueres Kamerplanter kann die Daten so migriert haben, dass ein älteres sie nicht lesen kann. Deshalb hält ein älteres Release, und jeder Entwicklungs-Build, die Dienste auf einem Datenträger angehalten, den ein neueres Release markiert hat. Eine Markierung, die sich nicht lesen lässt, lehnt jedes Release ab. Ein Rollback durch die Appliance ist davon nicht betroffen, denn er stellt die Markierung zusammen mit den Daten wieder her. Ein Rollback zu einem Release, das überhaupt keine Datenträger kennt, wird abgelehnt, solange ein Datenträger eingerichtet ist; siehe [Updates und Rollback](updates.md#returning-to-the-previous-release-yourself).
 
-Die Meldung nennt beide Releases, in `systemctl status kamerplanter-update-guard.service` und in den letzten Ereignissen von `kamerplanter-update status`. Kehre zum neueren Release zurück oder stelle eine Sicherung von davor wieder her. Um das ältere Release trotzdem auf dem Datenträger zu betreiben, auf das Risiko von Daten hin, die das neuere migriert hat, führe als root aus:
+Die Meldung nennt beide Releases, auf der Konsole, in `systemctl status kamerplanter-update-guard.service` und in den letzten Ereignissen von `kamerplanter-update status`. Kehre zum neueren Release zurück oder stelle eine Sicherung von davor wieder her. Um das ältere Release trotzdem auf dem Datenträger zu betreiben, auf das Risiko von Daten hin, die das neuere migriert hat, führe als root aus:
 
 ```bash
 kamerplanter-update allow-downgrade <disk release> <running release>

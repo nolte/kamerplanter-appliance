@@ -48,7 +48,7 @@ Recent events:
   2026-11-13T03:08:02Z  health  ok  v0.2.0 is healthy
 ```
 
-`kamerplanter-update status --json` prints the same as JSON. The console shows the running version and the next window above the login prompt.
+`kamerplanter-update status --json` prints the same as JSON. The console shows the running version, a staged update, and the next window above the login prompt.
 
 ## Returning to the previous release yourself
 
@@ -92,7 +92,7 @@ A disk is skipped when it isn't set up, is missing, is mounted under another ide
 
 The first update from a release that knows only the system disk puts its backup there, so that a rollback to that release finds it.
 
-The record keeps where each backup is and a checksum, which is checked before a restore. When the backup's disk is missing at a rollback, or the checksum doesn't match, the backup isn't restored and the services stay stopped; `systemctl status kamerplanter-update-guard.service` says why. For a missing disk, attach it again, then reboot, or run `systemctl restart kamerplanter-backup-disk.service kamerplanter.target`. A damaged backup has to be replaced by hand from another backup. `kamerplanter-update status` lists every backup with its location.
+The record keeps where each backup is and a checksum, which is checked before a restore. When the backup's disk is missing at a rollback, or the checksum doesn't match, the backup isn't restored and the services stay stopped; the console and `systemctl status kamerplanter-update-guard.service` say why. For a missing disk, attach it again, then reboot, or run `systemctl restart kamerplanter-backup-disk.service kamerplanter.target`. A damaged backup has to be replaced by hand from another backup. `kamerplanter-update status` lists every backup with its location.
 
 ## Choosing when
 

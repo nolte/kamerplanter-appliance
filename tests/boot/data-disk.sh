@@ -440,6 +440,8 @@ step_missing() {
         return 1
     fi
     record d5 PASS "$((SECONDS - start))s" "without the disk: disk service failed after its wait, services stopped, console names kp-data (${issue%%$'\n'*}), no secret on the system disk"
+    # Written by the disk service, which can start before systemd-tmpfiles.
+    check_console d5-console 40-kamerplanter-data-disk.issue
     attach data || { fail d5-back "the disk could not be attached"; return 1; }
     guest "udevadm settle; systemctl restart kamerplanter.target"
     local secs
@@ -475,6 +477,8 @@ step_downgrade() {
         return 1
     fi
     record d6 PASS - "development build ($running) on the disk of $RELEASE: guard failed, services stopped, console: ${issue%%$'\n'*}"
+    # Written by the update guard, which can start before systemd-tmpfiles.
+    check_console d6-console 45-kamerplanter-release.issue
     local secs
     guest "kamerplanter-update allow-downgrade $RELEASE $running </dev/null" >"$OUT/d6.allow.txt" 2>&1 ||
         { fail d6-allow "allow-downgrade refused: $(tail -n1 "$OUT/d6.allow.txt")"; return 1; }

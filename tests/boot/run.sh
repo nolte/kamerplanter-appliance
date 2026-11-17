@@ -264,6 +264,32 @@ expect_rec() {
     return 1
 }
 
+# check_console NAME FILE: records whether the console can show the messages
+# in /run/issue.d, FILE among them (#23). SELinux lets the console (kmscon,
+# agetty) read them, and the NetworkManager dispatcher write there, only with
+# the policy's type systemd_ssh_issue_var_run_t: the directory and each file
+# carry it, and this boot has no denial on a console message or for those
+# domains. The labels and the denials go to $OUT/NAME.console.txt.
+check_console() {
+    local name=$1 file=$2 labels denials wrong
+    labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1")
+    denials=$(guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null' |
+        grep -E 'name="[^"]*issue|scontext=[^ ]*:(kmscon|getty|NetworkManager_dispatcher[a-z_]*)_t:' | sort -u)
+    wrong=$(grep -v ':systemd_ssh_issue_var_run_t:' <<<"$labels")
+    printf '== labels\n%s\n== denials\n%s\n' "$labels" "$denials" >"$OUT/$name.console.txt"
+    if ! grep -q " /run/issue.d/$file\$" <<<"$labels"; then
+        record "$name" FAIL - "the console message $file is not in /run/issue.d"
+    elif [ -n "$wrong" ]; then
+        record "$name" FAIL - "not readable by the console: ${wrong//$'\n'/; }"
+    elif [ -n "$denials" ]; then
+        record "$name" FAIL - "$(grep -c . <<<"$denials") SELinux denials for the console messages, see $name.console.txt"
+    else
+        record "$name" PASS - "console messages ($file) labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
+        return 0
+    fi
+    return 1
+}
+
 # check_provisioned NAME HOSTNAME [IFACE ADDRESS]: records whether the
 # hostname, the SSH key of the user-data (VM_SSH_KEY=off, so guest only gets
 # in with it), the SSH policy and, with IFACE, the static IPv4 address,
@@ -325,6 +351,8 @@ run_1() {
     else
         record run1-noprov FAIL - "no provisioning data: cloud-init '$ci', dynamic addresses $addr"
     fi
+    # spec/update-and-rollback/ G1: the version above the login prompt.
+    check_console run1-console 50-kamerplanter.issue
 }
 
 # Kill a container, expect systemd to bring it back. Needs the VM of run 1.

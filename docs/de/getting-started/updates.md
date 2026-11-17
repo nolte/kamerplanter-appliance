@@ -48,7 +48,7 @@ Recent events:
   2026-11-13T03:08:02Z  health  ok  v0.2.0 is healthy
 ```
 
-`kamerplanter-update status --json` gibt dasselbe als JSON aus. Die Konsole zeigt die laufende Version und das nächste Fenster über der Anmeldung.
+`kamerplanter-update status --json` gibt dasselbe als JSON aus. Die Konsole zeigt die laufende Version, ein bereitgelegtes Update und das nächste Fenster über der Anmeldung.
 
 ## Selbst zum vorherigen Release zurückkehren { #returning-to-the-previous-release-yourself }
 
@@ -92,7 +92,7 @@ Eine Platte wird übergangen, wenn sie nicht eingerichtet ist, fehlt, unter eine
 
 Das erste Update von einem Release, das nur die Systemplatte kennt, legt seine Kopie dort ab, damit ein Rollback auf dieses Release sie findet.
 
-Das Protokoll hält fest, wo jede Kopie liegt, und eine Prüfsumme, die vor einer Wiederherstellung geprüft wird. Fehlt die Platte der Kopie bei einem Rollback oder stimmt die Prüfsumme nicht, wird die Kopie nicht wiederhergestellt, und die Dienste bleiben angehalten; `systemctl status kamerplanter-update-guard.service` sagt warum. Bei einer fehlenden Platte schließe sie wieder an und starte dann neu, oder führe `systemctl restart kamerplanter-backup-disk.service kamerplanter.target` aus. Eine beschädigte Kopie musst du von Hand aus einer anderen Sicherung ersetzen. `kamerplanter-update status` listet jede Kopie mit ihrem Ort.
+Das Protokoll hält fest, wo jede Kopie liegt, und eine Prüfsumme, die vor einer Wiederherstellung geprüft wird. Fehlt die Platte der Kopie bei einem Rollback oder stimmt die Prüfsumme nicht, wird die Kopie nicht wiederhergestellt, und die Dienste bleiben angehalten; die Konsole und `systemctl status kamerplanter-update-guard.service` sagen warum. Bei einer fehlenden Platte schließe sie wieder an und starte dann neu, oder führe `systemctl restart kamerplanter-backup-disk.service kamerplanter.target` aus. Eine beschädigte Kopie musst du von Hand aus einer anderen Sicherung ersetzen. `kamerplanter-update status` listet jede Kopie mit ihrem Ort.
 
 ## Den Zeitpunkt wählen
 
