@@ -67,6 +67,8 @@ cloud-init chooses its source before `/var` is mounted. While it chooses among s
 
 No default user is created, not even with `users: [ default ]`. SSH never accepts a password, also when the user-data sets `ssh_pwauth: true`. cloud-init doesn't grow partitions or file systems.
 
+The appliance generates its SSH host keys on its first boot and keeps them, also on a boot that cloud-init treats as a new instance: a boot on which a seed URL or the metadata service doesn't answer, the next boot on which it answers again, or a changed `instance-id`. SSH clients therefore don't report a changed host key. A copy of an installed system disk, such as a snapshot that a second server is created from, keeps the host keys of the original like everything else on the disk; set up a second appliance from the image instead.
+
 ### Static network
 
 Two forms of network-config version 2 are supported: each `ethernets` entry keyed by the name of the interface on the appliance, or matched by `match: macaddress:` together with `set-name:`. A `match:` without `set-name:` isn't supported; the connection never comes up, and the appliance stays on DHCP.

@@ -86,6 +86,11 @@ RUN entry='{"type": "sigstoreSigned", "keyPath": "/usr/share/kamerplanter/keys/s
     && mv /tmp/policy.json /usr/share/containers/policy.json \
     && chmod 0644 /usr/share/containers/policy.json
 
+# Every installation generates its own SSH host keys on its first boot and
+# keeps them (ssh_deletekeys: false in 50-kamerplanter.cfg), so a key in the
+# image would be shared by every copy of it.
+RUN set -- /etc/ssh/ssh_host_*key*; [ ! -e "$1" ] || { echo "the image holds SSH host keys: $*" >&2; exit 1; }
+
 # Fail the build when a container unit does not translate.
 RUN /usr/lib/systemd/system-generators/podman-system-generator --dryrun >/dev/null
 

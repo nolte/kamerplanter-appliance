@@ -154,7 +154,7 @@ jobs:
 
   # tests/boot/run.sh: runs 7 and 8 need the running VM of run 1, run 5 its
   # disk and run 6 the running VM of run 5, so they stay with run 1. Runs 9
-  # to 11 boot with provisioning data (NoCloud drive, seed URL); 10 and 11
+  # to 12 boot with provisioning data (NoCloud drive, seed URL); 10 to 12
   # wait only for SSH and cloud-init, so they share a job.
   boot:
     name: boot (${{ matrix.name }})
@@ -181,9 +181,9 @@ jobs:
           - name: run 9
             id: run9
             runs: '9'
-          - name: runs 10 11
+          - name: runs 10 11 12
             id: run10
-            runs: 10 11
+            runs: 10 11 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

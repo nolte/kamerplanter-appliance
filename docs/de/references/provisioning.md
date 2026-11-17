@@ -67,6 +67,8 @@ cloud-init wählt seine Quelle, bevor `/var` eingehängt ist. Solange es unter m
 
 Es wird kein Standardnutzer angelegt, auch nicht mit `users: [ default ]`. SSH nimmt nie ein Passwort an, auch wenn die User-Data `ssh_pwauth: true` setzt. cloud-init vergrößert keine Partitionen und Dateisysteme.
 
+Die Appliance erzeugt ihre SSH-Hostschlüssel beim ersten Boot und behält sie, auch bei einem Boot, den cloud-init als neue Instanz behandelt: einem Boot, bei dem eine Seed-URL oder der Metadatendienst nicht antwortet, dem nächsten Boot, bei dem sie wieder antworten, oder einer geänderten `instance-id`. SSH-Clients melden deshalb keinen geänderten Hostschlüssel. Eine Kopie einer installierten Systemplatte, etwa ein Snapshot, aus dem ein zweiter Server entsteht, behält die Hostschlüssel des Originals wie alles andere auf der Platte; richte eine zweite Appliance stattdessen aus dem Image ein.
+
 ### Statisches Netzwerk { #static-network }
 
 Zwei Formen von network-config Version 2 werden unterstützt: jeder `ethernets`-Eintrag mit dem Namen der Schnittstelle auf der Appliance als Schlüssel, oder zugeordnet über `match: macaddress:` zusammen mit `set-name:`. Ein `match:` ohne `set-name:` wird nicht unterstützt; die Verbindung kommt nie hoch, und die Appliance bleibt bei DHCP.

@@ -590,6 +590,97 @@ EOF
     stop_vm
 }
 
+# host_keys: the fingerprints of the guest's SSH host keys, sorted, on one line.
+host_keys() {
+    guest "for k in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"\$k\"; done" 2>/dev/null |
+        awk '{print $2}' | sort | paste -sd ' '
+}
+
+# instance_id: the instance cloud-init set up last; the scrub keeps it (L15).
+instance_id() { guest cat /var/lib/cloud/data/instance-id 2>/dev/null; }
+
+# scrubbed: waits up to ten minutes until the scrub of cloud-init's copies has
+# run on this boot; it deletes the cached datasource, obj.pkl, too, so the
+# next boot reads the source again.
+scrubbed() {
+    local waited=0
+    until guest systemctl is-active --quiet kamerplanter-cloud-init-scrub.service; do
+        ((waited < 600)) || return 1
+        sleep 5; waited=$((waited + 5))
+    done
+}
+
+# reboot_to_ssh: an orderly reboot of the running VM; prints the seconds
+# until guest answers on the new boot and cloud-init has finished, whatever
+# status it reports.
+reboot_to_ssh() {
+    local id now='' start=$SECONDS
+    id=$(guest cat /proc/sys/kernel/random/boot_id)
+    guest systemctl reboot >/dev/null 2>&1
+    for _ in $(seq 120); do
+        sleep 5
+        now=$(guest cat /proc/sys/kernel/random/boot_id 2>/dev/null) && [ -n "$now" ] && [ "$now" != "$id" ] && break
+        vm_alive || return 2
+    done
+    [ -n "$now" ] && [ "$now" != "$id" ] || return 1
+    guest_bounded "timeout 600 cloud-init status --wait" >/dev/null 2>&1
+    echo $((SECONDS - start))
+}
+
+# A seed URL that stops answering after the first boot (#33). The next boot
+# finds no source, so cloud-init falls back to the datasource None, whose
+# instance id differs, and sets up a new instance; once the URL answers
+# again, it sets up the first instance anew. The SSH host keys of the first
+# boot stay through both. Waits only for SSH and cloud-init.
+run_12() {
+    local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off
+    local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs
+    nocloud_seed "$seed" kp-run12 run12 </dev/null
+    python3 -m http.server 8098 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
+    server=$!
+    new_overlay "$overlay"
+    if ! start_vm run12 bios virtio-scsi virtio on "$overlay"; then
+        kill "$server"; record run12 FAIL - "qemu did not start"; return
+    fi
+    if ! secs=$(wait_ssh "$REBOOT_TIMEOUT") || ! cloud_init_done || ! scrubbed; then
+        diagnose run12
+        record run12 FAIL - "seed URL: no SSH with the user-data key, or cloud-init or the scrub did not finish"
+        kill "$server"; kill_vm; return
+    fi
+    keys=$(host_keys)
+    if [ -z "$keys" ] || ! expect_rec run12 run12 "$(instance_id)" "seed URL: instance run12 set up, SSH host keys generated ($keys)"; then
+        [ -n "$keys" ] || record run12 FAIL - "seed URL: no SSH host keys after the first boot"
+        diagnose run12; kill "$server"; stop_vm; return
+    fi
+
+    kill "$server"; wait "$server" 2>/dev/null
+    if ! secs=$(reboot_to_ssh) || ! scrubbed; then
+        diagnose run12-fallback
+        record run12-fallback FAIL - "seed URL down: no SSH after the reboot, or the scrub did not finish"
+        stop_vm; return
+    fi
+    record run12-reboot PASS "${secs}s" "reboot with the seed URL down"
+    expect_rec run12-fallback iid-datasource-none "$(instance_id)" \
+        "seed URL down: cloud-init fell back to the datasource None, a new instance" || diagnose run12-fallback
+    expect_rec run12-fallback-keys "$keys" "$(host_keys)" \
+        "seed URL down: the SSH host keys of the first boot stay"
+
+    python3 -m http.server 8098 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
+    server=$!
+    if secs=$(reboot_to_ssh); then
+        record run12-back PASS "${secs}s" "reboot with the seed URL answering again"
+        expect_rec run12-back-instance run12 "$(instance_id)" \
+            "seed URL back: cloud-init set up instance run12 again" || diagnose run12-back
+        expect_rec run12-back-keys "$keys" "$(host_keys)" \
+            "seed URL back: the SSH host keys of the first boot stay"
+    else
+        diagnose run12-back
+        record run12-back FAIL - "seed URL back: no SSH after the reboot"
+    fi
+    kill "$server" 2>/dev/null
+    stop_vm
+}
+
 run_2() { first_boot run2 uefi virtio-scsi virtio; stop_vm; }
 run_3() { first_boot run3 bios lsi e1000; stop_vm; }
 run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
@@ -602,7 +693,7 @@ run_4() { first_boot run4 bios virtio-blk virtio; stop_vm; }
 kill_vm 2>/dev/null
 : >"$RESULTS"
 runs=("$@")
-[ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4 9 10 11)
+[ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4 9 10 11 12)
 for run in "${runs[@]}"; do "run_$run"; done
 kill_vm 2>/dev/null
 # Everything but the private key becomes readable for the invoking user; the
