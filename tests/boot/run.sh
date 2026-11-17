@@ -154,12 +154,13 @@ diagnose() {
 }
 
 # mount_state STEP LABEL: appends what ostree-finalize-staged depends on to
-# $OUT/STEP.mount-state.txt: how /boot is mounted and its unit (#39).
+# $OUT/STEP.mount-state.txt: how /boot is mounted and its units (#39).
 mount_state() {
     {
         echo "== $2"
-        guest "findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION /boot /sysroot; grep -E ' /(boot|sysroot) ' /proc/1/mountinfo"
-        guest "systemctl show -p ActiveState,SubState,Options,What,FragmentPath,DropInPaths boot.mount ostree-finalize-staged.service"
+        # Read from mountinfo only: a lookup of /boot would mount it again.
+        guest "grep -E ' /(boot|sysroot) ' /proc/1/mountinfo"
+        guest "systemctl show -p ActiveState,SubState,FragmentPath,DropInPaths,TimeoutIdleUSec boot.automount boot.mount"
     } >>"$OUT/$1.mount-state.txt" 2>&1
 }
 
