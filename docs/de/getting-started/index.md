@@ -3,7 +3,7 @@ title: Erste Schritte
 audience: [maintainer]
 content_mode: tutorial
 track: developer-docs
-last_updated: 2026-11-15
+last_updated: 2026-11-17
 ---
 
 # Erste Schritte
@@ -13,7 +13,7 @@ Diese Seite führt durch den Bau des Proof of Concept und seinen Start in einer 
 ## Voraussetzungen
 
 - Docker, und dein Benutzer darf Container starten
-- Zugriff auf `/dev/kvm`
+- Zugriff auf `/dev/kvm`, nur für die Boot-Tests (`task test:boot`)
 - [Task](https://taskfile.dev)
 - Etwa 20 GB freier Plattenplatz und 6 GB freier Arbeitsspeicher
 

@@ -391,7 +391,9 @@ steps=("$@")
 for step in "${steps[@]}"; do "step_$step" || break; done
 kill_vm 2>/dev/null
 registry_down
-chmod -R a+rX "$OUT"
+# The private key is left out so that it is never world-readable, not even
+# briefly (see tests/boot/run.sh).
+find "$OUT" ! -path "$KEY" -exec chmod a+rX {} +
 chmod 600 "$KEY"
 echo
 column -t -s $'\t' "$RESULTS"

@@ -30,6 +30,3 @@ ExecStart=/usr/libexec/kamerplanter/configure
 # (spec/distribution-requirements/ L13). The credentials reach only this unit,
 # in its private, root-only $CREDENTIALS_DIRECTORY, never its environment.
 ImportCredential=kamerplanter.secret.*
-
-[Install]
-WantedBy=kamerplanter.target

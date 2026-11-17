@@ -1,5 +1,6 @@
 [Unit]
 Description=Kamerplanter
+# The only binding of kamerplanter-config.service, which has no [Install].
 Wants=kamerplanter-config.service
 # Without default dependencies, multi-user.target does not order itself after
 # this target and so does not wait for image pulls and first-start migrations;

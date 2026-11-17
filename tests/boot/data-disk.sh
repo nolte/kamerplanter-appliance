@@ -579,7 +579,9 @@ for step in "${steps[@]}"; do
     if [ "$step" = build ] || [ "$step" = data ]; then break; fi
 done
 kill_vm 2>/dev/null
-chmod -R a+rX "$OUT" "$WORK"
+# The private key is left out so that it is never world-readable, not even
+# briefly (see tests/boot/run.sh).
+find "$OUT" "$WORK" ! -path "$KEY" -exec chmod a+rX {} +
 chmod 600 "$KEY"
 echo
 column -t -s $'\t' "$RESULTS"

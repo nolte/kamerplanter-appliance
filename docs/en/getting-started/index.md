@@ -3,7 +3,7 @@ title: Getting Started
 audience: [maintainer]
 content_mode: tutorial
 track: developer-docs
-last_updated: 2026-11-15
+last_updated: 2026-11-17
 ---
 
 # Getting Started
@@ -13,7 +13,7 @@ This walks through building the proof of concept and booting it in a local virtu
 ## Prerequisites
 
 - Docker, with your user allowed to run containers
-- Access to `/dev/kvm`
+- Access to `/dev/kvm`, for the boot tests (`task test:boot`) only
 - [Task](https://taskfile.dev)
 - About 20 GB of free disk space and 6 GB of free memory
 

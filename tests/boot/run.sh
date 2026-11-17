@@ -10,7 +10,7 @@
 # SC2329: the run_* functions are dispatched by name at the bottom.
 set -uo pipefail
 
-DISK=$(realpath "${DISK:-.build/disk.raw}")
+DISK=$(realpath -m "${DISK:-.build/disk.raw}")
 OUT=.build/boot
 RESULTS=$OUT/results.tsv
 KEY=$OUT/id_ed25519
@@ -580,7 +580,9 @@ runs=("$@")
 [ ${#runs[@]} -gt 0 ] || runs=(1 7 8 5 6 2 3 4 9 10 11)
 for run in "${runs[@]}"; do "run_$run"; done
 kill_vm 2>/dev/null
-chmod -R a+rX "$OUT"
+# Everything but the private key becomes readable for the invoking user; the
+# key is left out so that it is never world-readable, not even briefly.
+find "$OUT" ! -path "$KEY" -exec chmod a+rX {} +
 chmod 600 "$KEY"
 echo
 column -t -s $'\t' "$RESULTS"

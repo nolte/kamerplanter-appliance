@@ -62,7 +62,7 @@ RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/libexec/kamerplanter/dis
         /usr/bin/kamerplanter-update \
         /usr/lib/systemd/system-generators/kamerplanter-update-window \
     && chmod 0700 /etc/kamerplanter && chmod 0600 /etc/kamerplanter/kamerplanter.env \
-    && systemctl enable kamerplanter.target kamerplanter-config.service \
+    && systemctl enable kamerplanter.target \
         kamerplanter-provisioning.service kamerplanter-cloud-init-scrub.service \
         kamerplanter-metadata-guard.service \
         kamerplanter-data-disk.service kamerplanter-backup-disk.service \
