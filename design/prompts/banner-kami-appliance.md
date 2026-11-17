@@ -87,3 +87,4 @@ Pick the best candidate per variant, check it against the character reference (f
 - [x] Background is one flat colour on the right two-thirds
 - [x] Title "Kamerplanter Appliance" (Noto Sans SemiBold, primary #2e7d32 / #66bb6a) and subtitle (secondary #5c6bc0 / #9fa8da) set by `design/banner_text.py`
 - [x] Stored as `docs/assets/images/banner-appliance-{light,dark}.png`; the README picks the variant by colour scheme
+- [x] Social preview `docs/assets/images/social-preview.png` (1280x640, 2:1) built by the same script from the light render: Kami and the mini PC on the left, the title in two lines on the right. GitHub has no API for it; upload it by hand under Settings > General > Social preview.
