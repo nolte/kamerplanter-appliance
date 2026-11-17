@@ -64,6 +64,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # What the image's scripts use besides bash: PyYAML (scrub-cloud-init
+      # reads cloud-init's copies with it, as cloud-init does), and the
+      # compressors the scrub tests build rotated logs with.
+      - name: Install the tools the tests use
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-yaml xz-utils bzip2 jq
+
       - name: Run every unit test
         run: |
           status=0
