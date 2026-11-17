@@ -116,6 +116,28 @@ tasks:
     cmds:
       - build/in-tools.sh tests/boot/data-disk.sh {{.CLI_ARGS}}
 
+  worktree:root:
+    desc: Print the worktree root of this machine (NOLTE_WORKTREE_ROOT, default ~/repos/.worktrees)
+    silent: true
+    cmds:
+      - 'echo "${NOLTE_WORKTREE_ROOT:-$HOME/repos/.worktrees}"'
+
+  worktree:add:
+    desc: |
+      Create a working copy off origin/develop under <root>/kamerplanter-appliance/<slug>/
+      and seed .resume/<slug>/plan.md (spec/project/parallel-working-copies/).
+      Usage: task worktree:add -- <branch> [slug]
+    cmds:
+      - scripts/worktree-add.sh {{.CLI_ARGS}}
+
+  worktree:remove:
+    desc: |
+      Remove the working copy <slug> after its pull request merged, and its
+      branch once the branch is gone on origin.
+      Usage: task worktree:remove -- <slug>
+    cmds:
+      - scripts/worktree-remove.sh {{.CLI_ARGS}}
+
   clean:
     desc: Remove build output and the tool container's volumes
     cmds:
