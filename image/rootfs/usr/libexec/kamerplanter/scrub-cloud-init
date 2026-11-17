@@ -41,18 +41,32 @@
 # (cloud-init*.log*), and every occurrence is replaced by "REDACTED" in place:
 # the values of kamerplanter: -> secrets:, and those of the secret keys under
 # kamerplanter: -> settings: (L11). They are learned from this boot's combined
-# cloud-config and from every copy of the cloud-config part of the user-data
-# (instances/<id>/cloud-config.txt), all read before anything is deleted. The
-# copies are deleted last: a boot that ends before the scrub is through leaves
-# them, and a later boot learns the values from them even when the source is
-# gone by then and cloud-init does not run (#30). When such a copy cannot be
-# read, cloud-init's logs are deleted instead, rotated ones included. A
-# compressed log (gzip, xz, bzip2) is not rewritten but deleted when it holds
-# a value; one that cannot be read is deleted. A value that spans lines is
-# searched for line by line. A value or line shorter than min_secret
-# characters is not searched for: replacing it would garble the logs; its key
-# is named. A file that still holds a value afterwards is named and the unit
-# fails.
+# cloud-config and from every copy of the user-data that cloud-init keeps per
+# instance: cloud-config.txt (YAML), user-data.txt.i (MIME, its
+# text/cloud-config parts) and user-data.txt (as the source supplied it:
+# #cloud-config, MIME or gzip), all read before anything is deleted. A copy
+# that holds no cloud-config, such as a shell script, is read with nothing
+# learned; one that holds what is not read here, such as a Jinja template or
+# an #include, counts as a copy that cannot be read. The copies are deleted last: a boot that ends before the scrub is
+# through leaves them, and a later boot learns the values from them even when
+# the source is gone by then and cloud-init does not run (#30, #46).
+#
+# When an instance has copies but none of them can be read, its secrets are
+# not known. Then cloud-init's logs are deleted instead, rotated ones
+# included, and every error message in cloud-init's status and result
+# (/var/lib/cloud/data/{status,result}.json, and the regular files of the
+# same names in /run/cloud-init) is replaced by "REDACTED": an error message
+# can quote the cloud-config. The files stay JSON with their stages, times
+# and number of errors, so that `cloud-init status` and cloud-init's record
+# of the instance are kept; one that is not JSON is left alone and named.
+#
+# A compressed log (gzip, xz, bzip2) is not rewritten but deleted when it
+# holds a value; one that cannot be read is deleted. Whether the image rotates
+# cloud-init's logs at all is measured by the boot test (run9-logrotate); the
+# scrub covers rotated logs either way. A value that spans lines is searched
+# for line by line. A value or line shorter than min_secret characters is not
+# searched for: replacing it would garble the logs; its key is named. A file
+# that still holds a value afterwards is named and the unit fails.
 #
 # Nothing is followed: only regular files are deleted or rewritten, found
 # without following symbolic links and without leaving the file system of the
@@ -68,6 +82,11 @@ cloud_log=/var/log/
 combined=${cloud_run}combined-cloud-config.json
 min_secret=8
 user_data_copies=(user-data.txt user-data.txt.i cloud-config.txt obj.pkl)
+# The copies the provisioned secrets are learned from.
+config_names=(cloud-config.txt user-data.txt.i user-data.txt)
+# cloud-init's status and result, whose error messages can quote the
+# cloud-config.
+status_names=(status.json result.json)
 run_copies=(combined-cloud-config.json instance-data-sensitive.json)
 
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
@@ -98,49 +117,130 @@ secret_pairs() {
         | . + "\u0000"' "${provisionable_secret_keys[@]}" 2>/dev/null || true
 }
 
-# config_copies: the copies of the cloud-config part of the user-data that
-# cloud-init keeps per instance, NUL-separated.
+# config_copies: the copies of the user-data that cloud-init keeps per
+# instance and the secrets are learned from (config_names), NUL-separated.
 config_copies() {
+    local args=() name
     own_dir "$cloud_lib" && own_dir "${cloud_lib}instances" || return 0
-    find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f -name cloud-config.txt -print0
+    for name in "${config_names[@]}"; do args+=(-o -name "$name"); done
+    find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0
 }
 
-# as_json FILE: the YAML of FILE, a copy of a cloud-config, as JSON, every
-# scalar as text (BaseLoader), so a date or a tag that JSON does not know
-# reads all the same; fails when it cannot be read. Nothing of it is printed
-# on an error.
+# as_json FILE: the cloud-config documents in FILE, a copy of the user-data,
+# as JSON, one mapping per line, every scalar as text (BaseLoader), so a date
+# or a tag that JSON does not know reads all the same. cloud-config.txt is
+# read whole as YAML, whatever its first line. Of user-data.txt and
+# user-data.txt.i, a gzip copy is decompressed; a copy whose first line is
+# #cloud-config is one document; a MIME message gives one for each of its
+# text/cloud-config parts; a shell script, a boothook, a part handler or an
+# empty copy gives none. A document that is not a mapping gives none. Fails
+# when FILE cannot be read, is not a regular file, or holds anything else: a
+# Jinja template, an #include, a cloud-config archive or patch, a MIME message
+# with a defect or a part of another type, or a cloud-config that cannot be
+# read. The values in such a copy are not known from it. Nothing of it is
+# printed on an error.
 as_json() {
     python3 -I -c '
-import json, os, sys
+import email, gzip, json, os, stat, sys
 import yaml
+# MIME parts and first lines that hold no cloud-config.
+plain_types = {"text/x-shellscript", "text/cloud-boothook", "text/part-handler",
+               "text/x-shellscript-per-boot", "text/x-shellscript-per-instance",
+               "text/x-shellscript-per-once"}
+plain_starts = (b"#!", b"#cloud-boothook", b"#part-handler")
+def load(data):
+    doc = yaml.load(data, Loader=yaml.BaseLoader)
+    return [doc] if isinstance(doc, dict) else []
 try:
-    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)
+    path = sys.argv[1]
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as f:
-        data = yaml.load(f, Loader=yaml.BaseLoader)
-    json.dump(data, sys.stdout)
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError
+        data = f.read()
+    docs = []
+    if os.path.basename(path) == "cloud-config.txt":
+        docs = load(data)
+    else:
+        if data.startswith(b"\x1f\x8b"):
+            data = gzip.decompress(data)
+        first = data.partition(b"\n")[0].strip().lower()
+        if first == b"#cloud-config":
+            docs = load(data)
+        elif first.startswith((b"content-type:", b"mime-version:")):
+            msg = email.message_from_bytes(data)
+            for part in msg.walk():
+                if part.defects:
+                    raise ValueError
+                if part.is_multipart():
+                    continue
+                ctype = part.get_content_type()
+                if ctype == "text/cloud-config":
+                    payload = part.get_payload(decode=True)
+                    if not isinstance(payload, bytes):
+                        raise ValueError
+                    docs += load(payload)
+                elif ctype not in plain_types:
+                    raise ValueError
+        elif data.strip() and not first.startswith(plain_starts):
+            raise ValueError
+    for doc in docs:
+        sys.stdout.write(json.dumps(doc) + "\n")
 except Exception:
     sys.exit(1)
 ' "$1" 2>/dev/null
 }
 
 # values: the provisioned secrets of this boot's combined cloud-config and of
-# every copy of a cloud-config, as NUL-separated pairs KEY, VALUE.
+# every copy of the user-data, as NUL-separated pairs KEY, VALUE.
 values() {
     local f json
     if [ -f "$combined" ] && [ ! -L "$combined" ]; then secret_pairs <"$combined"; fi
     while IFS= read -r -d '' f; do
         json=$(as_json "$f") || continue
-        printf '%s' "$json" | secret_pairs
+        [ -z "$json" ] || printf '%s\n' "$json" | secret_pairs
     done < <(config_copies)
 }
 
-# unreadable_copies: the copies of a cloud-config that cannot be read,
-# NUL-separated.
-unreadable_copies() {
-    local f
+# unknown_instances: the instance directories whose provisioned secrets are
+# not known, NUL-separated: those with a copy of the user-data none of which
+# can be read (as_json). Where cloud-config.txt is there but cannot be read,
+# a copy of the user-data counts only when it gives a cloud-config: one that
+# gives none, such as a shell script, says nothing about what cloud-config.txt
+# holds.
+unknown_instances() {
+    local f dir json
+    local -A seen=() known=()
     while IFS= read -r -d '' f; do
-        as_json "$f" >/dev/null || printf '%s\0' "$f"
+        dir=${f%/*}
+        seen[$dir]=1
+        [ -z "${known[$dir]:-}" ] || continue
+        json=$(as_json "$f") || continue
+        if [ "${f##*/}" = cloud-config.txt ] || [ -n "$json" ] || { [ ! -e "$dir/cloud-config.txt" ] && [ ! -L "$dir/cloud-config.txt" ]; }; then
+            known[$dir]=1
+        fi
     done < <(config_copies)
+    for dir in "${!seen[@]}"; do
+        if [ -z "${known[$dir]:-}" ]; then printf '%s\0' "$dir"; fi
+    done | sort -z
+}
+
+# status_files: cloud-init's status and result, NUL-separated: the regular
+# files of status_names in /var/lib/cloud/data and in /run/cloud-init.
+status_files() {
+    local name f
+    if own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
+        for name in "${status_names[@]}"; do
+            f=${cloud_lib}data/$name
+            if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi
+        done
+    fi
+    if own_dir "$cloud_run"; then
+        for name in "${status_names[@]}"; do
+            f=$cloud_run$name
+            if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi
+        done
+    fi
 }
 
 # patterns: the strings to search for, NUL-separated, longest first, from the
@@ -170,16 +270,39 @@ patterns() {
         sort -z -t $'\t' -k1,1nr | while IFS= read -r -d '' line; do printf '%s\0' "${line#*$'\t'}"; done
 }
 
-# Python, shared by redact and holds: read(path, log) reads the file at path
-# without following a link and returns (stat, data, kind). Only for one of
-# cloud-init's logs (log true) is a compressed file decompressed: kind names
-# the compression, and data is None when it cannot be decompressed. NotAFile
-# is raised for a link or anything but a regular file; any other OSError is
-# a file that cannot be read.
+# Python, shared by redact, holds and blank_errors: read(path, log) reads the
+# file at path without following a link and returns (stat, data, kind). Only
+# for one of cloud-init's logs (log true) is a compressed file decompressed:
+# kind names the compression, and data is None when it cannot be
+# decompressed. NotAFile is raised for a link or anything but a regular file;
+# any other OSError is a file that cannot be read. write(path, st, data)
+# replaces the file at path by data, durably, with the owner and mode of st,
+# through a new file in the same directory renamed over it.
 read_file='
-import bz2, errno, gzip, lzma, os, stat, sys
+import bz2, errno, gzip, lzma, os, stat, sys, tempfile
 class NotAFile(Exception):
     pass
+def sync_dir(d):
+    dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+def write(path, st, data):
+    d = os.path.dirname(path) or "."
+    tfd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".")
+    try:
+        with os.fdopen(tfd, "wb") as t:
+            t.write(data)
+            t.flush()
+            os.fchown(t.fileno(), st.st_uid, st.st_gid)
+            os.fchmod(t.fileno(), stat.S_IMODE(st.st_mode))
+            os.fsync(t.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    sync_dir(d)
 def read(path, log):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -214,7 +337,6 @@ def read(path, log):
 # when it cannot be read or on another error.
 redact() {
     python3 -I -c "$read_file"'
-import tempfile
 path = sys.argv[1]
 patterns = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
 try:
@@ -227,36 +349,67 @@ if kind:
     if data is not None and not any(p in data for p in patterns):
         sys.exit(3)
     os.unlink(path)
-    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    sync_dir(os.path.dirname(path) or ".")
     sys.exit(5)
 new = data
 for p in patterns:
     new = new.replace(p, b"REDACTED")
 if new == data:
     sys.exit(3)
-d = os.path.dirname(path) or "."
-tfd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".")
-try:
-    with os.fdopen(tfd, "wb") as t:
-        t.write(new)
-        t.flush()
-        os.fchown(t.fileno(), st.st_uid, st.st_gid)
-        os.fchmod(t.fileno(), stat.S_IMODE(st.st_mode))
-        os.fsync(t.fileno())
-    os.rename(tmp, path)
-except BaseException:
-    os.unlink(tmp)
-    raise
-dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
-try:
-    os.fsync(dfd)
-finally:
-    os.close(dfd)
+write(path, st, new)
 ' "$@"
+}
+
+# blank_errors FILE: replaces every error message in FILE, cloud-init's
+# status or result, by REDACTED, in place and durably, keeping its owner and
+# mode: the strings in v1.errors and v1.recoverable_errors.<level> (result)
+# and in the same of each stage under v1 (status). Everything else is kept,
+# the number of errors too. Exit status 0 when it changed FILE, 3 when FILE
+# holds no error message, 4 when FILE is no regular file or a symbolic link,
+# 6 when it is not JSON, 1 when it cannot be read or on another error. Nothing
+# of FILE is printed.
+blank_errors() {
+    python3 -I -c "$read_file"'
+import json
+path = sys.argv[1]
+try:
+    st, data, kind = read(path, False)
+except NotAFile:
+    sys.exit(4)
+except OSError:
+    sys.exit(1)
+try:
+    doc = json.loads(data)
+except Exception:
+    sys.exit(6)
+changed = False
+def blank(messages):
+    global changed
+    if not isinstance(messages, list):
+        return messages
+    for i, m in enumerate(messages):
+        if isinstance(m, str) and m != "REDACTED":
+            messages[i] = "REDACTED"
+            changed = True
+    return messages
+def stage(s):
+    if not isinstance(s, dict):
+        return
+    if "errors" in s:
+        blank(s["errors"])
+    levels = s.get("recoverable_errors")
+    if isinstance(levels, dict):
+        for messages in levels.values():
+            blank(messages)
+v1 = doc.get("v1") if isinstance(doc, dict) else None
+if isinstance(v1, dict):
+    stage(v1)
+    for s in v1.values():
+        stage(s)
+if not changed:
+    sys.exit(3)
+write(path, st, (json.dumps(doc, indent=1, separators=(",", ": "), ensure_ascii=False) + "\n").encode())
+' "$1" 2>/dev/null
 }
 
 # holds FILE [log]: whether FILE holds a pattern (NUL-separated on stdin). A
@@ -325,7 +478,7 @@ delete_copies() {
 }
 
 main() {
-    local pats=() unreadable=() f rc redacted=0 dropped=0 left=() seeded=() deleted
+    local pats=() unknown=() f rc redacted=0 dropped=0 left=() unwritten=() seeded=() deleted
     # Without the YAML module that cloud-init itself uses, every copy would
     # count as unreadable and the logs would go on every boot: fail instead.
     if [ -n "$(config_copies | head -c1)" ] && ! python3 -I -c 'import yaml' 2>/dev/null; then
@@ -335,15 +488,30 @@ main() {
     # Read before anything is deleted: the copies are deleted last, so that a
     # boot that ends before this is through can learn the values again.
     mapfile -d '' pats < <(patterns)
-    mapfile -d '' unreadable < <(unreadable_copies)
-    if [ "${#unreadable[@]}" -gt 0 ] && own_dir "$cloud_log"; then
-        for f in "${unreadable[@]}"; do
-            echo "$f cannot be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" >&2
+    mapfile -d '' unknown < <(unknown_instances)
+    if [ "${#unknown[@]}" -gt 0 ]; then
+        for f in "${unknown[@]}"; do
+            echo "$f: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted and the error messages in its status are replaced" >&2
         done
+        if own_dir "$cloud_log"; then
+            while IFS= read -r -d '' f; do
+                rm -f -- "$f"
+                echo "deleted $f"
+            done < <(logs)
+        fi
         while IFS= read -r -d '' f; do
-            rm -f -- "$f"
-            echo "deleted $f"
-        done < <(logs)
+            rc=0
+            blank_errors "$f" || rc=$?
+            case $rc in
+                0)
+                    ! command -v restorecon >/dev/null || restorecon -F -- "$f" 2>/dev/null || true
+                    echo "error messages replaced in $f"
+                    ;;
+                6) echo "$f is not JSON; its error messages are left as they are" >&2 ;;
+                3 | 4) ;;
+                *) unwritten+=("$f") ;;
+            esac
+        done < <(status_files)
     fi
     if [ "${#pats[@]}" -gt 0 ]; then
         while IFS= read -r -d '' f; do
@@ -376,16 +544,18 @@ main() {
             done < <(find "${cloud_lib}seed" -xdev -type f -print0)
         fi
     fi
-    # A file that still holds a value keeps the copies, so that the next boot
-    # can learn the values again and retry.
-    if [ "${#left[@]}" -eq 0 ]; then deleted=$(delete_copies); else deleted=0; fi
+    # A file that still holds a value, or whose error messages could not be
+    # replaced, keeps the copies, so that the next boot can learn the values
+    # again, or find them unknown again, and retry.
+    if [ "${#left[@]}" -eq 0 ] && [ "${#unwritten[@]}" -eq 0 ]; then deleted=$(delete_copies); else deleted=0; fi
     echo "cloud-init's copies of the provisioning data deleted: $deleted; files with provisioned secrets replaced: $redacted"
     [ "$dropped" = 0 ] || echo "compressed logs with provisioned secrets deleted: $dropped"
     for f in "${seeded[@]}"; do
         echo "warning: the seed file $f holds provisioned secrets in plain text; once the appliance has started, delete the seed files and the configuration file that names them (it keeps its settings without them)" >&2
     done
-    if [ "${#left[@]}" -gt 0 ]; then
+    if [ "${#left[@]}" -gt 0 ] || [ "${#unwritten[@]}" -gt 0 ]; then
         for f in "${left[@]}"; do echo "$f still holds provisioned secrets" >&2; done
+        for f in "${unwritten[@]}"; do echo "$f cannot be rewritten; its error messages are not replaced" >&2; done
         echo "cloud-init's copies of the provisioning data are kept until the next boot retries" >&2
         return 1
     fi

@@ -68,13 +68,23 @@ user_data() {
     printf '#cloud-config\nhostname: kp\nkamerplanter:\n  settings:\n    FRONTEND_URL: %s\n    LOG_PSEUDONYM_SALT: %s\n  secrets:\n    JWT_SECRET_KEY: %s\n    FERNET_KEY: "%s"\n' \
         "$url" "$setting_secret" "$jwt" "$fernet"
 }
+# mime_user_data CLOUD_CONFIG: a MIME message as cloud-init keeps it in
+# user-data.txt.i, with CLOUD_CONFIG as its one text/cloud-config part,
+# base64-encoded.
+mime_user_data() {
+    local b='===============scrub-boundary=='
+    printf 'Content-Type: multipart/mixed; boundary="%s"\nMIME-Version: 1.0\nNumber-Attachments: 1\n\n' "$b"
+    printf -- '--%s\nContent-Type: text/cloud-config\nMIME-Version: 1.0\nContent-Disposition: attachment; filename="part-001"\nContent-Transfer-Encoding: base64\n\n' "$b"
+    printf '%s' "$1" | base64 -w 76
+    printf -- '\n--%s--\n' "$b"
+}
 # booted IID: what cloud-init 26.2 leaves after a boot of instance IID with
 # that user-data, as the P1 spike found it, plus its record of the instance.
 booted() {
     local lib=$SB/var/lib/cloud i=$SB/var/lib/cloud/instances/$1
     mkdir -p "$i/sem" "$i/scripts" "$i/handlers" "$lib/data" "$SB/run/cloud-init"
     user_data >"$i/user-data.txt"
-    { echo 'Content-Type: multipart/mixed'; echo; user_data; } >"$i/user-data.txt.i"
+    mime_user_data "$(user_data)" >"$i/user-data.txt.i"
     user_data >"$i/cloud-config.txt"
     # A pickle is binary: NUL bytes around the value.
     { printf '\x80\x05\x95\x00'; printf '%s' "$jwt"; printf '\x00\x00'; printf '%s' "$quoted"; printf '\x00\x94.'; } >"$i/obj.pkl"
@@ -202,8 +212,8 @@ expect "copies left from an earlier boot, without a source now: deleted" "0|no|n
 expect "copies left from an earlier boot: the logs are scrubbed with the values learned from them, and kept" "none|yes|yes" \
     "$(found "$SB"/var/log/cloud-init*.log)|$(has "secret REDACTED and REDACTED in one line" "$(cat "$SB/var/log/cloud-init.log")")|$(has "run: REDACTED" "$(cat "$SB/var/log/cloud-init-output.log")")"
 
-# A copy of the cloud-config that cannot be read: its values are unknown, so
-# cloud-init's logs go, rotated ones included; other logs stay.
+# A copy of the cloud-config that cannot be read, but user-data.txt can: the
+# values are learned from it, the logs are scrubbed and kept (#46).
 new_appliance
 booted iid-1
 rm -rf "$SB/run"
@@ -211,10 +221,107 @@ printf 'kamerplanter: [unclosed\n' >"$SB/var/lib/cloud/instances/iid-1/cloud-con
 cp "$SB/var/log/cloud-init.log" "$SB/var/log/cloud-init.log.1"
 echo "untouched" >"$SB/var/log/messages"
 rc=$(run_scrub)
-expect "an unreadable copy: cloud-init's logs are deleted, rotated ones too, other logs stay, the copies go" "0|no|no|no|yes|no" \
-    "$rc|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(exists "$SB/var/log/cloud-init.log.1")|$(exists "$SB/var/log/messages")|$(exists "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt")"
-expect "an unreadable copy: the scrub names it and says why the logs go" yes \
-    "$(has "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt cannot be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" "$(out)")"
+expect "an unreadable cloud-config.txt, a readable user-data.txt: the logs are scrubbed and kept, rotated ones too, the copies go" "0|yes|yes|yes|yes|none|no|no" \
+    "$rc|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(exists "$SB/var/log/cloud-init.log.1")|$(exists "$SB/var/log/messages")|$(found "$SB"/var/log/cloud-init*.log*)|$(exists "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
+expect "an unreadable cloud-config.txt, a readable user-data.txt: the instance's secrets count as known" no \
+    "$(has "no copy of the cloud-config can be read" "$(out)")"
+
+# Only user-data.txt.i can be read, a MIME message as cloud-init writes it,
+# its cloud-config part base64-encoded: the values are learned from that part.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+rm -f "$i/user-data.txt"
+mime_user_data "$(user_data)" >"$i/user-data.txt.i"
+cp "$SB/var/log/cloud-init.log" "$SB/var/log/cloud-init.log.1"
+rc=$(run_scrub)
+expect "only user-data.txt.i can be read (MIME, base64): the logs are scrubbed with its values and kept" "0|yes|yes|none|yes|no" \
+    "$rc|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init.log.1")|$(found "$SB"/var/log/cloud-init*.log* "$i")|$(has "secret REDACTED and REDACTED in one line" "$(cat "$SB/var/log/cloud-init.log.1")")|$(exists "$i/user-data.txt.i")"
+expect "only user-data.txt.i can be read: the instance's secrets count as known" no \
+    "$(has "no copy of the cloud-config can be read" "$(out)")"
+
+# No copy of the instance can be read: its values are unknown, so cloud-init's
+# logs go, rotated ones included, and the error messages in its status and
+# result are replaced; other logs and cloud-init's record stay (#46).
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
+mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+jq --arg m "schema warning near $jwt" '.v1.init.recoverable_errors = {WARNING: [$m]} | .v1.stage = null' \
+    "$SB/var/lib/cloud/data/status.json" >"$SB/s" && mv "$SB/s" "$SB/var/lib/cloud/data/status.json"
+jq -cn --arg m "failed on $jwt" '{v1: {datasource: "DataSourceNoCloud", errors: [$m], recoverable_errors: {}}}' \
+    >"$SB/var/lib/cloud/data/result.json"
+chmod 0644 "$SB/var/lib/cloud/data/status.json"
+cp "$SB/var/log/cloud-init.log" "$SB/var/log/cloud-init.log.1"
+echo "untouched" >"$SB/var/log/messages"
+rc=$(run_scrub)
+status=$SB/var/lib/cloud/data/status.json
+expect "no copy can be read: cloud-init's logs are deleted, rotated ones too, other logs stay" "0|no|no|no|yes" \
+    "$rc|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(exists "$SB/var/log/cloud-init.log.1")|$(exists "$SB/var/log/messages")"
+expect "no copy can be read: no provisioned secret is left under /var/lib/cloud or /var/log" none \
+    "$(found "$SB/var/lib/cloud" "$SB/var/log")"
+expect "no copy can be read: the status stays JSON, its error messages replaced, their number and the rest kept" "1|REDACTED|REDACTED|null|644" \
+    "$(jq '.v1.init.errors | length' "$status")|$(jq -r '.v1.init.errors[0]' "$status")|$(jq -r '.v1.init.recoverable_errors.WARNING[0]' "$status")|$(jq -c '.v1.stage' "$status")|$(mode "$status")"
+expect "no copy can be read: the result stays JSON, its error messages replaced" "REDACTED|DataSourceNoCloud" \
+    "$(jq -r '.v1.errors[0]' "$SB/var/lib/cloud/data/result.json")|$(jq -r '.v1.datasource' "$SB/var/lib/cloud/data/result.json")"
+expect "no copy can be read: cloud-init's record of the instance is kept, the copies go" "iid-1|yes|no|no|no" \
+    "$(cat "$SB/var/lib/cloud/data/instance-id")|$(exists "$i/sem/config_ssh")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")|$(exists "$i/user-data.txt.i")"
+expect "no copy can be read: the scrub names the instance and says why the logs go" "yes|yes" \
+    "$(has "$i: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" "$(out)")|$(has "error messages replaced in $status" "$(out)")"
+
+# A status that is not JSON is left alone and named; nothing fails for it.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+printf 'kamerplanter: [unclosed\n' >"$SB/var/lib/cloud/instances/iid-1/cloud-config.txt"
+rm -f "$SB/var/lib/cloud/instances/iid-1/user-data.txt" "$SB/var/lib/cloud/instances/iid-1/user-data.txt.i"
+printf '{"v1": {"init": {"errors": ["cut off' >"$SB/var/lib/cloud/data/status.json"
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+expect "no copy can be read, a status that is not JSON: left alone and named, the scrub succeeds" "0|$status_before|yes" \
+    "$(run_scrub)|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "$SB/var/lib/cloud/data/status.json is not JSON" "$(out)")"
+
+# A user-data.txt that is a shell script holds no cloud-config: it is read
+# with nothing learned, and the instance does not count as unknown.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/cloud-config.txt" "$i/user-data.txt.i"
+printf '#!/bin/sh\necho provisioned\n' >"$i/user-data.txt"
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+expect "a shell script as user-data: not unknown, the logs and the status are kept, the copy goes" "0|yes|yes|$status_before|no|no" \
+    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$i/user-data.txt")"
+
+# cloud-config.txt cannot be read and the user-data gives no cloud-config of
+# its own, as an #include does: what cloud-config.txt holds is unknown, so the
+# logs go.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+printf '#include\nhttps://kp.example.org/cloud-config\n' >"$i/user-data.txt"
+rm -f "$i/user-data.txt.i"
+expect "an unreadable cloud-config.txt beside an #include user-data: unknown, the logs go" "0|no|yes" \
+    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(has "$i: no copy of the cloud-config can be read" "$(out)")"
+
+# A cloud-config.txt that a crash left full of NUL bytes is not read as
+# "nothing in it", and a Jinja template as user-data.txt gives no rendered
+# values: the instance is unknown, the logs go.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+head -c 512 /dev/zero >"$i/cloud-config.txt"
+{ echo '## template: jinja'; user_data; } >"$i/user-data.txt"
+rm -f "$i/user-data.txt.i"
+expect "a cloud-config.txt of NUL bytes beside a Jinja user-data: unknown, the logs go" "0|no|yes|none" \
+    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(has "$i: no copy of the cloud-config can be read" "$(out)")|$(found "$SB/var/lib/cloud" "$SB/var/log")"
 
 # A copy with a date and a tag JSON does not know is still read: the logs
 # are scrubbed, not deleted.

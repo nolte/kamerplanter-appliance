@@ -146,6 +146,7 @@ diagnose() {
         echo "== boots"; guest "journalctl --list-boots --no-pager | tail -n 5"
         echo "== bootc status"; guest "bootc status --format humanreadable"
         echo "== versions"; guest "rpm -q ostree bootc systemd kernel"
+        echo "== cloud-init log rotation"; guest "rpm -q logrotate; rpm -ql cloud-init | grep -i logrotate; ls /etc/logrotate.d"
         echo "== /boot now"; guest "findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION /boot; grep ' /boot ' /proc/1/mountinfo"
         echo "== previous boot: finalize and shutdown"
         guest "journalctl -b -1 --no-pager -o short-precise -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service"
@@ -414,7 +415,10 @@ run_6() {
 # first start, a secret as a system credential, the scrub of cloud-init's
 # copies, and all of it again after a reboot with the drive still attached;
 # last, a boot with the drive detached keeps the settings (L9, L10, L12, L13,
-# L15, L17).
+# L15, L17). Before the reboot it records whether the image rotates
+# cloud-init's logs (run9-logrotate, a measurement, #46) and leaves rotated
+# logs holding the secret, a plain and a compressed one, for the reboot's
+# scrub (run9-rotated).
 run_9() {
     local VM_DISKS VM_CREDENTIALS VM_NIC=mac=52:54:00:12:34:56 VM_GUEST_ADDR=10.0.2.50 VM_SSH_KEY=off
     local seed=$OUT/run9-seed drive=$OUT/run9-cidata.img overlay=$OUT/run9.qcow2 secs
@@ -480,6 +484,12 @@ EOF
         "$(guest "nft delete table inet kamerplanter_metadata && ! nft list table inet kamerplanter_metadata >/dev/null 2>&1 && echo yes")|$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(tr , '\n' <<<"$invocations" | grep -c .)|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
         "the metadata rules, removed, are loaded again by their check, without a restart of the guard unit or the containers" ||
         diagnose run9
+    # A measurement, not a check: whether logrotate is installed and which
+    # rule, if any, rotates cloud-init's logs.
+    record run9-logrotate PASS - "cloud-init's logs: $(guest "echo \"logrotate \$(rpm -q logrotate >/dev/null 2>&1 && rpm -q logrotate || echo 'not installed'); rule: \$({ grep -l cloud-init /etc/logrotate.d/* 2>/dev/null; rpm -ql cloud-init 2>/dev/null | grep logrotate; } | sort -u | paste -sd ' ' | grep . || echo none)\"")"
+    # Rotated logs that hold the secret, as a rotation would leave them: the
+    # reboot's scrub replaces it in the plain one and deletes the compressed one.
+    guest "cp /var/log/cloud-init.log /var/log/cloud-init.log.1 && echo 'rotated $jwt' >>/var/log/cloud-init.log.1 && { cat /var/log/cloud-init.log; echo 'rotated $jwt'; } | gzip >/var/log/cloud-init.log.2.gz && restorecon -F /var/log/cloud-init.log.1 /var/log/cloud-init.log.2.gz"
     written=$(guest stat -c %Y "$sem")
 
     if ! secs=$(reboot_vm "$REBOOT_TIMEOUT"); then
@@ -498,6 +508,9 @@ EOF
         "$(guest systemctl is-active kamerplanter-cloud-init-scrub.service)|$(no_copies "$jwt" "$cred")" \
         "after the reboot with the drive attached no copy of a provisioned secret is left" ||
         diagnose run9
+    expect_rec run9-rotated "yes|1|no" \
+        "$(guest "test -f /var/log/cloud-init.log.1 && echo yes || echo no")|$(guest "grep -c 'rotated REDACTED' /var/log/cloud-init.log.1")|$(guest "test -e /var/log/cloud-init.log.2.gz && echo yes || echo no")" \
+        "a rotated log is scrubbed and kept, a compressed one that holds a secret is deleted (L15)"
 
     # The drive detached, as the documentation asks: the settings stay (L10).
     stop_vm
