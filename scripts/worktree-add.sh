@@ -72,6 +72,7 @@ esac
 # Resolve the configurable root. Tilde in the env value is not expanded by the
 # shell when it arrives as a variable, so expand a leading ~ ourselves.
 root="${NOLTE_WORKTREE_ROOT:-$HOME/repos/.worktrees}"
+# shellcheck disable=SC2088 # matches a literal ~/ in the variable, expanded here
 case "$root" in
   "~") root="$HOME" ;;
   "~/"*) root="$HOME/${root#\~/}" ;;
