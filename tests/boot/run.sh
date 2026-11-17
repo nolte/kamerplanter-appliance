@@ -145,10 +145,22 @@ diagnose() {
         echo "== block devices"; guest lsblk
         echo "== boots"; guest "journalctl --list-boots --no-pager | tail -n 5"
         echo "== bootc status"; guest "bootc status --format humanreadable"
+        echo "== versions"; guest "rpm -q ostree bootc systemd kernel"
+        echo "== /boot now"; guest "findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION /boot; grep ' /boot ' /proc/1/mountinfo"
         echo "== previous boot: finalize and shutdown"
         guest "journalctl -b -1 --no-pager -o short-precise -u ostree-finalize-staged.service -u ostree-finalize-staged-hold.service"
         guest "journalctl -b -1 --no-pager -o short-precise | tail -n 120"
     } >"$OUT/$1.diagnose.txt" 2>&1
+}
+
+# mount_state STEP LABEL: appends what ostree-finalize-staged depends on to
+# $OUT/STEP.mount-state.txt: how /boot is mounted and its unit (#39).
+mount_state() {
+    {
+        echo "== $2"
+        guest "findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION /boot /sysroot; grep -E ' /(boot|sysroot) ' /proc/1/mountinfo"
+        guest "systemctl show -p ActiveState,SubState,Options,What,FragmentPath,DropInPaths boot.mount ostree-finalize-staged.service"
+    } >>"$OUT/$1.mount-state.txt" 2>&1
 }
 
 stop_vm() {

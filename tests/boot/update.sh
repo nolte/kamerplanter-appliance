@@ -210,7 +210,9 @@ step_window() {
     registry_down
     local window id
     window=$(guest "date -d '+2 min' +%H:%M")
+    mount_state u2 "staged, before daemon-reload"
     guest "echo UPDATE_WINDOW=$window >>/etc/kamerplanter/kamerplanter.env && systemctl daemon-reload"
+    mount_state u2 "after daemon-reload"
     guest kamerplanter-update status >"$OUT/u2.status-before.txt" 2>&1
     id=$(boot_id)
     wait_reboot "$id" 600 >/dev/null || { fail u2 "no reboot within the window at $window"; return 1; }
