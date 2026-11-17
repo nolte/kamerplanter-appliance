@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/banner-appliance-dark.png" />
+    <img src="docs/assets/images/banner-appliance-light.png" alt="Kamerplanter Appliance: the Kami mascot standing on a mini PC" />
+  </picture>
+</p>
+
 # Kamerplanter Appliance
 
 [![ci](https://github.com/nolte/kamerplanter-appliance/actions/workflows/ci.yml/badge.svg)](https://github.com/nolte/kamerplanter-appliance/actions/workflows/ci.yml)
