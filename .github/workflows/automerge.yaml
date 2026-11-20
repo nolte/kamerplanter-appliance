@@ -29,6 +29,12 @@ on:
     workflows: [ci, vm-gate, vm-tests]
     types: [completed]
 
+# ci, vm-gate and vm-tests often complete close together; one evaluation of
+# a branch at a time keeps them from updating or merging it twice.
+concurrency:
+  group: automerge-${{ github.event.pull_request.head.ref || github.event.workflow_run.head_branch || github.event.check_suite.head_branch || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   automerge:
     # A run of these workflows on a push to develop or by hand has no pull

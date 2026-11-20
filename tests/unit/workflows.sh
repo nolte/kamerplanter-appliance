@@ -39,8 +39,24 @@ settings = load(root / ".github" / "settings.yml")
 develop = next(b for b in settings["branches"] if b["name"] == "develop")
 contexts = develop["protection"]["required_status_checks"]["contexts"]
 
-automerge = triggers(load(workflows / "automerge.yaml"))
-listened = (automerge.get("workflow_run") or {}).get("workflows") or []
+automerge_doc = load(workflows / "automerge.yaml")
+run_trigger = triggers(automerge_doc).get("workflow_run") or {}
+listened = run_trigger.get("workflows") or []
+if isinstance(listened, str):
+    listened = [listened]
+types = run_trigger.get("types") or []
+if "completed" in types:
+    print("ok automerge runs when a listed workflow has completed")
+else:
+    print("FAIL automerge's workflow_run trigger lacks the type completed")
+# The job's condition must let through the runs of a pull request: ci and
+# vm-tests run on pull_request, vm-gate on pull_request_target.
+condition = str((automerge_doc["jobs"]["automerge"]).get("if", ""))
+for event in ("pull_request", "pull_request_target"):
+    if not condition or f"'{event}'" in condition:
+        print(f"ok automerge takes a workflow_run of a {event} event")
+    else:
+        print(f"FAIL automerge's condition drops a workflow_run of a {event} event")
 
 names = set()
 produced = set()
@@ -48,13 +64,14 @@ for path in sorted(workflows.glob("*.y*ml")):
     if path.name == "automerge.yaml":
         continue
     text = path.read_text()
-    doc = yaml.safe_load(text)
-    name = doc.get("name", path.name)
+    doc = yaml.safe_load(text) or {}
+    # Without a name, workflow_run knows a workflow by its path.
+    name = doc.get("name", f".github/workflows/{path.name}")
     names.add(name)
     jobs = doc.get("jobs") or {}
     sets = [c for c in contexts
             if any((job or {}).get("name", job_id) == c for job_id, job in jobs.items())
-            or re.search(r"context=" + re.escape(c) + r"\b", text)]
+            or re.search(r"context=[\"']?" + re.escape(c) + r"(?![\w-])", text)]
     for c in sets:
         produced.add(c)
         if name in listened:
