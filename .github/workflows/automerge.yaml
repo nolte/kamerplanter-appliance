@@ -16,9 +16,27 @@ on:
     types:
       - completed
   status: {}
+  # The workflows that set the required checks of develop
+  # (.github/settings.yml): ci (docs-build, pre-commit, unit-tests), vm-gate
+  # and vm-tests (the commit status vm-gate). They set them with
+  # GITHUB_TOKEN, whose events (the `status` of vm-gate, the `check_suite` of
+  # the run) start no workflow, so a pull request whose last check turned
+  # green after the last automerge run stayed open (#70). A `workflow_run`
+  # event starts a run even then, and pascalgn/automerge-action finds the
+  # pull request from its payload. tests/unit/workflows.sh keeps this list in
+  # step with the workflows that set a required check.
+  workflow_run:
+    workflows: [ci, vm-gate, vm-tests]
+    types: [completed]
 
 jobs:
   automerge:
+    # A run of these workflows on a push to develop or by hand has no pull
+    # request to merge.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.event == 'pull_request' ||
+      github.event.workflow_run.event == 'pull_request_target'
     uses: nolte/gh-plumbing/.github/workflows/reusable-automerge.yaml@d664e75afc4d57de958af926987f842c1fc1f420 # v2.3.1
     with:
       # Mint a portfolio-App token so the action's branch auto-updates are
