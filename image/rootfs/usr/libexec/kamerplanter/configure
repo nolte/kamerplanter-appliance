@@ -628,7 +628,7 @@ done
 # derivation ends at localhost, the default of the releases before it.
 web_origin() { printf 'http://%s:8080' "$1"; }
 derive_address_defaults() {
-    local host dev addr rest origin origins=() unique=() v4=() v6=() frontend json=
+    local host dev addr rest origin set_url origins=() unique=() v4=() v6=() frontend json=
     host=$(uname -n 2>/dev/null) || host=
     host=${host,,}
     host=${host%.}
@@ -657,10 +657,16 @@ derive_address_defaults() {
         frontend=$(web_origin localhost)
     fi
     origins=("$frontend")
-    # The origin of a FRONTEND_URL that a layer sets comes first, when it has
-    # the form scheme://host[:port], so the JSON list stays well-formed.
-    if [[ ${cfg[FRONTEND_URL]-} =~ ^https?://[][A-Za-z0-9.:-]+ ]]; then
-        origins=("${BASH_REMATCH[0],,}" "${origins[@]}")
+    # The origin of a FRONTEND_URL that a layer sets comes first, as a browser
+    # sends it (lower case, no default port), when the URL has the form
+    # http[s]://host[:port][/...]; anything else adds no origin, so the JSON
+    # list stays well-formed.
+    set_url=${cfg[FRONTEND_URL]-}
+    set_url=${set_url,,}
+    if [[ $set_url =~ ^(https?)://([][a-z0-9.:-]+)(/|$) ]]; then
+        origin=${BASH_REMATCH[1]}://${BASH_REMATCH[2]}
+        case $origin in https://*:443) origin=${origin%:443} ;; http://*:80) origin=${origin%:80} ;; esac
+        origins=("$origin" "${origins[@]}")
     fi
     if [ -n "$host" ]; then
         origins+=("$(web_origin "$host")")

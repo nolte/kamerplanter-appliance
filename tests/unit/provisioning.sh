@@ -199,6 +199,18 @@ expect "derived: a provisioned FRONTEND_URL is kept, and its origin leads the CO
     "$(TEST_HOST=kp.example.org TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
+user_file FRONTEND_URL=HTTPS://KP.Example.org:443/app
+expect "derived: the origin of a set FRONTEND_URL is written as a browser sends it" \
+    '0|["https://kp.example.org","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file FRONTEND_URL=https://user:pw@kp.example.org/
+expect "derived: a FRONTEND_URL with user information adds no origin" \
+    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
 user_file 'FRONTEND_URL=not "a" url'
 expect "derived: a FRONTEND_URL that is no URL adds no origin" \
     '0|not "a" url|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
