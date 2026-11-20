@@ -61,12 +61,14 @@ on:
     paths:
       - 'image/**'
       - 'build/**'
+      - '.github/scripts/check-version.sh'
       - '.github/workflows/disk-image.yml'
   pull_request:
     branches: [develop]
     paths:
       - 'image/**'
       - 'build/**'
+      - '.github/scripts/check-version.sh'
       - '.github/workflows/disk-image.yml'
 
 permissions:
@@ -108,12 +110,12 @@ jobs:
           # artifact after the commit the pull request actually holds.
           COMMIT: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
         run: |
+          set -euo pipefail
           version=${INPUT_VERSION:-${COMMIT::12}}
-          # The version becomes part of file and artifact names.
-          if [[ ! $version =~ ^[0-9A-Za-z._-]+$ ]]; then
-            echo "::error::version '$version' may only contain letters, digits, '.', '_' and '-'"
-            exit 1
-          fi
+          # The version becomes part of file and artifact names. The rule is
+          # shared with release-publish.yml, which checks the tag before it
+          # calls this workflow.
+          .github/scripts/check-version.sh version "$version"
           echo "version=$version" >>"$GITHUB_OUTPUT"
           echo "artifact=kamerplanter-appliance-$version" >>"$GITHUB_OUTPUT"
 
