@@ -343,7 +343,7 @@ expect "units: the rules are loaded from the image's file, and nothing flushes t
     "$(grep -qx 'ExecStart=/usr/sbin/nft -f /usr/share/kamerplanter/nftables/metadata-guard.nft' "$guard_unit" 2>/dev/null && echo yes)|$(grep -v '^#' "$guard_unit" 2>/dev/null | grep -Eqi '^Exec(Stop|Reload)=|flush' && echo yes || echo no)"
 check_unit=$units/kamerplanter-metadata-guard-check.service
 check_timer=$units/kamerplanter-metadata-guard-check.timer
-expect "units: nftables.service, whose start flushes the whole ruleset, is masked in the image" yes \
+expect "units: nftables.service, whose reload and stop flush the whole ruleset, is masked in the image" yes \
     "$(grep -Eq '^\s*(&&\s*)?systemctl mask .*\bnftables\.service\b' "$root/image/Containerfile" && echo yes)"
 expect "units: the check of the metadata rules runs every minute and is enabled in the image" "yes|yes|yes" \
     "$(grep -qx 'OnUnitActiveSec=1min' "$check_timer" 2>/dev/null && echo yes)|$(grep -qx 'WantedBy=timers.target' "$check_timer" 2>/dev/null && echo yes)|$(grep -q 'kamerplanter-metadata-guard-check.timer' "$root/image/Containerfile" && echo yes)"
@@ -363,8 +363,8 @@ expect "rules: a table of their own, replaced on reload, no flush of other table
     "$(has $'table inet kamerplanter_metadata\ndelete table inet kamerplanter_metadata' "$body")|$(has 'table inet kamerplanter_metadata {' "$body")|$(has flush "$body")"
 expect "rules: local processes other than root are refused the metadata address" yes \
     "$(grep -Eq '^\s*ip daddr 169\.254\.169\.254 meta skuid != 0 .*(drop|reject)' <<<"$body" && echo yes)"
-expect "rules: traffic routed through the appliance, the containers', is refused every link-local address for everyone" yes \
-    "$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip daddr 169\.254\.0\.0/16 .*(drop|reject)' && echo yes)"
+expect "rules: traffic routed through the appliance, the containers', is refused every link-local address for everyone, in the original direction only, so replies to a link-local client pass" yes \
+    "$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ct direction original ip daddr 169\.254\.0\.0/16 .*(drop|reject)' && echo yes)"
 expect "rules: the IPv6 metadata address, too, is refused local processes other than root and routed traffic" "yes|yes" \
     "$(sed -n '/chain output/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe meta skuid != 0 .*(drop|reject)' && echo yes)|$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe .*(drop|reject)' && echo yes)"
 expect "rules: the output chain hooks output, the forward chain hooks forward" "yes|yes" \

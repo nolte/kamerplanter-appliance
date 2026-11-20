@@ -71,8 +71,8 @@ RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/libexec/kamerplanter/dis
     # bootc's own timer applies updates with an immediate reboot at any hour;
     # kamerplanter-update-*.timer replace it.
     && systemctl mask bootc-fetch-apply-updates.timer \
-    # nftables.service runs `flush ruleset` when it starts, reloads or stops,
-    # which removes the metadata rules (kamerplanter-metadata-guard.service,
+    # nftables.service runs `flush ruleset` when it reloads or stops (and when
+    # it starts with Fedora's sample main.nft), which removes the metadata rules (kamerplanter-metadata-guard.service,
     # spec/distribution-requirements/ L16) and Podman's tables with them; the
     # appliance keeps no ruleset of its own in /etc/sysconfig/nftables.conf.
     && systemctl mask nftables.service

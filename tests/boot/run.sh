@@ -470,14 +470,14 @@ EOF
     # is-enabled prints "masked" and exits non-zero for a masked unit.
     expect_rec run9-guard "yes|masked" \
         "$(guest "nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(guest "systemctl is-enabled nftables.service || true")" \
-        "the metadata rules are loaded, and nftables.service, whose start would flush them, is masked"
+        "the metadata rules are loaded, and nftables.service, whose reload and stop would flush them, is masked"
     # Rules removed by hand come back from the check that the timer starts
     # every minute, started here at once. The guard unit and the containers,
     # which require it, keep running: their invocation ids stay the same.
     local invocations
     invocations=$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")
-    expect_rec run9-guard-repair "yes|yes|$invocations" \
-        "$(guest "nft delete table inet kamerplanter_metadata && ! nft list table inet kamerplanter_metadata >/dev/null 2>&1 && echo yes")|$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
+    expect_rec run9-guard-repair "yes|yes|2|$invocations" \
+        "$(guest "nft delete table inet kamerplanter_metadata && ! nft list table inet kamerplanter_metadata >/dev/null 2>&1 && echo yes")|$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(tr , '\n' <<<"$invocations" | grep -c .)|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
         "the metadata rules, removed, are loaded again by their check, without a restart of the guard unit or the containers" ||
         diagnose run9
     written=$(guest stat -c %Y "$sem")
