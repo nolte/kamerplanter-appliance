@@ -802,10 +802,10 @@ identity_problem() {
     fi
 }
 
-# node DEVICE: the device node DEVICE resolves to, as file system and inode:
+# device_node DEVICE: the device node DEVICE resolves to, as file system and inode:
 # a disk that is replaced gets a new node even under the same name and
 # device number, also when it reports neither WWN nor serial.
-node() { stat -Lc %d:%i -- "$1" 2>/dev/null || true; }
+device_node() { stat -Lc %d:%i -- "$1" 2>/dev/null || true; }
 
 # same_disk DEV DEVNO IDENT NODE [named]: before each write that destroys
 # what a disk holds, under lock_disk: fails the unit, writing nothing, when
@@ -818,10 +818,10 @@ same_disk() {
     local why now=$1
     if [ "${5-}" = named ]; then now=$(readlink -e -- "$name" 2>/dev/null || true); fi
     why=$(identity_problem "$1" "$2" "$3" "$now" "$(lsblk_field "$1" MAJ:MIN)" "$(identity_of "$1")")
-    if [ -z "$why" ] && [ "$(node "$1")" != "$4" ]; then
+    if [ -z "$why" ] && [ "$(device_node "$1")" != "$4" ]; then
         why="$1 is another device node now: a disk replaced it"
     fi
-    if [ -z "$why" ] && [ -n "${disk_lock-}" ] && [ "$(node "$disk_lock_whole")" != "$disk_lock_node" ]; then
+    if [ -z "$why" ] && [ -n "${disk_lock-}" ] && [ "$(device_node "$disk_lock_whole")" != "$disk_lock_node" ]; then
         why="$disk_lock_whole, which is locked, is another device node now: a disk replaced it"
     fi
     [ -z "$why" ] ||
@@ -833,6 +833,8 @@ same_disk() {
 # lies on, the lock systemd-udevd and disk tools honour (systemd's "Locking
 # Block Device Access"): nothing that honours it probes or writes the disk
 # while it is wiped and formatted. Waits wait_seconds for another holder.
+# Sets disk_lock (the descriptor), disk_lock_whole and disk_lock_node (what
+# is locked, for same_disk).
 # unlock_disk lets go of it, before udev is waited for; exiting does too.
 lock_disk() {
     local whole=$1 parent
@@ -841,7 +843,8 @@ lock_disk() {
     { exec {disk_lock}<"$whole"; } 2>/dev/null ||
         die "$whole, holding $name, cannot be opened to lock it; it is not formatted"
     disk_lock_whole=$whole
-    disk_lock_node=$(node "/dev/fd/$disk_lock")
+    disk_lock_node=$(device_node "/dev/fd/$disk_lock")
+    [ -n "$disk_lock_node" ] || die "$whole, holding $name, cannot be identified once opened; it is not formatted"
     flock -x -w "$wait_seconds" "$disk_lock" ||
         die "$whole, holding $name, is locked by another program; it is not formatted" \
             "wait until nothing else works on the disk, then run: systemctl restart kamerplanter.target"
@@ -849,7 +852,7 @@ lock_disk() {
 unlock_disk() {
     if [ -n "${disk_lock-}" ]; then
         exec {disk_lock}<&-
-        disk_lock=
+        disk_lock='' disk_lock_whole='' disk_lock_node=''
     fi
 }
 
@@ -1238,7 +1241,7 @@ set_up() {
     [ -b "$dev" ] || die "$name, named as $role disk, is not a block device"
     # The disk selected: before anything destroys what it holds, the naming
     # must still lead to it, and it must still be that disk (same_disk).
-    devno=$(lsblk_field "$dev" MAJ:MIN) devnode=$(node "$dev")
+    devno=$(lsblk_field "$dev" MAJ:MIN) devnode=$(device_node "$dev")
     ident=$(identity_of "$dev")
     if [ -n "$other_name" ]; then
         other_dev=$(readlink -f -- "$other_name" 2>/dev/null || true)

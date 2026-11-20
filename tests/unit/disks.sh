@@ -376,7 +376,7 @@ same_disk_with() {  # same_disk_with NOW_DEV NOW_DEVNO NOW_IDENT NOW_NODE [named
         readlink() { printf '%s\n' "$now_dev"; }
         lsblk_field() { printf '%s' "$now_devno"; }
         identity_of() { printf '%s' "$now_ident"; }
-        node() { printf '%s' "$now_node"; }
+        device_node() { printf '%s' "$now_node"; }
         die() { echo "die: $1"; exit 1; }
         same_disk /dev/sdb 8:16 serial:A 5:100 "${5-}"
         echo written
