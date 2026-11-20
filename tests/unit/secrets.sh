@@ -406,7 +406,26 @@ expect "migration: matching legacy pins become keyed ones, the services start" "
     "$rc|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$([ "$(cat "$(pins_dir)/ERASURE_TOMBSTONE_SALT.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret ERASURE_TOMBSTONE_SALT)")" ] && echo yes)|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$(pins_dir)/ERASURE_TOMBSTONE_SALT")|$(exists "$SB/run/kamerplanter/app.env")"
 expect "migration: says so by key, without a warning" "yes|no" \
     "$(has "the pin of FERNET_KEY is now keyed: $(pins_dir)/FERNET_KEY.hmac replaces $(pins_dir)/FERNET_KEY" "$(out)")|$(has warning "$(out)")"
-# A rollback to a release before: it reads only the legacy file, finds none,
+# While an update is being checked, the legacy pin stays for the release an
+# automatic rollback would return to; it goes once the update is decided.
+new_appliance
+run_configure >/dev/null
+rm "$(pins_dir)/.key"
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+mkdir -p "$SB/var/lib/kamerplanter/update"
+echo "sha256:a sha256:b checking" >"$SB/var/lib/kamerplanter/update/pending"
+reboot
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "migration: during the check of an update the keyed pin is written and the legacy one kept" "0|yes|yes|yes" \
+    "$rc|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$(has "$(pins_dir)/FERNET_KEY is kept until the update being checked is decided" "$(out)")"
+before=$(cat "$(pins_dir)/FERNET_KEY.hmac")
+rm "$SB/var/lib/kamerplanter/update/pending"
+reboot
+expect "migration: once the update is decided, the legacy pin is deleted, the keyed one stays" "0|no|yes" \
+    "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)"
+
+# A later rollback to a release before: it reads only the legacy file, finds none,
 # and pins the value again in the old form when its service starts. Back on
 # this release, both are checked and the legacy one migrated again.
 pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
@@ -452,7 +471,7 @@ leaked=none
 for k in "${keys[@]}"; do
     if [ -n "$k" ] && grep -qF -- "$k" "$all_output"; then leaked=$k; fi
 done
-expect "keyed: no key of the pins in anything the check printed" "none|4" "$leaked|${#keys[@]}"
+expect "keyed: no key of the pins in anything the check printed" "none|5" "$leaked|${#keys[@]}"
 
 # --- the step on unusual input ---
 new_appliance
