@@ -503,6 +503,36 @@ EOF
     expect_rec run9-guard "yes|masked" \
         "$(guest "nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(guest "systemctl is-enabled nftables.service || true")" \
         "the metadata rules are loaded, and nftables.service, whose reload and stop would flush them, is masked"
+    # The rules were in place before any container started: the guard unit
+    # had finished starting before each container unit began to.
+    # shellcheck disable=SC2016 # expanded in the guest
+    expect_rec run9-guard-order yes \
+        "$(guest 'g=$(systemctl show -p ActiveEnterTimestampMonotonic --value kamerplanter-metadata-guard.service)
+n=0 early=0
+for f in /usr/share/containers/systemd/kamerplanter-*.container; do
+    t=$(systemctl show -p InactiveExitTimestampMonotonic --value "$(basename "$f" .container).service")
+    n=$((n + 1))
+    [ "${t:-0}" -gt 0 ] && [ "${t:-0}" -ge "${g:-0}" ] || early=$((early + 1))
+done
+if [ "${g:-0}" -gt 0 ] && [ "$n" -gt 0 ] && [ "$early" = 0 ]; then echo yes; else echo "guard at ${g:-none}, $early of $n containers started before it"; fi')" \
+        "the metadata rules were loaded before any container started"
+    # A request to the metadata address is refused on the running device, for
+    # another user (output chain) and for a container (forward chain), and
+    # the rules count it. Refused, curl fails at once (exit 7, no
+    # connection) and does not wait for its timeout (exit 28); an answer
+    # (exit 0) means the request got through. The check started first loads
+    # the rules again: their counters start at zero, and the timer, which
+    # counts its minute from that start, does not reset them meanwhile.
+    # shellcheck disable=SC2016 # expanded in the guest
+    expect_rec run9-guard-refuse "7|7|yes|yes" \
+        "$(guest 'systemctl start kamerplanter-metadata-guard-check.service
+setpriv --reuid 65534 --regid 65534 --clear-groups curl -s -o /dev/null --max-time 10 http://169.254.169.254/; user=$?
+podman exec backend curl -s -o /dev/null --max-time 10 http://169.254.169.254/; ctr=$?
+out=$(nft list chain inet kamerplanter_metadata output | grep -F "ip daddr 169.254.169.254" | grep -oE "packets [0-9]+" | cut -d" " -f2)
+fwd=$(nft list chain inet kamerplanter_metadata forward | grep -E "ip daddr 169\.254\.0\.0/16 .*reject" | grep -oE "packets [0-9]+" | cut -d" " -f2)
+echo "$user|$ctr|$([ "${out:-0}" -gt 0 ] && echo yes || echo "output counted ${out:-nothing}")|$([ "${fwd:-0}" -gt 0 ] && echo yes || echo "forward counted ${fwd:-nothing}")"')" \
+        "a request to the metadata service is refused at once on the running device, for another user and for a container, and counted by the rules" ||
+        diagnose run9
     # Rules removed by hand come back from the check that the timer starts
     # every minute, started here at once. The guard unit and the containers,
     # which require it, keep running: their invocation ids stay the same.
@@ -511,6 +541,15 @@ EOF
     expect_rec run9-guard-repair "yes|yes|2|$invocations" \
         "$(guest "nft delete table inet kamerplanter_metadata && ! nft list table inet kamerplanter_metadata >/dev/null 2>&1 && echo yes")|$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(tr , '\n' <<<"$invocations" | grep -c .)|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
         "the metadata rules, removed, are loaded again by their check, without a restart of the guard unit or the containers" ||
+        diagnose run9
+    # Chains flushed by hand leave the table in place but empty: the check
+    # loads the rules again all the same, the table as it was (counters
+    # aside), still without a restart.
+    local listing
+    listing=$(guest "nft list table inet kamerplanter_metadata | sed -E 's/ counter packets [0-9]+ bytes [0-9]+/ counter/'")
+    expect_rec run9-guard-flush "yes|0|yes|$invocations" \
+        "$(grep -q reject <<<"$listing" && echo yes)|$(guest "nft flush chain inet kamerplanter_metadata output && nft flush chain inet kamerplanter_metadata forward && nft list table inet kamerplanter_metadata | grep -c reject")|$([ "$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list table inet kamerplanter_metadata | sed -E 's/ counter packets [0-9]+ bytes [0-9]+/ counter/'")" = "$listing" ] && echo yes)|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
+        "the metadata rules, their chains flushed, are loaded again by their check as they were, without a restart" ||
         diagnose run9
     # A measurement, not a check: whether logrotate is installed and which
     # rule, if any, rotates cloud-init's logs.

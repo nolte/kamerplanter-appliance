@@ -536,6 +536,57 @@ expect "network: no PodmanArgs= sets a network of its own, and no unit joins a p
 expect "network: every network is a bridge, none macvlan or ipvlan, which bypass the forward rule" "none|none" \
     "$(grep -E '^[^:]*\.network(\.d/[^:]*)?: ' <<<"$view" | grep -E "$(key Driver)" | grep -vE '=[[:space:]]*bridge[[:space:]]*$' | listed)|$(grep -E '^[^:]*\.network(\.d/[^:]*)?: ' <<<"$view" | grep -E "$(key '(PodmanArgs|Options)')" | grep -E '(--driver|-d)[=[:space:]]*(macvlan|ipvlan)' | listed)"
 
+# --- the containers' way into the host's network namespace (L16) ---
+# A container on the bridge can still enter the host's network namespace and
+# then send as uid 0 past the output rule: privileged, with the host's PID
+# namespace, with a capability to join or change namespaces (SYS_ADMIN, with
+# SYS_PTRACE to reach another process's, NET_ADMIN to change the host's
+# rules), or through a mount of the host's /proc (/proc/1/ns/net), its /run
+# (/run/netns, the Podman socket, which starts a container as it pleases) or
+# of / itself, or a volume that binds one of these (Device= of a .volume).
+# None of the shipped units needs any of these. PodmanArgs= and
+# GlobalArgs= carry none of these options at all, so that each takes its
+# Quadlet key, which this test reads; a containers.conf module could set them
+# as defaults, so no unit loads one. The Volume= and Mount= sources are
+# checked as Podman reads them (%t is /run for a system unit); a named volume
+# has no leading slash and passes. Keys and values match in any case.
+# tests/image/metadata-guard.sh checks the same on the generator's output,
+# the podman command lines themselves.
+# escapes: the lines of a view that open such a way, or nothing.
+escapes() {  # escapes < VIEW
+    local host='(%t(/[^:,]*)?|/|/(proc|run|var/run)(/[^:,]*)?)'
+    grep -iE "$(key '(PodmanArgs|GlobalArgs)').*(^|[[:space:]=])(--privileged|--pid|--cap-add|--volume|-v|--mount|--module)([=[:space:]]|$)
+$(key AddCapability).*(^|[[:space:]=,])(CAP_)?(ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE)([[:space:],]|$)
+$(key Volume)[[:space:]]*${host}(:|[[:space:]]*$)
+$(key Mount).*(^|[=,])(source|src)=${host}(,|[[:space:]]*$)
+$(key Device)[[:space:]]*${host}[[:space:]]*$
+$(key '(Volume|Mount|Device)').*(podman|docker)\.sock
+$(key ContainersConfModule)"
+}
+expect "host namespace: no unit is privileged, joins a host namespace, adds such a capability or mounts the host's /proc, /run or /" none \
+    "$(escapes <<<"$view" | listed)"
+# The same rule on planted units, one way in each, and one with harmless keys,
+# so that the rule can fail and does not refuse everything.
+planted=$work/planted-quadlets
+mkdir -p "$planted"
+plant() { printf '[Container]\nImage=example.org/i:1\nNetwork=kamerplanter.network\n%s\n' "$2" >"$planted/$1.container"; }
+plant privileged 'PodmanArgs=--log-level=info --privileged'
+plant pid 'PodmanArgs="--pid" host'
+plant global 'GlobalArgs=--module=host.conf'
+plant cap 'AddCapability=CHOWN net_admin'
+plant cap-all 'AddCapability=ALL'
+plant proc 'Volume=/proc:/host/proc:ro'
+plant netns 'Mount=type=bind,source=/run/netns,destination=/netns'
+plant socket 'Volume=%t/podman/podman.sock:/sock'
+plant root 'Volume=/:/host'
+plant module 'ContainersConfModule=/etc/containers/host.conf'
+printf '[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n' >"$planted/device.volume"
+plant harmless $'AddCapability=CHOWN NET_BIND_SERVICE\nVolume=arangodb.volume:/var/lib/arangodb3\nVolume=/var/lib/kamerplanter/x:/x:ro,z\nMount=type=volume,source=valkey_data,destination=/data\nPodmanArgs=--log-level=info'
+mapfile -t planted_files < <(find "$planted" -type f | LC_ALL=C sort)
+expect "host namespace: the rule finds each planted way in, and passes the harmless unit" \
+    "cap;cap-all;device;global;module;netns;pid;privileged;proc;root;socket" \
+    "$(quadlet_view "${planted_files[@]}" | escapes | sed -E 's|^[^:]*/([^/:]*)\.[a-z]+: .*|\1|' | LC_ALL=C sort -u | paste -sd ';')"
+
 # --- no provisioned value in anything the scrub printed (L12) ---
 leaked=none
 for m in "${markers[@]}" short1; do
