@@ -56,7 +56,7 @@ out=/run/kamerplanter
 
 # Values that must not change once a service has started with them. A change
 # stops the services instead of damaging the data. To change one deliberately,
-# do what its reason says, then delete its file in $pins.
+# do what its reason says, then delete its pin in $pins (pin_files below).
 declare -A pinned=(
     [ERASURE_TOMBSTONE_SALT]="it keys the records of deleted accounts and must never change"
     [FERNET_KEY]="stored credentials are encrypted with it and become unreadable"
@@ -71,19 +71,109 @@ errors=()
 fail() { errors+=("$1"); }
 
 # Replaces a file with what stdin delivers, durably: a reader sees either the
-# old or the new content, and the new content survives a power loss.
+# old or the new content, and the new content survives a power loss. Fails,
+# also in a condition, when a step does.
 replace() {
     local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
-    cat >"$tmp"
-    sync "$tmp"
-    mv "$tmp" "$1"
-    sync "$(dirname "$1")"
+    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
+    if cat >"$tmp" && sync "$tmp" && mv "$tmp" "$1" && sync "$(dirname "$1")"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
 }
 
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
-digest() { printf '%s' "$(get "$1")" | sha256sum | cut -d' ' -f1; }
+
+# --- The pins ---
+# A pin is the HMAC-SHA256 (RFC 2104) of the value, in $pins/KEY.hmac, keyed
+# with a random key of this device in $pin_key, so that a pin does not give
+# away its value, not even a short one, to whoever tries values against it.
+# The key lies with the pins, so it moves onto a data disk and is adopted
+# with them (data_disk_places in /usr/lib/kamerplanter/env.sh); it is
+# generated once, before any service starts, and never printed, nor passed
+# on a command line: only builtins and sha256sum on its input see it.
+# Releases before recorded the unsalted SHA-256 in $pins/KEY. Such a legacy
+# pin is still checked; once the value matches it, the keyed pin is written
+# and the legacy one deleted, without stopping anything. A release before
+# reads only $pins/KEY: after a rollback to it, it checks no migrated value
+# and pins it again in the old form when its service starts, and the next
+# run here checks both and migrates again.
+pin_key=$pins/.key
+pin_key_hex=
+# pin_key_read: sets pin_key_hex from $pin_key; fails when it holds no key.
+pin_key_read() {
+    local k
+    [ -f "$pin_key" ] || return 1
+    k=$(<"$pin_key") || return 1
+    [[ $k =~ ^[0-9a-f]{64}$ ]] || return 1
+    pin_key_hex=$k
+}
+keyed_pins() { compgen -G "$pins/*.hmac" >/dev/null; }
+# pin_key_make: generates the key unless there is one. A keyed pin without
+# its key is never given a new one: it could not match any more. Called in
+# a condition, so every step is checked.
+pin_key_make() {
+    [ -z "$pin_key_hex" ] || return 0
+    pin_key_read && return 0
+    ! keyed_pins || return 1
+    hex 32 | replace "$pin_key" && pin_key_read
+}
+pin_key_missing="the key of the pins, $pin_key, is missing or damaged although keyed pins are recorded in $pins: restore it from your backup, or, when the values in $config_secrets are those Kamerplanter started with, delete the files $pins/*.hmac and restart"
+# hmac VALUE: the keyed pin of VALUE, 64 hex digits.
+hmac() {
+    local i b ipad='' opad='' inner bin='' x
+    [ -n "$pin_key_hex" ] || return 1
+    for ((i = 0; i < 128; i += 2)); do
+        b=0
+        if ((i < 64)); then b=$((16#${pin_key_hex:i:2})); fi
+        printf -v x '\\x%02x' $((b ^ 0x36))
+        ipad+=$x
+        printf -v x '\\x%02x' $((b ^ 0x5c))
+        opad+=$x
+    done
+    inner=$({ printf '%b' "$ipad"; printf '%s' "$1"; } | sha256sum) || return 1
+    inner=${inner%% *}
+    [[ $inner =~ ^[0-9a-f]{64}$ ]] || return 1
+    for ((i = 0; i < 64; i += 2)); do bin+="\\x${inner:i:2}"; done
+    x=$({ printf '%b' "$opad"; printf '%b' "$bin"; } | sha256sum) || return 1
+    x=${x%% *}
+    [[ $x =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$x"
+}
+# pinned_now KEY: whether a pin of KEY is recorded, keyed or legacy.
+pinned_now() { [ -e "$pins/$1.hmac" ] || [ -e "$pins/$1" ]; }
+# pin_files KEY: the pin files of KEY to delete to release it, for a message.
+pin_files() {
+    if [ -e "$pins/$1" ] && [ -e "$pins/$1.hmac" ]; then
+        printf '%s and %s' "$pins/$1.hmac" "$pins/$1"
+    elif [ -e "$pins/$1" ]; then
+        printf '%s' "$pins/$1"
+    else
+        printf '%s' "$pins/$1.hmac"
+    fi
+}
+# pin_matches KEY VALUE: whether every pin recorded for KEY is that of VALUE.
+pin_matches() {
+    local h
+    if [ -e "$pins/$1" ]; then
+        h=$(printf '%s' "$2" | sha256sum) || return 1
+        [ "$(<"$pins/$1")" = "${h%% *}" ] || return 1
+    fi
+    if [ -e "$pins/$1.hmac" ]; then
+        h=$(hmac "$2") || return 1
+        [ "$(<"$pins/$1.hmac")" = "$h" ] || return 1
+    fi
+}
+# pin_record KEY VALUE: records the keyed pin of VALUE for KEY. Called in a
+# condition, so every step is checked.
+pin_record() {
+    local h
+    pin_key_make || return 1
+    h=$(hmac "$2") || return 1
+    printf '%s\n' "$h" | replace "$pins/$1.hmac"
+}
 secrets=$config_secrets
 user=$config_user
 
@@ -154,7 +244,7 @@ check_secret() {
     if [ -n "$from" ] && provisioning_source "$from" && ! started; then
         fail_key "$1" "$problem"
     elif [ -n "${pinned[$1]+set}" ]; then
-        echo "warning: $problem and can be guessed; ${pinned[$1]}, then set the new value and remove $pins/$1 (see the configuration reference)" >&2
+        echo "warning: $problem and can be guessed; ${pinned[$1]}, then set the new value and remove $(pin_files "$1") (see the configuration reference)" >&2
     else
         echo "warning: $problem and can be guessed; replace it with a longer value (see the configuration reference)" >&2
     fi
@@ -247,12 +337,19 @@ if [ "${1-}" = pin ]; then
     install -d -m 0700 "$pins"
     load "$out/app.env"
     for key in "$@"; do
-        [ -e "$pins/$key" ] && continue
+        pinned_now "$key" && continue
         if [ -z "$(get "$key")" ]; then
             echo "not pinning $key: it has no value in $out/app.env" >&2
             exit 1
         fi
-        digest "$key" | replace "$pins/$key"
+        if ! pin_record "$key" "$(get "$key")"; then
+            if pin_key_read || ! keyed_pins; then
+                echo "not pinning $key: $pins/$key.hmac could not be written" >&2
+            else
+                echo "not pinning $key: $pin_key_missing" >&2
+            fi
+            exit 1
+        fi
     done
     exit 0
 fi
@@ -260,6 +357,11 @@ fi
 install -d -m 0700 /etc/kamerplanter "$pins" "$out"
 [ -e "$user" ] || install -m 0600 /dev/null "$user"
 [ -e "$secrets" ] || install -m 0600 /dev/null "$secrets"
+# A keyed pin can be checked only with its key.
+if ! pin_key_read && keyed_pins; then
+    fail "$pin_key_missing"
+    report_invalid
+fi
 
 # --- The provisioned secrets (L12, L13, L14, L17) ---
 # Taken over here, after the check above that the data disk is in place, so
@@ -328,8 +430,7 @@ while IFS= read -r key; do
         continue
     fi
     # A pinned value is restored only as the value Kamerplanter started with.
-    if [ -n "${pinned[$key]+set}" ] && [ -e "$pins/$key" ] &&
-        [ "$(cat "$pins/$key")" != "$(printf '%s' "$value" | sha256sum | cut -d' ' -f1)" ]; then
+    if [ -n "${pinned[$key]+set}" ] && pinned_now "$key" && ! pin_matches "$key" "$value"; then
         if [ -n "${cfg[$key]+set}" ]; then
             echo "warning: $key from $from differs from the value Kamerplanter started with; it is not taken over" >&2
         else
@@ -379,7 +480,7 @@ done
 load_config
 missing() {
     [ -z "${cfg[$1]+set}" ] || return 1
-    if [ -n "${pinned[$1]+set}" ] && [ -e "$pins/$1" ]; then
+    if [ -n "${pinned[$1]+set}" ] && pinned_now "$1"; then
         fail "$1 is missing from $secrets although Kamerplanter already started with it: ${pinned[$1]}; restore it from your backup"
         return 1
     fi
@@ -444,14 +545,31 @@ if user_file_trusted; then
 fi
 check_secret ARANGODB_PASSWORD
 
+legacy=()
 for key in "${!pinned[@]}"; do
-    [ -e "$pins/$key" ] || continue
+    pinned_now "$key" || continue
     [ -n "${cfg[$key]+set}" ] || continue
-    [ "$(cat "$pins/$key")" = "$(digest "$key")" ] ||
-        fail_key "$key" "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $pins/$key)"
+    if pin_matches "$key" "$(get "$key")"; then
+        [ ! -e "$pins/$key" ] || legacy+=("$key")
+    else
+        fail_key "$key" "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $(pin_files "$key"))"
+    fi
 done
 
 [ ${#errors[@]} -eq 0 ] || report_invalid
+
+# The key of the pins exists before any service starts, so the services
+# never generate it, and a legacy pin that matched is replaced by a keyed
+# one. Neither stops the services when it cannot be written: a legacy pin
+# stays valid and is migrated on a later run.
+pin_key_make || echo "warning: the key of the pins could not be written to $pin_key; the services pin their values when they start" >&2
+for key in "${legacy[@]}"; do
+    if pin_record "$key" "$(get "$key")" && rm -f -- "$pins/$key"; then
+        echo "the pin of $key is now keyed: $pins/$key.hmac replaces $pins/$key"
+    else
+        echo "warning: the pin of $key could not be migrated; $pins/$key is kept and checked as before" >&2
+    fi
+done
 
 # The application containers get the whole configuration; ArangoDB only the
 # value it needs to create its database.

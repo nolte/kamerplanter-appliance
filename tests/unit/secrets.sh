@@ -332,6 +332,128 @@ pin_of "$(fernet_of recorded)" >"$SB/var/lib/kamerplanter/pinned/FERNET_KEY"
 expect "pinned: without a provisioned value a missing pinned key still keeps the services stopped" "1|yes" \
     "$(run_configure)|$(has 'FERNET_KEY is missing from' "$(out)")"
 
+# --- keyed pins and the migration of legacy ones (D12, #56) ---
+# The pins written before were the plain SHA-256 of the value (pin_of
+# above); they are checked as they are, and replaced by the HMAC-SHA256 keyed
+# with the device's key once the value matches.
+pins_dir() { printf '%s' "$SB/var/lib/kamerplanter/pinned"; }
+pin_key() { cat "$(pins_dir)/.key" 2>/dev/null; }
+hmac_of() {  # hmac_of KEY_HEX VALUE: the reference HMAC-SHA256, computed independently of configure
+    K=$1 V=$2 python3 -c 'import hashlib, hmac, os; print(hmac.new(bytes.fromhex(os.environ["K"]), os.environ["V"].encode(), hashlib.sha256).hexdigest())'
+}
+run_pin() {  # run_pin KEY...: configure pin, as a service runs it before it starts
+    (
+        MOUNTED=
+        sandbox_mounts
+        export SB
+        export -f chown systemctl timeout
+        bash "$SB/usr/libexec/kamerplanter/configure" pin "$@" >"$SB/out" 2>&1
+        echo "$?"
+    )
+    cat "$SB/out" >>"$all_output"
+}
+exists() { [ -e "$1" ] && echo yes || echo no; }
+keys=()
+
+new_appliance
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "keyed: the first run generates the key of the pins, 32 random bytes, 0600, before any pin" "0|yes|600|no" \
+    "$rc|$([[ $(pin_key) =~ ^[0-9a-f]{64}$ ]] && echo yes)|$(mode "$(pins_dir)/.key")|$(compgen -G "$(pins_dir)/*" >/dev/null && echo yes || echo no)"
+rc=$(run_pin FERNET_KEY ERASURE_TOMBSTONE_SALT)
+expect "keyed: a service pins the HMAC of the value with the key, no legacy pin, 0600" "0|yes|yes|no|600" \
+    "$rc|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$([ "$(cat "$(pins_dir)/ERASURE_TOMBSTONE_SALT.hmac")" = "$(hmac_of "$(pin_key)" "$(secret ERASURE_TOMBSTONE_SALT)")" ] && echo yes)|$(exists "$(pins_dir)/FERNET_KEY")|$(mode "$(pins_dir)/FERNET_KEY.hmac")"
+before=$(cat "$(pins_dir)/FERNET_KEY.hmac")
+reboot
+expect "keyed: the same value passes, the pin and the key stay as they are" "0|yes|${keys[0]}" \
+    "$(run_configure)|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)|$(pin_key)"
+expect "keyed: pinning again leaves a recorded pin as it is" "0|yes" \
+    "$(run_pin FERNET_KEY)|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)"
+sed -i "s/^FERNET_KEY=.*/FERNET_KEY=$(fernet_of changed)/" "$SB/etc/kamerplanter/secrets.env"
+rc=$(run_configure)
+expect "keyed: a changed value keeps the services stopped and names the pin to remove" "1|yes|no" \
+    "$rc|$(has "FERNET_KEY differs from the value Kamerplanter started with: stored credentials are encrypted with it and become unreadable (then remove $(pins_dir)/FERNET_KEY.hmac)" "$(out)")|$(exists "$SB/run/kamerplanter/app.env")"
+sed -i '/^FERNET_KEY=/d' "$SB/etc/kamerplanter/secrets.env"
+expect "keyed: a missing pinned value is not generated again" "1|yes|0" \
+    "$(run_configure)|$(has 'FERNET_KEY is missing from' "$(out)")|$(lines_of FERNET_KEY)"
+
+# A keyed pin without its key cannot be checked: the services stay
+# stopped, and no new key is made that could never match.
+new_appliance
+run_configure >/dev/null
+run_pin FERNET_KEY >/dev/null
+keys+=("$(pin_key)")
+rm "$(pins_dir)/.key"
+rc=$(run_pin ERASURE_TOMBSTONE_SALT)
+expect "keyed: a keyed pin whose key is gone: pinning another value makes no new key that could never match" "1|yes|no|no" \
+    "$rc|$(has "not pinning ERASURE_TOMBSTONE_SALT: the key of the pins" "$(out)")|$(exists "$(pins_dir)/.key")|$(exists "$(pins_dir)/ERASURE_TOMBSTONE_SALT.hmac")"
+rc=$(run_configure)
+expect "keyed: and the check keeps the services stopped" "1|yes|no|no" \
+    "$rc|$(has "the key of the pins, $(pins_dir)/.key, is missing or damaged although keyed pins are recorded" "$(out)")|$(exists "$(pins_dir)/.key")|$(exists "$SB/run/kamerplanter/app.env")"
+echo damaged >"$(pins_dir)/.key"
+expect "keyed: a damaged key is the same" "1|damaged" "$(run_configure)|$(pin_key)"
+
+# --- an upgraded installation: legacy pins are migrated, nothing stops ---
+new_appliance
+run_configure >/dev/null
+rm "$(pins_dir)/.key"   # as on a release before: no key yet
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+pin_of "$(secret ERASURE_TOMBSTONE_SALT)" >"$(pins_dir)/ERASURE_TOMBSTONE_SALT"
+reboot
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "migration: matching legacy pins become keyed ones, the services start" "0|yes|yes|no|no|yes" \
+    "$rc|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$([ "$(cat "$(pins_dir)/ERASURE_TOMBSTONE_SALT.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret ERASURE_TOMBSTONE_SALT)")" ] && echo yes)|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$(pins_dir)/ERASURE_TOMBSTONE_SALT")|$(exists "$SB/run/kamerplanter/app.env")"
+expect "migration: says so by key, without a warning" "yes|no" \
+    "$(has "the pin of FERNET_KEY is now keyed: $(pins_dir)/FERNET_KEY.hmac replaces $(pins_dir)/FERNET_KEY" "$(out)")|$(has warning "$(out)")"
+# A rollback to a release before: it reads only the legacy file, finds none,
+# and pins the value again in the old form when its service starts. Back on
+# this release, both are checked and the legacy one migrated again.
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+reboot
+expect "migration: after a rollback and an update again, both pins are checked and the legacy one migrated" "0|no|yes" \
+    "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)"
+pin_of "$(fernet_of elsewhere)" >"$(pins_dir)/FERNET_KEY"
+reboot
+expect "migration: a legacy pin that differs, beside a matching keyed one, keeps the services stopped and names both" "1|yes|yes" \
+    "$(run_configure)|$(has "(then remove $(pins_dir)/FERNET_KEY.hmac and $(pins_dir)/FERNET_KEY)" "$(out)")|$(exists "$(pins_dir)/FERNET_KEY")"
+
+new_appliance
+run_configure >/dev/null
+rm "$(pins_dir)/.key"
+pin_of "$(fernet_of recorded)" >"$(pins_dir)/FERNET_KEY"
+reboot
+rc=$(run_configure)
+expect "migration: a legacy pin that differs keeps the services stopped as before; nothing is migrated" "1|yes|yes|no" \
+    "$rc|$(has "FERNET_KEY differs from the value Kamerplanter started with: stored credentials are encrypted with it and become unreadable (then remove $(pins_dir)/FERNET_KEY)" "$(out)")|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$(pins_dir)/FERNET_KEY.hmac")"
+
+# A provisioned value of a key with a keyed pin (L14): restored only when it
+# matches.
+new_appliance
+run_configure >/dev/null
+printf 'FERNET_KEY=%s\n' "$map_fernet" >"$SB/etc/kamerplanter/secrets.env"
+reboot
+run_configure >/dev/null
+run_pin FERNET_KEY >/dev/null
+keys+=("$(pin_key)")
+sed -i '/^FERNET_KEY=/d' "$SB/etc/kamerplanter/secrets.env"
+reboot
+cloud_init nocloud iid-k "{\"kamerplanter\": {\"secrets\": {\"FERNET_KEY\": \"$map_fernet\"}}}"
+run_step >/dev/null
+expect "keyed: a provisioned value that matches the keyed pin restores the missing key" "0|$map_fernet" \
+    "$(run_configure)|$(secret FERNET_KEY)"
+sed -i '/^FERNET_KEY=/d' "$SB/etc/kamerplanter/secrets.env"
+reboot
+credential FERNET_KEY "$(fernet_of other)"
+expect "keyed: one that differs keeps the services stopped and is not written" "1|0|yes" \
+    "$(run_configure)|$(lines_of FERNET_KEY)|$(has 'FERNET_KEY from the system credential kamerplanter.secret.FERNET_KEY differs from the value Kamerplanter started with' "$(out)")"
+
+leaked=none
+for k in "${keys[@]}"; do
+    if [ -n "$k" ] && grep -qF -- "$k" "$all_output"; then leaked=$k; fi
+done
+expect "keyed: no key of the pins in anything the check printed" "none|4" "$leaked|${#keys[@]}"
+
 # --- the step on unusual input ---
 new_appliance
 cloud_init nocloud iid-u '{"kamerplanter": '

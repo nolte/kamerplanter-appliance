@@ -186,6 +186,8 @@ problem "secrets as symbolic link" "etc/secrets.env is a symbolic link" "$full &
 problem "dangling symbolic link in pinned" "pinned/FERNET_KEY is a symbolic link" "$full && rm pinned/FERNET_KEY && ln -s /nowhere pinned/FERNET_KEY"
 problem "secrets hard-linked into a volume" "etc/secrets.env has 2 hard links" "$full && ln etc/secrets.env volumes/arangodb_data/_data/s"
 problem "pin hard-linked into the top of the disk" "pinned/FERNET_KEY has 2 hard links" "$full && ln pinned/FERNET_KEY copy"
+problem "keyed pins and their key are used" "" "$full && touch pinned/.key pinned/FERNET_KEY.hmac"
+problem "the key of the pins hard-linked elsewhere" "pinned/.key has 2 hard links" "$full && touch pinned/.key && ln pinned/.key copy"
 problem "FIFO in etc" "etc/pipe is a device or other special file" "$full && mkfifo etc/pipe"
 problem "directory in etc" "etc/sub is a directory" "$full && mkdir etc/sub"
 problem "unprintable name is shown masked" "etc/a?b is a symbolic link" "$full && ln -s x etc/a\$'\\n'b"
@@ -221,6 +223,8 @@ held "the shipped user file does not count" "" "mkdir -p etc/kamerplanter && tou
 held "empty pins and bind targets do not count" "" "mkdir -p var/lib/kamerplanter/pinned $vol/arangodb_data $vol/valkey_data/_data"
 held "secrets on the system disk" "/etc/kamerplanter/secrets.env" "mkdir -p etc/kamerplanter && touch etc/kamerplanter/secrets.env"
 held "pins on the system disk" "pins in /var/lib/kamerplanter/pinned" "mkdir -p var/lib/kamerplanter/pinned && touch var/lib/kamerplanter/pinned/FERNET_KEY"
+held "the key of the pins counts like a pin, so a data disk receives it with them" "pins in /var/lib/kamerplanter/pinned" \
+    "mkdir -p var/lib/kamerplanter/pinned && touch var/lib/kamerplanter/pinned/.key"
 held "database data on the system disk" "data in /var/lib/containers/storage/volumes/arangodb_data" \
     "mkdir -p $vol/arangodb_data/_data && touch $vol/arangodb_data/_data/ENGINE"
 held "everything listed" $'/etc/kamerplanter/secrets.env\npins in /var/lib/kamerplanter/pinned\ndata in /var/lib/containers/storage/volumes/valkey_data' \
