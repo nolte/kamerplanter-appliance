@@ -503,8 +503,9 @@ EOF
     expect_rec run9-guard "yes|masked" \
         "$(guest "nft list tables | grep -qx 'table inet kamerplanter_metadata' && echo yes")|$(guest "systemctl is-enabled nftables.service || true")" \
         "the metadata rules are loaded, and nftables.service, whose reload and stop would flush them, is masked"
-    # The rules were in place before any container started: the guard unit
-    # had finished starting before each container unit began to.
+    # The rules were in place before any container started: each container
+    # unit requires the guard unit and is ordered after it, and the guard
+    # unit had finished starting before each container unit began to.
     # shellcheck disable=SC2016 # expanded in the guest
     expect_rec run9-guard-order yes \
         "$(guest 'g=$(systemctl show -p ActiveEnterTimestampMonotonic --value kamerplanter-metadata-guard.service)
@@ -512,10 +513,13 @@ n=0 early=0
 for f in /usr/share/containers/systemd/kamerplanter-*.container; do
     t=$(systemctl show -p InactiveExitTimestampMonotonic --value "$(basename "$f" .container).service")
     n=$((n + 1))
-    [ "${t:-0}" -gt 0 ] && [ "${t:-0}" -ge "${g:-0}" ] || early=$((early + 1))
+    r=" $(systemctl show -p Requires --value "$(basename "$f" .container).service") "
+    a=" $(systemctl show -p After --value "$(basename "$f" .container).service") "
+    [ "${t:-0}" -gt 0 ] && [ "${t:-0}" -ge "${g:-0}" ] &&
+        [[ $r == *" kamerplanter-metadata-guard.service "* ]] && [[ $a == *" kamerplanter-metadata-guard.service "* ]] || early=$((early + 1))
 done
-if [ "${g:-0}" -gt 0 ] && [ "$n" -gt 0 ] && [ "$early" = 0 ]; then echo yes; else echo "guard at ${g:-none}, $early of $n containers started before it"; fi')" \
-        "the metadata rules were loaded before any container started"
+if [ "${g:-0}" -gt 0 ] && [ "$n" -gt 0 ] && [ "$early" = 0 ]; then echo yes; else echo "guard at ${g:-none}, $early of $n containers not bound to it or started before it"; fi')" \
+        "every container requires the metadata rules and started after they were loaded"
     # A request to the metadata address is refused on the running device, for
     # another user (output chain) and for a container (forward chain), and
     # the rules count it. Refused, curl fails at once (exit 7, no

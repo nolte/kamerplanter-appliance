@@ -502,7 +502,7 @@ expect "rules: the output chain hooks output, the forward chain hooks forward" "
 # continuation line are seen as Podman reads them. Every finding names its
 # file; /dev/null keeps grep from reading stdin when no unit is found.
 quadlets=$image/usr/share/containers/systemd
-mapfile -t quadlet_files < <(find "$quadlets" -type f \( -name '*.container' -o -name '*.pod' -o -name '*.kube' -o -name '*.build' -o -name '*.network' -o -path '*.d/*.conf' \) 2>/dev/null | sort)
+mapfile -t quadlet_files < <(find "$quadlets" -type f \( -name '*.container' -o -name '*.pod' -o -name '*.kube' -o -name '*.build' -o -name '*.network' -o -name '*.volume' -o -path '*.d/*.conf' \) 2>/dev/null | sort)
 mapfile -t container_files < <(printf '%s\n' "${quadlet_files[@]}" | grep '\.container$')
 rel() { sed "s|^$root/||"; }
 quadlet_view() {  # quadlet_view FILE...
@@ -539,31 +539,39 @@ expect "network: every network is a bridge, none macvlan or ipvlan, which bypass
 # --- the containers' way into the host's network namespace (L16) ---
 # A container on the bridge can still enter the host's network namespace and
 # then send as uid 0 past the output rule: privileged, with the host's PID
-# namespace, with a capability to join or change namespaces (SYS_ADMIN, with
-# SYS_PTRACE to reach another process's, NET_ADMIN to change the host's
-# rules), or through a mount of the host's /proc (/proc/1/ns/net), its /run
-# (/run/netns, the Podman socket, which starts a container as it pleases) or
-# of / itself, or a volume that binds one of these (Device= of a .volume).
-# None of the shipped units needs any of these. PodmanArgs= and
-# GlobalArgs= carry none of these options at all, so that each takes its
-# Quadlet key, which this test reads; a containers.conf module could set them
-# as defaults, so no unit loads one. The Volume= and Mount= sources are
+# namespace, with a capability to join or change namespaces or to become
+# root on the host (SYS_ADMIN, with SYS_PTRACE to reach another process's,
+# NET_ADMIN to change the host's rules, SYS_MODULE, DAC_READ_SEARCH), or
+# through a mount of the host's /proc (/proc/1/ns/net), its /run (/run/netns,
+# the Podman socket, which starts a container as it pleases), its /etc (a
+# unit of its own), its container storage or of / itself, or a volume that
+# binds one of these (Device= of a .volume), or a root file system of the
+# host's (Rootfs=). None of the shipped units needs any of these.
+# PodmanArgs= and GlobalArgs= carry none of these options at all, in no
+# spelling (-tv/proc is -t -v /proc), so that each takes its Quadlet key,
+# which this test reads; a containers.conf module could set them as
+# defaults, so no unit loads one. The Volume=, Mount= and Device= sources are
 # checked as Podman reads them (%t is /run for a system unit); a named volume
-# has no leading slash and passes. Keys and values match in any case.
+# has no leading slash and passes. A source spelled with // or a . or ..
+# segment, and a $ that systemd would expand, are refused outright, because
+# what they name is not visible here. Keys and values match in any case.
 # tests/image/metadata-guard.sh checks the same on the generator's output,
 # the podman command lines themselves.
 # escapes: the lines of a view that open such a way, or nothing.
 escapes() {  # escapes < VIEW
-    local host='(%t(/[^:,]*)?|/|/(proc|run|var/run)(/[^:,]*)?)'
-    grep -iE "$(key '(PodmanArgs|GlobalArgs)').*(^|[[:space:]=])(--privileged|--pid|--cap-add|--volume|-v|--mount|--module)([=[:space:]]|$)
-$(key AddCapability).*(^|[[:space:]=,])(CAP_)?(ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE)([[:space:],]|$)
+    local host='(%t(/[^:,]*)?|/|/(proc|run|var/run|etc|var/lib/containers)(/[^:,]*)?)'
+    grep -iE "$(key '(PodmanArgs|GlobalArgs)')(.*[[:space:]=])?[[:space:]]*(--privileged|--pid|--cap-add|--volume|--mount|--module|--rootfs|--hooks-dir)([=[:space:]]|$)
+$(key '(PodmanArgs|GlobalArgs)')(.*[[:space:]=])?[[:space:]]*-[[:alpha:]]*v
+$(key AddCapability)(.*[[:space:],])?[[:space:]]*(CAP_)?(ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH)([[:space:],]|$)
 $(key Volume)[[:space:]]*${host}(:|[[:space:]]*$)
-$(key Mount).*(^|[=,])(source|src)=${host}(,|[[:space:]]*$)
+$(key Mount)(.*,)?[[:space:]]*(source|src)=${host}(,|[[:space:]]*$)
 $(key Device)[[:space:]]*${host}[[:space:]]*$
 $(key '(Volume|Mount|Device)').*(podman|docker)\.sock
-$(key ContainersConfModule)"
+$(key '(Volume|Mount|Device)').*(//|/\.\.?([/:,]|[[:space:]]*$))
+$(key '(PodmanArgs|GlobalArgs|Volume|Mount|Device)').*\\\$
+$(key '(ContainersConfModule|Rootfs)')"
 }
-expect "host namespace: no unit is privileged, joins a host namespace, adds such a capability or mounts the host's /proc, /run or /" none \
+expect "host namespace: no unit is privileged, joins a host namespace, adds such a capability or mounts the host's /proc, /run, /etc or /" none \
     "$(escapes <<<"$view" | listed)"
 # The same rule on planted units, one way in each, and one with harmless keys,
 # so that the rule can fail and does not refuse everything.
@@ -571,6 +579,15 @@ planted=$work/planted-quadlets
 mkdir -p "$planted"
 plant() { printf '[Container]\nImage=example.org/i:1\nNetwork=kamerplanter.network\n%s\n' "$2" >"$planted/$1.container"; }
 plant privileged 'PodmanArgs=--log-level=info --privileged'
+plant privileged-alone 'PodmanArgs=--privileged'
+plant cluster 'PodmanArgs=-tv/proc:/hp'
+# shellcheck disable=SC2016 # a $ that systemd, not this shell, would expand
+plant variable 'Volume=${D}:/hp'
+plant dots 'Volume=/var/../proc:/x'
+plant rootfs 'Rootfs=/'
+plant sys-admin 'AddCapability=SYS_ADMIN'
+plant etc 'Volume=/etc:/host-etc'
+plant mount-first 'Mount=source=/proc,type=bind,destination=/p'
 plant pid 'PodmanArgs="--pid" host'
 plant global 'GlobalArgs=--module=host.conf'
 plant cap 'AddCapability=CHOWN net_admin'
@@ -584,7 +601,7 @@ printf '[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n' >"$planted/devic
 plant harmless $'AddCapability=CHOWN NET_BIND_SERVICE\nVolume=arangodb.volume:/var/lib/arangodb3\nVolume=/var/lib/kamerplanter/x:/x:ro,z\nMount=type=volume,source=valkey_data,destination=/data\nPodmanArgs=--log-level=info'
 mapfile -t planted_files < <(find "$planted" -type f | LC_ALL=C sort)
 expect "host namespace: the rule finds each planted way in, and passes the harmless unit" \
-    "cap;cap-all;device;global;module;netns;pid;privileged;proc;root;socket" \
+    "cap;cap-all;cluster;device;dots;etc;global;module;mount-first;netns;pid;privileged;privileged-alone;proc;root;rootfs;socket;sys-admin;variable" \
     "$(quadlet_view "${planted_files[@]}" | escapes | sed -E 's|^[^:]*/([^/:]*)\.[a-z]+: .*|\1|' | LC_ALL=C sort -u | paste -sd ';')"
 
 # --- no provisioned value in anything the scrub printed (L12) ---

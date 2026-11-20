@@ -18,8 +18,8 @@
 # the podman command lines it writes are checked as Podman runs them: every
 # container joins kamerplanter.network and nothing else, and none can enter
 # the host's network namespace (privileged, the host's PID namespace, a
-# capability to join or change namespaces, a mount of the host's /proc, /run
-# or /), which would let it send as uid 0 past the output rule. The same check
+# capability to join or change namespaces, a mount of the host's /proc, /run,
+# /etc or /), which would let it send as uid 0 past the output rule. The same check
 # runs on planted units, one way out each, so that it can fail.
 # tests/unit/scrub.sh checks the units' source on every pull request.
 #
@@ -34,8 +34,9 @@ image=${1:-${IMAGE_REF:-localhost/kamerplanter-appliance:poc}}
 # "refused UNIT: WHY" for each way out of the bridge network or into the
 # host's network namespace. argv[1]: the network every container joins.
 # Options are read as Podman's parser reads them (--opt VALUE, --opt=VALUE,
-# -vVALUE); an option after the image, in the container's own command, is
-# read as one too, which can only refuse more.
+# -vVALUE, -tv VALUE); an option after the image, in the container's own
+# command, is read as one too, which can only refuse more. A $ is refused:
+# systemd would expand it from the unit's environment.
 IFS= read -r -d '' quadlet_check <<'PY' || true
 import posixpath
 import re
@@ -43,11 +44,13 @@ import shlex
 import sys
 
 network = sys.argv[1]
-caps = {"all", "sys_admin", "net_admin", "sys_ptrace"}
+caps = {"all", "sys_admin", "net_admin", "sys_ptrace", "sys_module",
+        "dac_read_search"}
 verbs = {"run", "create", "kube", "pod", "build", "network", "volume",
          "rm", "stop", "start", "image", "pull", "secret"}
 valued = {"--network", "--net", "--pid", "--pod", "--cap-add", "--volume",
-          "--mount", "--module", "--driver", "--opt"}
+          "--mount", "--module", "--driver", "--opt", "--rootfs",
+          "--hooks-dir"}
 
 
 def host(src):
@@ -60,7 +63,8 @@ def host(src):
     if posixpath.basename(path) in ("podman.sock", "docker.sock"):
         return True
     return path == "/" or any(path == d or path.startswith(d + "/")
-                              for d in ("/proc", "/run", "/var/run"))
+                              for d in ("/proc", "/run", "/var/run", "/etc",
+                                        "/var/lib/containers"))
 
 
 def options(args, short):
@@ -76,11 +80,17 @@ def options(args, short):
                 if name in valued and i + 1 < len(args):
                     i += 1
                     value = args[i]
-        elif len(a) >= 2 and a[0] == "-" and a[1] in short:
-            name, value = short[a[1]], a[2:].removeprefix("=")
-            if not value and i + 1 < len(args):
-                i += 1
-                value = args[i]
+        elif len(a) >= 2 and a[0] == "-" and a[1] != "-":
+            # one-letter options may share a dash: -tv/proc is -t -v /proc
+            for j, c in enumerate(a[1:], 1):
+                if c in short:
+                    name, value = short[c], a[j + 1:].removeprefix("=")
+                    if not value and i + 1 < len(args):
+                        i += 1
+                        value = args[i]
+                    break
+                if not c.isalpha():
+                    break
         if name:
             yield name, value
         i += 1
@@ -100,9 +110,11 @@ for unit, body in zip(units[1::2], units[2::2]):
         def refuse(why):
             print(f"refused {unit}: {why}")
 
+        if any("$" in a for a in args):
+            refuse("a $ that systemd expands, so what runs is not visible here")
         for name, _ in options(args[:at], {}):
-            if name == "--module":
-                refuse("loads a containers.conf module")
+            if name in ("--module", "--hooks-dir"):
+                refuse(f"{name}, which changes what every container gets")
         if verb in ("kube", "pod", "build"):
             refuse(f"podman {verb}, which carries a network of its own")
         elif verb == "network" and rest[:1] == ["create"]:
@@ -122,7 +134,7 @@ for unit, body in zip(units[1::2], units[2::2]):
                     nets.append(value)
                 elif name == "--privileged" and value != "false":
                     refuse("privileged")
-                elif name in ("--pid", "--pod"):
+                elif name in ("--pid", "--pod", "--rootfs"):
                     refuse(f"{name} {value}")
                 elif name == "--cap-add":
                     for cap in (value or "").lower().split(","):
@@ -157,7 +169,7 @@ get() {
         nobody) prefix=(setpriv --reuid 65534 --regid 65534 --clear-groups) ;;
         ctr) prefix=(ip netns exec ctr) ;;
     esac
-    if "${prefix[@]}" curl -s -o /dev/null --max-time 3 "http://$2/" 2>/dev/null; then echo yes; else echo no; fi
+    if "${prefix[@]}" curl -gs -o /dev/null --max-time 3 "http://$2/" 2>/dev/null; then echo yes; else echo no; fi
 }
 
 expect "the rules pass nft'"'"'s check" 0 "$(nft -c -f "$rules" >/dev/null 2>&1; echo $?)"
@@ -189,6 +201,10 @@ plant() { local f=$planted/$1.container; shift; printf "[Container]\nImage=examp
 plant privileged Network=kamerplanter.network PodmanArgs=--privileged
 plant pid Network=kamerplanter.network PodmanArgs=--pid=host
 plant cap Network=kamerplanter.network "AddCapability=CHOWN NET_ADMIN"
+plant sys-admin Network=kamerplanter.network AddCapability=SYS_ADMIN
+plant cluster Network=kamerplanter.network PodmanArgs=-tv/proc:/hp
+printf "[Container]\nRootfs=/\nNetwork=kamerplanter.network\n" >"$planted/rootfs.container"
+plant etc Network=kamerplanter.network Volume=/etc:/host-etc
 plant proc Network=kamerplanter.network Volume=/proc:/host/proc:ro
 plant netns Network=kamerplanter.network Mount=type=bind,source=/run/netns,destination=/netns
 plant socket Network=kamerplanter.network Volume=%t/podman/podman.sock:/sock
@@ -201,7 +217,7 @@ printf "[Network]\nDriver=macvlan\n" >"$planted/bad.network"
 printf "[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n" >"$planted/bad.volume"
 found=$(generated "$planted")
 expect "quadlets: the check refuses each planted way out, and passes the harmless unit" \
-    "exit 0|10|bad-network;bad-pod;bad-volume;cap;host;module;net2;netns;pid;privileged;proc;socket" \
+    "exit 0|14|bad-network;bad-pod;bad-volume;cap;cluster;etc;host;module;net2;netns;pid;privileged;proc;rootfs;socket;sys-admin" \
     "$(grep "^exit " <<<"$found")|$(grep -c "^container " <<<"$found")|$(refused <<<"$found")"
 rm -rf "$planted"
 
