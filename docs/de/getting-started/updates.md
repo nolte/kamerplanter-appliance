@@ -92,7 +92,7 @@ Eine Platte wird übergangen, wenn sie nicht eingerichtet ist, fehlt, unter eine
 
 Das erste Update von einem Release, das nur die Systemplatte kennt, legt seine Kopie dort ab, damit ein Rollback auf dieses Release sie findet.
 
-Das Protokoll hält fest, wo jede Kopie liegt, und eine Prüfsumme, die vor einer Wiederherstellung geprüft wird. Fehlt die Platte der Kopie bei einem Rollback oder stimmt die Prüfsumme nicht, wird die Kopie nicht wiederhergestellt, und die Dienste bleiben angehalten; die Konsole und `systemctl status kamerplanter-update-guard.service` sagen warum. Bei einer fehlenden Platte schließe sie wieder an und starte dann neu, oder führe `systemctl restart kamerplanter-backup-disk.service kamerplanter.target` aus. Eine beschädigte Kopie musst du von Hand aus einer anderen Sicherung ersetzen. `kamerplanter-update status` listet jede Kopie mit ihrem Ort.
+Das Protokoll hält fest, wo jede Kopie liegt, und eine Prüfsumme über die Dateien, ihre Rechte und Besitzer, ihre erweiterten Attribute wie SELinux-Labels und ACLs und ihre Hardlinks. Die Prüfsumme wird vor einer Wiederherstellung geprüft und noch einmal an den wiederhergestellten Daten, bevor die Dienste starten. Fehlt die Platte der Kopie bei einem Rollback oder stimmt die Prüfsumme nicht, wird die Kopie nicht wiederhergestellt, und die Dienste bleiben angehalten; die Konsole und `systemctl status kamerplanter-update-guard.service` sagen warum. Bei einer fehlenden Platte schließe sie wieder an und starte dann neu, oder führe `systemctl restart kamerplanter-backup-disk.service kamerplanter.target` aus. Eine beschädigte Kopie musst du von Hand aus einer anderen Sicherung ersetzen. `kamerplanter-update status` listet jede Kopie mit ihrem Ort.
 
 ## Den Zeitpunkt wählen
 

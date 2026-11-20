@@ -34,7 +34,10 @@ LABEL org.opencontainers.image.title="Kamerplanter appliance" \
 # removed. /var/lib/cloud is created at boot by usr/lib/tmpfiles.d/
 # kamerplanter-cloud-init.conf, /run/cloud-init by cloud-init's own entry and
 # /var/lib/dhcpcd by dhcpcd's.
-RUN dnf -y install cloud-init \
+# attr provides getfattr, with which kamerplanter-update checksums the
+# extended attributes of a pre-update backup (spec/update-and-rollback/ D10);
+# without it no backup is taken, and no update is kept.
+RUN dnf -y install cloud-init attr \
     && dnf clean all \
     && rm -rf /run/cloud-init /run/dnf /var/cache /var/lib/cloud \
         /var/lib/dhcpcd /var/lib/dnf /var/log

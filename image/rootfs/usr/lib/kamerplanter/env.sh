@@ -525,6 +525,94 @@ backup_create() {
     backup_delete "$1" "$2" && mkdir -m 0700 -- "$base/$2"
 }
 
+# backup_checksums WHICH ROOT ENTRY [ROOT ENTRY]...: the checksums of a
+# pre-update backup (spec/update-and-rollback/ D10), over the tree made of
+# each ENTRY below its ROOT: "." for everything in ROOT (a backup), "./NAME"
+# for NAME in it (the data a backup was restored to, which lies in more than
+# one place). The pairs come sorted by NAME, and no NAME begins with another.
+# WHICH is legacy, full or both ("LEGACY FULL"). Fails when anything cannot
+# be read.
+#   legacy  recorded as SHA256 and verified by every release with
+#           backup-locations, byte for byte as they compute it: the type,
+#           mode, owner, path and link target of everything, and the content
+#           of every file.
+#   full    recorded as SHA256_FULL besides it: all of legacy, and the
+#           extended attributes of everything (the SELinux label, the ACLs
+#           and any other), and which files are hard links of one another.
+#           Every part is one record, the records are sorted, and a path or
+#           link target is preceded by its length, so no two trees share one
+#           set of records. Needs getfattr (attr).
+# A copy that cp -a made has the checksums of what it copied: inode numbers
+# and link counts, which differ, are not part of them.
+backup_checksums() (
+    export LC_ALL=C
+    set -o pipefail
+    which=$1
+    shift
+    tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    { : >"$tmp/list" && : >"$tmp/sums" && : >"$tmp/meta" && : >"$tmp/attrs"; } || exit 1
+    while [ $# -ge 2 ]; do
+        depth=()
+        [ "$2" != . ] || depth=(-mindepth 1)
+        (
+            cd -- "$1" || exit 1
+            find "$2" ${depth[@]+"${depth[@]}"} -printf '%y %m %U:%G %p -> %l\n' >>"$tmp/list" || exit 1
+            find "$2" ${depth[@]+"${depth[@]}"} -type f -print0 | sort -z | xargs -0r sha256sum -- >>"$tmp/sums" || exit 1
+            [ "$which" != legacy ] || exit 0
+            find "$2" ${depth[@]+"${depth[@]}"} -printf '%y %m %U:%G %D:%i %n\0%p\0%l\0' >>"$tmp/meta" || exit 1
+            find "$2" ${depth[@]+"${depth[@]}"} -print0 | xargs -0r getfattr -h -d -m - -e hex -- >>"$tmp/attrs" || exit 1
+        ) || exit 1
+        shift 2
+    done
+    legacy=$({ sort -- "$tmp/list" && cat -- "$tmp/sums"; } | sha256sum) || exit 1
+    legacy=${legacy%% *}
+    if [ "$which" = legacy ]; then
+        printf '%s' "$legacy"
+        exit 0
+    fi
+    full=$(
+        {
+            printf 'kamerplanter-backup-checksum 2\0'
+            {
+                # The content; sha256sum escapes a name with a newline.
+                while IFS= read -r line; do printf 'C %s\0' "$line"; done <"$tmp/sums"
+                # Type, mode, owner, path and link target; of the paths of
+                # one file, each names the first.
+                declare -A first=()
+                linked=()
+                while IFS=' ' read -r -d '' y m o id n && IFS= read -r -d '' p && IFS= read -r -d '' l; do
+                    printf 'M %s %s %s %s:%s %s:%s\0' "$y" "$m" "$o" "${#p}" "$p" "${#l}" "$l"
+                    if [ "$y" = f ] && [ "$n" -gt 1 ]; then
+                        if [ -z "${first[$id]+set}" ] || [[ $p < ${first[$id]} ]]; then first[$id]=$p; fi
+                        linked+=("$id" "$p")
+                    fi
+                done <"$tmp/meta"
+                for ((i = 0; i < ${#linked[@]}; i += 2)); do
+                    p=${linked[i + 1]}
+                    c=${first[${linked[i]}]}
+                    [ "$p" = "$c" ] || printf 'H %s:%s %s:%s\0' "${#p}" "$p" "${#c}" "$c"
+                done
+                # The extended attributes; getfattr escapes a newline in a
+                # name and gives every value in hex, so each line is one.
+                file=
+                while IFS= read -r line; do
+                    case $line in
+                        '# file: '*) file=${line#'# file: '} ;;
+                        '') ;;
+                        *) printf 'X %s\n%s\0' "$file" "$line" ;;
+                    esac
+                done <"$tmp/attrs"
+            } | sort -z
+        } | sha256sum
+    ) || exit 1
+    full=${full%% *}
+    case $which in
+        full) printf '%s' "$full" ;;
+        *) printf '%s %s' "$legacy" "$full" ;;
+    esac
+)
+
 # keep_days VALUE: the days a pre-update backup, and the system disk's copy of
 # data moved onto the data disk, are kept, from UPDATE_BACKUP_KEEP_DAYS: a
 # whole number of days, at least backup_keep_min. The user file lies on the

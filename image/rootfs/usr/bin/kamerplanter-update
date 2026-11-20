@@ -37,8 +37,10 @@
 #   failed      digests that failed and are never applied again
 #   backup/D/   on the system disk: the volumes as they were when D was left
 #   backups/D   where the backup of D is (LOCATION, and the UUID of its
-#               disk), its checksum (SHA256), when it was taken (TAKEN), and
-#               since when its deletion waits for its disk (DELETE_PENDING)
+#               disk), its checksums (SHA256, and SHA256_FULL, which also
+#               covers the extended attributes and the hard links), when it
+#               was taken (TAKEN), and since when its deletion waits for its
+#               disk (DELETE_PENDING)
 #   log.jsonl   one JSON object per event
 #   postpone    epoch seconds until which no update is activated
 #   downgrades  "DISK RUNNING TIME" per allow-downgrade: the running release
@@ -51,7 +53,8 @@
 # encrypted data disk, only an encrypted backup disk, the data disk, or the
 # system disk while the key of the data disk is kept on it count. Wherever
 # the backup is, backups/D says so and holds the checksum verified before it
-# is restored (D10).
+# is restored, and again on what was restored before the services start
+# (D10).
 # The disks count only when the release a rollback would return to finds a
 # backup there: its tree lists backup-locations in
 # /usr/lib/kamerplanter/features. An older release, or one that cannot be
@@ -318,18 +321,19 @@ backup_possible() {
     return 1
 }
 
-# backup_checksum DIR: the SHA-256 of a backup (D10): of the type, mode,
-# owner, path and link target of everything in DIR, and of the content of
-# every file. Fails when anything cannot be read.
-backup_checksum() {
-    local sum
-    sum=$(
-        {
-            (cd -- "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p -> %l\n' | LC_ALL=C sort) &&
-                (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum --)
-        } | sha256sum
-    ) || return 1
-    printf '%s' "${sum%% *}"
+# recorded_sum D: "FORMAT SUM", the checksum the backup of D is verified
+# with (D10; backup_checksums in /usr/lib/kamerplanter/env.sh): full with the
+# SHA256_FULL its record holds, else legacy with its SHA256. A record of an
+# earlier release holds only SHA256; one of this release holds both, and an
+# earlier release verifies SHA256 when it is returned to.
+recorded_sum() {
+    local full
+    full=$(record_field SHA256_FULL "$backups/$1")
+    if [ -n "$full" ]; then
+        printf 'full %s' "$full"
+    else
+        printf 'legacy %s' "$(record_field SHA256 "$backups/$1")"
+    fi
 }
 
 # write_record FILE KEY=VALUE...: sets the KEYs in the record FILE, the other
@@ -370,9 +374,9 @@ readable() {
 # backup_problem D: why the recorded backup of D is not restored: it cannot
 # be read, it is no directory of its own (backup_entry_problem in
 # /usr/lib/kamerplanter/env.sh), its directory is gone, or it does not match
-# its checksum (D10); empty when it may be restored.
+# its checksum (D10, recorded_sum); empty when it may be restored.
 backup_problem() {
-    local problem dir sum where loc
+    local problem dir sum where loc format want
     problem=$(readable "$1")
     if [ -n "$problem" ]; then echo "$problem"; return; fi
     loc=$(record_field LOCATION "$backups/$1")
@@ -381,11 +385,12 @@ backup_problem() {
     problem=$(backup_entry_problem "$loc" "$1")
     if [ -n "$problem" ]; then echo "it is not read on $where: $problem"; return; fi
     [ -d "$dir" ] || { echo "it is recorded on $where, but $dir is not there"; return; }
-    if ! sum=$(backup_checksum "$dir"); then
+    read -r format want <<<"$(recorded_sum "$1")"
+    if ! sum=$(backup_checksums "$format" "$dir" .); then
         echo "it cannot be read completely on $where ($dir)"
         return
     fi
-    [ "$sum" = "$(record_field SHA256 "$backups/$1")" ] ||
+    [ "$sum" = "$want" ] ||
         echo "it does not match the checksum recorded when it was taken; it was changed or damaged on $where ($dir)"
 }
 
@@ -405,18 +410,19 @@ forget_backup() {
 }
 
 # write_backup LOCATION D TO: the volumes and the marker copy into the backup
-# of D at LOCATION, its checksum, then its record; fails, and leaves nothing
+# of D at LOCATION, its checksums, then its record; fails, and leaves nothing
 # of it behind, when any of that cannot be written. Writes only into a
 # directory of its own (backup_create in /usr/lib/kamerplanter/env.sh).
 write_backup() {
-    local base dir sum
+    local base dir sums legacy full
     base=$(backup_base "$1") || return 1
     dir=$base/${2:?}
     if backup_create "$1" "$2" &&
-        copy_volumes "$volumes" "$dir" && backup_marker "$dir" && sum=$(backup_checksum "$dir") &&
+        copy_volumes "$volumes" "$dir" && backup_marker "$dir" && sums=$(backup_checksums both "$dir" .) &&
+        read -r legacy full <<<"$sums" && [ -n "$full" ] &&
         sync -f "$dir" &&
-        write_record "$backups/$2" LOCATION="$1" UUID="$(location_uuid "$1")" SHA256="$sum" \
-            TAKEN="$(date -u +%FT%TZ)" TO="$3"; then
+        write_record "$backups/$2" LOCATION="$1" UUID="$(location_uuid "$1")" SHA256="$legacy" \
+            SHA256_FULL="$full" TAKEN="$(date -u +%FT%TZ)" TO="$3"; then
         return 0
     fi
     backup_delete "$1" "$2" || true
@@ -493,8 +499,10 @@ clear_restore_issue() {
 # completely. Checked explicitly, because callers test it in a condition,
 # where set -e does not apply. A destination bound from the data disk is a
 # mount point: it stays, and only what it holds is replaced, on the disk.
+# Sets copied_volumes to the names of the volumes copied.
 copy_volumes() {
     local name
+    copied_volumes=()
     for name in "${data_volumes[@]}"; do
         [ -d "$1/$name" ] || continue
         if mountpoint -q "$2/$name"; then
@@ -505,8 +513,57 @@ copy_volumes() {
             rm -rf "${2:?}/$name" || return 1
             cp -a --reflink=auto "$1/$name" "$2/$name" || return 1
         fi
+        copied_volumes+=("$name")
     done
     sync -f "$2" || return 1
+}
+
+# restore_data SRC [FORMAT SUM]: the volumes and the marker copy of the
+# backup in SRC back into place, while the services are stopped: every
+# container requires the guard, so the volumes are where the restore is
+# staged, and the guard succeeding is the switch to them. With a SUM, the
+# copy is verified with backup_checksums FORMAT before that (D10): the
+# volumes where they now lie, and the marker copy in a directory of the
+# update state, from which the marker is restored only once it matched. So
+# what is restored is what was verified, not what a disk returned when it was
+# read again. Fails, and sets restore_failure to why, when anything does not
+# copy or match; the services then stay stopped, and the next boot restores
+# again.
+restore_data() {
+    local src=$1 format=${2-} want=${3-} stage name sum pairs=() rc=1
+    restore_failure=
+    # Left by a restore that was interrupted.
+    find "$state" -mindepth 1 -maxdepth 1 -name 'restore.*' -exec rm -rf -- {} + || true
+    stage=$(mktemp -d "$state/restore.XXXXXX") || { restore_failure="no directory for the restore could be made in $state"; return 1; }
+    if ! copy_volumes "$src" "$volumes"; then
+        restore_failure="the volumes could not be copied"
+    elif { [ -e "$src/data-disk-release" ] || [ -L "$src/data-disk-release" ]; } &&
+        ! cp -a -- "$src/data-disk-release" "$stage/"; then
+        restore_failure="the copy of the release marker could not be copied"
+    else
+        if [ -n "$format" ]; then
+            while IFS= read -r name; do
+                case $name in
+                    '') ;;
+                    data-disk-release) pairs+=("$stage" "./$name") ;;
+                    *) pairs+=("$volumes" "./$name") ;;
+                esac
+            done < <({
+                printf '%s\n' ${copied_volumes[@]+"${copied_volumes[@]}"}
+                if [ -e "$stage/data-disk-release" ] || [ -L "$stage/data-disk-release" ]; then echo data-disk-release; fi
+            } | LC_ALL=C sort)
+            if ! sum=$(backup_checksums "$format" ${pairs[@]+"${pairs[@]}"}); then
+                restore_failure="what was copied cannot be read back completely"
+            elif [ "$sum" != "$want" ]; then
+                restore_failure="what was copied does not match the checksum recorded with the backup"
+            fi
+        fi
+        if [ -z "$restore_failure" ]; then
+            if restore_marker "$stage"; then rc=0; else restore_failure="the release marker could not be restored"; fi
+        fi
+    fi
+    rm -rf -- "$stage"
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -1023,7 +1080,7 @@ cmd_guard() {
     elif [ -n "${from-}" ] && [ "$booted" = "$from" ]; then
         # Back on the version the data was backed up under: the update was
         # rolled back, automatically or by hand, so its data goes back too.
-        local detail="the data was not backed up and is unchanged" source='' problem
+        local detail="the data was not backed up and is unchanged" source='' problem format='' want=''
         if [ -e "$backups/$from" ]; then
             # Recorded: restored only from the location and the disk the
             # record names, and only when it matches its checksum (D10). A
@@ -1036,6 +1093,7 @@ cmd_guard() {
                 return 1
             fi
             source=$(backup_dir "$from")
+            read -r format want <<<"$(recorded_sum "$from")"
             detail="data restored from $(backup_where "$(record_field LOCATION "$backups/$from")") to the state before the update; changes made since then are lost"
         elif [ -d "$state/backup/$from" ]; then
             # Taken by a release that kept no record: on the system disk,
@@ -1045,9 +1103,10 @@ cmd_guard() {
         fi
         if [ -n "$source" ]; then
             # On failure the services stay stopped (they require this unit)
-            # and the next boot restores again.
-            { copy_volumes "$source" "$volumes" && restore_marker "$source"; } ||
-                { log rollback error "the data could not be restored; the services stay stopped" "$to" "$from"; return 1; }
+            # and the next boot restores again. A recorded backup is verified
+            # again as restored; one without a record has no checksum.
+            restore_data "$source" "$format" "$want" ||
+                { log rollback error "the data could not be restored: $restore_failure; the services stay stopped" "$to" "$from"; return 1; }
         fi
         echo "$to" >>"$state/failed"
         echo "$booted" >"$state/good"

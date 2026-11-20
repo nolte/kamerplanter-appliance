@@ -65,9 +65,10 @@ jobs:
 
       # What the image's scripts use besides bash: PyYAML (scrub-cloud-init
       # reads cloud-init's copies with it, as cloud-init does), and the
-      # compressors the scrub tests build rotated logs with.
+      # compressors the scrub tests build rotated logs with; getfattr and
+      # setfacl (attr, acl) for the checksum of the pre-update backup.
       - name: Install the tools the tests use
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-yaml xz-utils bzip2 jq
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-yaml xz-utils bzip2 jq attr acl
 
       - name: Run every unit test
         run: |

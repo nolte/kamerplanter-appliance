@@ -2,8 +2,9 @@
 # Checks the decisions about the pre-update backup in the shared parser
 # (image/rootfs/usr/lib/kamerplanter/env.sh): the locations and their order,
 # the protection rule with an encrypted data disk, the space rule, the reason
-# recorded when no location takes the backup, and whether a recorded backup
-# can be read for a restore (spec/update-and-rollback/ D5, D8, D10;
+# recorded when no location takes the backup, whether a recorded backup can
+# be read for a restore, and its checksums; and the guard verifying what it
+# restores (spec/update-and-rollback/ D5, D8, D10;
 # spec/distribution-requirements/ E8, E16). On fake input; needs no root, no
 # disk and no VM.
 #
@@ -183,6 +184,77 @@ expect "record: a missing file" "" "$(record_field LOCATION "$work/none")"
 expect "record: no prefix match" "" "$(record_field LOC "$work/rec")"
 expect "luks_uuid: from a dm-crypt mapping" "$id" "$(luks_uuid "CRYPT-LUKS2-${id//-/}-kamerplanter-backup")"
 expect "luks_uuid: another mapping" "" "$(luks_uuid "LVM-abc")"
+
+# --- the checksums of a backup (D10) ---
+# legacy is what every earlier release records and verifies: a rollback to
+# one of them refuses the backup unless it stays the same byte for byte. This
+# is the function of kamerplanter-update that computed it, as it was.
+earlier_releases_checksum() {
+    local sum
+    sum=$(
+        {
+            (cd -- "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p -> %l\n' | LC_ALL=C sort) &&
+                (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum --)
+        } | sha256sum
+    ) || return 1
+    printf '%s' "${sum%% *}"
+}
+expect "checksums: getfattr is there (attr), as in the image" yes "$(command -v getfattr >/dev/null && echo yes)"
+ck=$work/checksum
+mkdir -p "$ck/b/arangodb_data/_data/sub" "$ck/b/valkey_data/_data"
+printf 'one' >"$ck/b/arangodb_data/_data/f"
+printf 'two' >"$ck/b/arangodb_data/_data/sub/g"
+printf 'same' >"$ck/b/arangodb_data/_data/s1"
+printf 'same' >"$ck/b/arangodb_data/_data/s2"
+ln "$ck/b/arangodb_data/_data/f" "$ck/b/arangodb_data/_data/f-link"
+ln -s _data/f "$ck/b/arangodb_data/current"
+printf 'three' >"$ck/b/valkey_data/_data/dump.rdb"
+printf 'four' >"$ck/b/valkey_data/_data/"$'a\nb'
+printf '1.2\n' >"$ck/b/data-disk-release"
+chmod 0644 "$ck/b/arangodb_data/_data/"* "$ck/b/valkey_data/_data/"* "$ck/b/data-disk-release"
+read -r legacy full <<<"$(backup_checksums both "$ck/b" .)"
+expect "checksums: two SHA-256 digests" yes "$([[ $legacy =~ ^[0-9a-f]{64}$ && $full =~ ^[0-9a-f]{64}$ ]] && echo yes)"
+expect "checksums: legacy is what the earlier releases verify" "$(earlier_releases_checksum "$ck/b")" "$legacy"
+expect "checksums: legacy alone" "$legacy" "$(backup_checksums legacy "$ck/b" .)"
+expect "checksums: full alone" "$full" "$(backup_checksums full "$ck/b" .)"
+cp -a "$ck/b" "$ck/copy"
+expect "checksums: a copy made by cp -a has both" "$legacy $full" "$(backup_checksums both "$ck/copy" .)"
+# Restored, the volumes lie among others, the marker copy elsewhere.
+mkdir -p "$ck/volumes/other_volume" "$ck/stage"
+cp -a "$ck/b/arangodb_data" "$ck/b/valkey_data" "$ck/volumes/"
+cp -a "$ck/b/data-disk-release" "$ck/stage/"
+expect "checksums: the restored data in two places has both" "$legacy $full" \
+    "$(backup_checksums both "$ck/volumes" ./arangodb_data "$ck/stage" ./data-disk-release "$ck/volumes" ./valkey_data)"
+# changed COMMAND: whether legacy and full stay the same for a copy of the
+# backup after COMMAND ran in it.
+changed() {
+    local l f
+    rm -rf -- "$ck/v"
+    cp -a "$ck/b" "$ck/v"
+    (cd "$ck/v" && eval "$1") || { echo "command failed"; return; }
+    read -r l f <<<"$(backup_checksums both "$ck/v" .)"
+    printf 'legacy %s, full %s' "$([ "$l" = "$legacy" ] && echo same || echo changed)" "$([ "$f" = "$full" ] && echo same || echo changed)"
+}
+expect "checksums: the content" "legacy changed, full changed" "$(changed 'printf x >>arangodb_data/_data/f')"
+expect "checksums: a mode" "legacy changed, full changed" "$(changed 'chmod 0600 valkey_data/_data/dump.rdb')"
+expect "checksums: a file added" "legacy changed, full changed" "$(changed 'printf x >valkey_data/_data/new')"
+expect "checksums: a link target" "legacy changed, full changed" "$(changed 'ln -sfn _data/sub arangodb_data/current')"
+expect "checksums: an extended attribute" "legacy same, full changed" "$(changed 'setfattr -n user.kamerplanter -v x valkey_data/_data/dump.rdb')"
+expect "checksums: an extended attribute of a directory" "legacy same, full changed" "$(changed 'setfattr -n user.kamerplanter -v x arangodb_data')"
+expect "checksums: an ACL" "legacy same, full changed" "$(changed 'setfacl -m u:0:r valkey_data/_data/dump.rdb')"
+expect "checksums: a default ACL" "legacy same, full changed" "$(changed 'setfacl -d -m u:0:rx arangodb_data/_data/sub')"
+expect "checksums: hard links split into copies" "legacy same, full changed" \
+    "$(changed 'rm arangodb_data/_data/f-link && cp -p arangodb_data/_data/f arangodb_data/_data/f-link')"
+expect "checksums: copies joined into hard links" "legacy same, full changed" "$(changed 'ln -f arangodb_data/_data/s1 arangodb_data/_data/s2')"
+expect "checksums: a hard link to a file outside does not count" "legacy same, full same" "$(changed "ln arangodb_data/_data/sub/g '$ck/outside'")"
+rm -f -- "$ck/outside"
+# Paths that legacy cannot tell apart: x -> y pointing at z, x pointing at y -> z.
+mkdir -p "$ck/l1" "$ck/l2"
+ln -s z "$ck/l1/x -> y"
+ln -s "y -> z" "$ck/l2/x"
+expect "checksums: legacy cannot tell those links apart" "$(backup_checksums legacy "$ck/l1" .)" "$(backup_checksums legacy "$ck/l2" .)"
+expect "checksums: full can" yes "$([ "$(backup_checksums full "$ck/l1" .)" != "$(backup_checksums full "$ck/l2" .)" ] && echo yes)"
+expect "checksums: a directory that cannot be read fails" fails "$(backup_checksums both "$ck/none" . || echo fails)"
 
 # --- writing and deleting backups never follows a link (W1) ---
 # A disk prepared elsewhere may carry update-backup, or an entry in it, as a
@@ -394,6 +466,73 @@ expect "health: after a move, healthy" 0 "$(MOUNTED=1 tool health)"
 expect "health: after a move, the services are checked once" 1 "$(wc -l <"$SB/health-checks")"
 expect "health: after a move, the move is verified and the disk marked" "move healthy unlocked|1.2" \
     "$(lines "$SB/disks-calls")|$(cat "$SB/var/mnt/kamerplanter-data/release")"
+
+# The backup the guard takes on the first boot of a new version carries
+# both checksums: SHA256 for the release it returns to, SHA256_FULL for this.
+new_sandbox backup-locations
+vol=$SB/var/lib/containers/storage/volumes
+echo "$OLD" >"$st/good"
+mkdir -p "$vol/arangodb_data/_data"
+printf 'data' >"$vol/arangodb_data/_data/f"
+expect "guard: first boot of the new version takes the backup" 0 "$(tool guard)"
+read -r legacy full <<<"$(backup_checksums both "$st/backup/$OLD" .)"
+expect "guard: the record holds the checksum the earlier releases verify" "$(earlier_releases_checksum "$st/backup/$OLD")" \
+    "$(record_field SHA256 "$st/backups/$OLD")"
+expect "guard: the record holds the full checksum" "$full" "$(record_field SHA256_FULL "$st/backups/$OLD")"
+
+# restore_sandbox RECORD: booted on $NEW again after the update to $OLD
+# failed, with the backup of $NEW on the system disk and the data of $OLD in
+# the volumes; the record of the backup holds both checksums (both), only
+# SHA256 as an earlier release writes it (legacy), or there is none (none).
+restore_sandbox() {
+    local b l f
+    new_sandbox backup-locations
+    vol=$SB/var/lib/containers/storage/volumes
+    echo "$NEW" >"$st/good"
+    printf '%s %s checking\n' "$NEW" "$OLD" >"$st/pending"
+    b=$st/backup/$NEW
+    mkdir -p "$b/arangodb_data/_data" "$b/valkey_data/_data"
+    printf 'before' >"$b/arangodb_data/_data/f"
+    printf 'cache' >"$b/valkey_data/_data/dump.rdb"
+    printf 'after' >"$vol/arangodb_data/f-of-the-new-version"
+    read -r l f <<<"$(backup_checksums both "$b" .)"
+    case $1 in
+        both) printf 'LOCATION=system-disk\nSHA256=%s\nSHA256_FULL=%s\nTAKEN=2000-01-01T00:00:00Z\n' "$l" "$f" >"$st/backups/$NEW" ;;
+        legacy) printf 'LOCATION=system-disk\nSHA256=%s\nTAKEN=2000-01-01T00:00:00Z\n' "$l" >"$st/backups/$NEW" ;;
+    esac
+}
+restored() {
+    if [ "$(cat "$vol/arangodb_data/_data/f" 2>/dev/null)" = before ] && [ ! -e "$vol/arangodb_data/f-of-the-new-version" ]; then
+        echo restored
+    else
+        echo "not restored"
+    fi
+}
+for record in both legacy none; do
+    restore_sandbox "$record"
+    expect "guard: a backup recorded with $record is restored" "0|restored|" "$(tool guard)|$(restored)|$(cat "$st/pending" 2>/dev/null)"
+    expect "guard: nothing of the restore is left in the update state ($record)" "" "$(find "$st" -maxdepth 1 -name 'restore.*')"
+done
+restore_sandbox both
+setfattr -n user.kamerplanter -v x "$st/backup/$NEW/valkey_data/_data/dump.rdb"
+expect "guard: an extended attribute added to the backup: not restored, the services stay stopped" "1|not restored|$NEW $OLD checking" \
+    "$(tool guard)|$(restored)|$(cat "$st/pending")"
+expect "guard: the refusal names the checksum" yes "$(grep -q 'does not match the checksum recorded when it was taken' "$SB/out" && echo yes)"
+# A disk that returns other data when the backup is read again: what was
+# copied is verified, not what was read before (cp is the second read).
+restore_sandbox both
+# shellcheck disable=SC2329 # called by the tool it is exported to
+cp() {
+    command cp "$@" || return
+    case ${!#} in */volumes/arangodb_data) printf 'x' >>"${!#}/_data/f" ;; esac
+}
+rc=$(export -f cp; tool guard)
+unset -f cp
+expect "guard: other data on the second read: the services stay stopped, the restore is tried again" "1|$NEW $OLD checking" \
+    "$rc|$(cat "$st/pending")"
+expect "guard: the failure names the checksum of what was copied" yes \
+    "$(grep -q 'what was copied does not match the checksum recorded with the backup' "$st/log.jsonl" && echo yes)"
+expect "guard: no rollback is recorded as done" "" "$(grep -o '"result":"done"' "$st/log.jsonl")"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
