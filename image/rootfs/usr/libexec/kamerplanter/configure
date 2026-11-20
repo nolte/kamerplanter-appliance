@@ -118,19 +118,22 @@ keyed_pins() { compgen -G "$pins/*.hmac" >/dev/null; }
 # pin_key_make: generates the key unless there is one. A keyed pin without
 # its key is never given a new one: it could not match any more. Called in
 # a condition, so every step is checked.
-# A new key is linked into place, never over one that another run made in
-# the meantime; only a damaged key is replaced.
+# A new key is renamed into place without replacing one that another run
+# made in the meantime (mv -n, whose exit status pin_key_read stands in
+# for), and never as a second link, which a data disk would refuse; only a
+# damaged key is replaced.
 pin_key_make() {
     local tmp
     [ -z "$pin_key_hex" ] || return 0
     pin_key_read && return 0
     ! keyed_pins || return 1
-    if [ -e "$pin_key" ]; then
+    if [ -e "$pin_key" ] || [ -L "$pin_key" ]; then
         hex 32 | replace "$pin_key" || return 1
     else
         tmp=$(mktemp "$pins/.key.XXXXXX") || return 1
-        if hex 32 >"$tmp" && sync "$tmp" && ln -- "$tmp" "$pin_key" 2>/dev/null; then sync "$pins"; fi
+        if hex 32 >"$tmp" && sync "$tmp"; then mv -n -- "$tmp" "$pin_key" 2>/dev/null || true; fi
         rm -f -- "$tmp"
+        sync "$pins" || true
     fi
     pin_key_read
 }
