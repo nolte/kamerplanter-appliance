@@ -104,11 +104,14 @@ own_dir() {
 
 # secret_pairs: the provisioned secrets of the cloud-config on stdin, as JSON,
 # as NUL-separated pairs KEY, VALUE; nothing when there is none or it cannot
-# be read. jq's messages are dropped: they could quote the input.
+# be read. jq's messages are dropped: they could quote the input. A NUL in a
+# key or value would shift every later pair, so a value would be named as a
+# key in the journal and never searched for: in a key it becomes "?" (no KEY
+# name), in a value a line break (each part is searched for on its own).
 secret_pairs() {
     jq -j --args '
         def pair: select((.value | type) == "string" or (.value | type) == "number")
-            | .key, (.value | tostring);
+            | (.key | gsub("\u0000"; "?")), (.value | tostring | gsub("\u0000"; "\n"));
         (.kamerplanter // {}) as $kp
         | select(($kp | type) == "object")
         | ((($kp.secrets // {}) | select(type == "object") | to_entries[] | pair),
@@ -408,7 +411,7 @@ if isinstance(v1, dict):
         stage(s)
 if not changed:
     sys.exit(3)
-write(path, st, (json.dumps(doc, indent=1, separators=(",", ": "), ensure_ascii=False) + "\n").encode())
+write(path, st, (json.dumps(doc, indent=1, separators=(",", ": "), ensure_ascii=True) + "\n").encode())
 ' "$1" 2>/dev/null
 }
 

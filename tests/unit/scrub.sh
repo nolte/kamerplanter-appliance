@@ -421,6 +421,16 @@ echo "a log line with short1 in it" >>"$SB/var/log/cloud-init.log"
 expect "a short value: the scrub succeeds, names the key, not the value, and leaves the logs readable" "0|yes|no|yes" \
     "$(run_scrub)|$(has "the provisioned value of ARANGODB_PASSWORD, or a line of it, is shorter than 8 characters" "$(out)")|$(has short1 "$(out)")|$(has "a log line with short1 in it" "$(cat "$SB/var/log/cloud-init.log")")"
 
+# --- a NUL in a key or value: the pairs stay aligned, no value is named as a key ---
+new_appliance
+booted iid-1
+jq -c '.kamerplanter.secrets += {"ARANGODB_PASSWORD": "nulpartone\u0000nulparttwo", "ODD\u0000KEY": "nulshiftedsecret"}' \
+    "$SB/run/cloud-init/combined-cloud-config.json" >"$SB/c" &&
+    mv "$SB/c" "$SB/run/cloud-init/combined-cloud-config.json"
+echo "a log line with nulparttwo and nulshiftedsecret in it" >>"$SB/var/log/cloud-init.log"
+expect "a NUL in a key or value: both parts and the next value are replaced, no value is named in the output" "0|no|no|no|no" \
+    "$(run_scrub)|$(has nulparttwo "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(out)")|$(has nulpartone "$(out)")"
+
 # --- a file that cannot be rewritten: the unit fails and names it ---
 new_appliance
 booted iid-1

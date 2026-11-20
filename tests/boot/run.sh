@@ -510,7 +510,8 @@ EOF
         diagnose run9
     expect_rec run9-rotated "yes|1|no" \
         "$(guest "test -f /var/log/cloud-init.log.1 && echo yes || echo no")|$(guest "grep -c 'rotated REDACTED' /var/log/cloud-init.log.1")|$(guest "test -e /var/log/cloud-init.log.2.gz && echo yes || echo no")" \
-        "a rotated log is scrubbed and kept, a compressed one that holds a secret is deleted (L15)"
+        "a rotated log is scrubbed and kept, a compressed one that holds a secret is deleted (L15)" ||
+        diagnose run9
 
     # The drive detached, as the documentation asks: the settings stay (L10).
     stop_vm
