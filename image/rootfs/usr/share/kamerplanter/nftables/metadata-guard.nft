@@ -30,10 +30,12 @@
 # 169.254.0.0/16 stays on its link (RFC 3927), and the containers' DNS goes to
 # aardvark-dns at the bridge's gateway, which is not forwarded. So every such
 # packet is refused, to the metadata service and to whatever else a cloud
-# offers there, an AWS-style DNS or time server among them. Only packets in a
-# connection's original direction are refused: the replies of the containers'
-# published ports to a client that itself has a link-local address (a
-# zeroconf LAN, a laptop on a direct cable) pass forward too, and must reach it.
+# offers there, an AWS-style DNS or time server among them. Only the replies
+# of a tracked connection pass first: those of the containers' published ports
+# to a client that itself has a link-local address (a zeroconf LAN, a laptop on
+# a direct cable) are routed too, and must reach it. Everything else to that
+# range is refused, a packet that conntrack does not track (invalid,
+# untracked) included; the accept ends only this chain, no other table.
 # IPv6 link-local addresses are not routed either; only the metadata address
 # is named there.
 table inet kamerplanter_metadata
@@ -48,7 +50,8 @@ table inet kamerplanter_metadata {
 
     chain forward {
         type filter hook forward priority filter; policy accept;
-        ct direction original ip daddr 169.254.0.0/16 counter reject with icmpx admin-prohibited
+        ct direction reply ip daddr 169.254.0.0/16 accept
+        ip daddr 169.254.0.0/16 counter reject with icmpx admin-prohibited
         ip6 daddr fe80::a9fe:a9fe counter reject with icmpx admin-prohibited
     }
 }

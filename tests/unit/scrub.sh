@@ -363,8 +363,8 @@ expect "rules: a table of their own, replaced on reload, no flush of other table
     "$(has $'table inet kamerplanter_metadata\ndelete table inet kamerplanter_metadata' "$body")|$(has 'table inet kamerplanter_metadata {' "$body")|$(has flush "$body")"
 expect "rules: local processes other than root are refused the metadata address" yes \
     "$(grep -Eq '^\s*ip daddr 169\.254\.169\.254 meta skuid != 0 .*(drop|reject)' <<<"$body" && echo yes)"
-expect "rules: traffic routed through the appliance, the containers', is refused every link-local address for everyone, in the original direction only, so replies to a link-local client pass" yes \
-    "$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ct direction original ip daddr 169\.254\.0\.0/16 .*(drop|reject)' && echo yes)"
+expect "rules: traffic routed through the appliance, the containers', is refused every link-local address for everyone, only replies of a tracked connection pass, to a link-local client" yes \
+    "$(sed -n '/chain forward/,/}/p' <<<"$body" | tr '\n' '~' | grep -Eq '~\s*ct direction reply ip daddr 169\.254\.0\.0/16 accept~\s*ip daddr 169\.254\.0\.0/16 .*(drop|reject)' && echo yes)"
 expect "rules: the IPv6 metadata address, too, is refused local processes other than root and routed traffic" "yes|yes" \
     "$(sed -n '/chain output/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe meta skuid != 0 .*(drop|reject)' && echo yes)|$(sed -n '/chain forward/,/}/p' <<<"$body" | grep -Eq '^\s*ip6 daddr fe80::a9fe:a9fe .*(drop|reject)' && echo yes)"
 expect "rules: the output chain hooks output, the forward chain hooks forward" "yes|yes" \
