@@ -4,7 +4,7 @@
 # about a day, so the base comes from the project's mirror of
 # quay.io/fedora/fedora-bootc:46 (.github/workflows/base-image-mirror.yml),
 # which keeps every digest it has seen; the digest is the upstream one.
-FROM ghcr.io/nolte/kamerplanter-appliance-base:46@sha256:edc933292a2ec069fbcf57fb1a5db50d2975490efd46913291e066574a16df94
+FROM ghcr.io/nolte/kamerplanter-appliance-base:46@sha256:8e74b3f032287371bdfa3481d7bb8f07f09d19df2f3c5f1d15424f9c88a1048c
 
 # OCI labels (spec/project/dockerfile-best-practices/ in nolte/claude-shared).
 # VERSION is the release version; bootc shows it as the version of a

@@ -1,7 +1,7 @@
 # Tool container for the proof of concept: builds the system image, turns it
 # into a disk image and boots that in QEMU, with NoCloud drives and a seed URL
 # server for the provisioning tests. Runs privileged with /dev/kvm.
-FROM quay.io/fedora/fedora:46@sha256:02031526999d46c9f9c6490eeccf4cafd735438b9d0fb5e1d9fc941d7886e2ff
+FROM quay.io/fedora/fedora:46@sha256:5548780ef134010b6484d101d30430a0d1e9e95d956a29371ec8055b3e6e9a2b
 
 RUN dnf -y install \
         podman skopeo image-builder \
