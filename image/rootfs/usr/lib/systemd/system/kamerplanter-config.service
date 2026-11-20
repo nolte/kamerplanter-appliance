@@ -19,6 +19,12 @@ After=kamerplanter-data-disk.service kamerplanter-update-guard.service
 # bound, as everything else it writes.
 Requires=kamerplanter-provisioning.service
 After=kamerplanter-provisioning.service
+# configure derives CORS_ORIGINS and FRONTEND_URL that no layer sets from the
+# host name and the addresses of the device, so it runs once the network is
+# up, as the containers do. Wants=, not Requires=: without a network the
+# check still runs, after NetworkManager-wait-online.service gave up.
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot

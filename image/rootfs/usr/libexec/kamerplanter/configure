@@ -615,6 +615,68 @@ for key in "${legacy[@]}"; do
     fi
 done
 
+# CORS_ORIGINS and FRONTEND_URL that no layer sets are derived from how the
+# device is reached at this run: its host name (uname -n) and its global
+# addresses (ip), after network-online.target (kamerplanter-config.service),
+# leaving out those of the container networks (podman*, veth*, cni*).
+# FRONTEND_URL is the host name when it has a dot, else the first IPv4
+# address, else the host name, else localhost. CORS_ORIGINS lists FRONTEND_URL, the host name, the
+# host name with .local when it has no dot, every address and localhost, all
+# on the web UI's port 8080. A value of any layer is kept as it is. Nothing
+# here fails the check: without a usable host name or address the
+# derivation ends at localhost, the default of the releases before it.
+web_origin() { printf 'http://%s:8080' "$1"; }
+derive_address_defaults() {
+    local host dev addr rest origin origins=() unique=() v4=() v6=() frontend json=
+    host=$(uname -n 2>/dev/null) || host=
+    host=${host,,}
+    host=${host%.}
+    if [[ ! $host =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] ||
+        [ "$host" = localhost ] || [ "$host" = localhost.localdomain ]; then
+        host=
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        while read -r _ dev _ addr _; do
+            case $dev in podman* | veth* | cni*) continue ;; esac
+            if [ -n "$addr" ]; then v4+=("${addr%/*}"); fi
+        done < <(ip -o -4 addr show scope global 2>/dev/null || true)
+        while read -r _ dev _ addr rest; do
+            case $dev in podman* | veth* | cni*) continue ;; esac
+            case " $rest " in *" temporary "* | *" deprecated "* | *" tentative "*) continue ;; esac
+            if [ -n "$addr" ]; then v6+=("[${addr%/*}]"); fi
+        done < <(ip -o -6 addr show scope global 2>/dev/null || true)
+    fi
+    if [[ $host == *.* ]]; then
+        frontend=$(web_origin "$host")
+    elif [ ${#v4[@]} -gt 0 ]; then
+        frontend=$(web_origin "${v4[0]}")
+    elif [ -n "$host" ]; then
+        frontend=$(web_origin "$host")
+    else
+        frontend=$(web_origin localhost)
+    fi
+    origins=("$frontend")
+    if [ -n "$host" ]; then
+        origins+=("$(web_origin "$host")")
+        if [[ $host != *.* ]]; then origins+=("$(web_origin "$host.local")"); fi
+    fi
+    for addr in "${v4[@]}" "${v6[@]}"; do origins+=("$(web_origin "$addr")"); done
+    origins+=("$(web_origin localhost)")
+    for origin in "${origins[@]}"; do
+        case " ${unique[*]} " in *" $origin "*) ;; *) unique+=("$origin") ;; esac
+    done
+    for origin in "${unique[@]}"; do json+=${json:+,}\"$origin\"; done
+    if [ -z "${cfg[FRONTEND_URL]+set}" ]; then
+        cfg[FRONTEND_URL]=$frontend
+        echo "FRONTEND_URL is set in no layer; derived: $frontend"
+    fi
+    if [ -z "${cfg[CORS_ORIGINS]+set}" ]; then
+        cfg[CORS_ORIGINS]="[$json]"
+        echo "CORS_ORIGINS is set in no layer; derived: [$json]"
+    fi
+}
+derive_address_defaults
+
 # The application containers get the whole configuration; ArangoDB only the
 # value it needs to create its database.
 printf '%s\n' "${!cfg[@]}" | sort | while IFS= read -r key; do

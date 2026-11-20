@@ -373,6 +373,16 @@ run_1() {
     fi
     # spec/update-and-rollback/ G1: the version above the login prompt.
     check_console run1-console 50-kamerplanter.issue
+    # CORS_ORIGINS and FRONTEND_URL, set in no layer, are derived from the
+    # device's address; localhost stays an origin.
+    local ip4 cors
+    ip4=$(guest "ip -4 -o addr show scope global | awk '\$2 !~ /^(podman|veth|cni)/ {sub(/\\/.*/, \"\", \$4); print \$4; exit}'")
+    cors=$(guest podman exec backend printenv CORS_ORIGINS)
+    case $cors in
+        *"\"http://$ip4:8080\""*'"http://localhost:8080"]')
+            record run1-address PASS - "CORS_ORIGINS derived with http://$ip4:8080 and localhost; FRONTEND_URL $(guest podman exec backend printenv FRONTEND_URL)" ;;
+        *) record run1-address FAIL - "CORS_ORIGINS '$cors' lacks http://$ip4:8080 or localhost" ;;
+    esac
 }
 
 # Kill a container, expect systemd to bring it back. Needs the VM of run 1.

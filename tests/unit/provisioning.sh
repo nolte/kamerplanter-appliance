@@ -79,10 +79,37 @@ configure_case() {
 prov_file() { printf '%s\n' "$@" >"$SB/var/lib/kamerplanter/provisioning/provisioning.env"; }
 prov_map() { printf '%s\n' "$@" >"$SB/var/lib/kamerplanter/provisioning/settings.env"; }
 user_file() { printf '%s\n' "$@" >"$SB/etc/kamerplanter/kamerplanter.env"; }
+# address_stubs: uname and ip as configure reads the device's host name and
+# addresses from them: TEST_HOST is the host name; TEST_V4 and TEST_V6 hold
+# one global address of eth0 each per word, an IPv6 one with +FLAG for a flag
+# such as temporary, and an address with @DEV one of the interface DEV;
+# TEST_NO_IP makes ip fail without output.
+address_stubs() {
+    # shellcheck disable=SC2329 # called by the scripts it is exported to
+    uname() { printf '%s\n' "${TEST_HOST-}"; }
+    # shellcheck disable=SC2329 # called by the scripts it is exported to
+    ip() {
+        local family a words dev
+        [ -z "${TEST_NO_IP-}" ] || return 1
+        case " $* " in *" -4 "*) family=inet words=${TEST_V4-} ;; *) family=inet6 words=${TEST_V6-} ;; esac
+        for a in $words; do
+            dev=eth0
+            if [[ $a == *@* ]]; then dev=${a#*@} a=${a%%@*}; fi
+            if [[ $a == *+* ]]; then
+                printf '2: %s    %s %s/64 scope global %s dynamic\n' "$dev" "$family" "${a%%+*}" "${a#*+}"
+            else
+                printf '2: %s    %s %s/24 scope global dynamic noprefixroute %s\n' "$dev" "$family" "$a" "$dev"
+            fi
+        done
+    }
+    export TEST_HOST TEST_V4 TEST_V6 TEST_NO_IP
+    export -f uname ip
+}
 run_configure() {  # prints the exit status; the output is in $SB/out
     (
         MOUNTED=
         sandbox_mounts
+        address_stubs
         bash "$SB/usr/libexec/kamerplanter/configure" >"$SB/out" 2>&1
         echo "$?"
     )
@@ -133,6 +160,48 @@ prov_map UPDATE_WINDOW=25:00 FRONTEND_URL=https://map.example.org
 user_file UPDATE_WINDOW=04:00
 expect "configure: a value in the user file overrides an invalid provisioned one" "0|04:00|https://map.example.org" \
     "$(run_configure)|$(app UPDATE_WINDOW)|$(app FRONTEND_URL)"
+
+# CORS_ORIGINS and FRONTEND_URL that no layer sets come from the host name and
+# the addresses of the device; a value of any layer is kept.
+expect "defaults: the image sets neither CORS_ORIGINS nor FRONTEND_URL" "no|no" \
+    "$(grep -q '^CORS_ORIGINS=' "$image/usr/share/kamerplanter/kamerplanter.env" && echo yes || echo no)|$(grep -q '^FRONTEND_URL=' "$image/usr/share/kamerplanter/kamerplanter.env" && echo yes || echo no)"
+
+configure_case
+expect "derived: a host name with a dot is the frontend URL, the addresses and localhost are origins" \
+    '0|http://kp.example.org:8080|["http://kp.example.org:8080","http://10.0.2.15:8080","http://localhost:8080"]|yes' \
+    "$(TEST_HOST=kp.example.org TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has 'FRONTEND_URL is set in no layer; derived: http://kp.example.org:8080' "$(cat "$SB/out")")"
+
+configure_case
+expect "derived: a bare host name gives the first IPv4 address as frontend URL; .local, every address, none of a container network, no temporary IPv6 one" \
+    '0|http://192.168.1.20:8080|["http://192.168.1.20:8080","http://kamerplanter:8080","http://kamerplanter.local:8080","http://10.0.0.5:8080","http://[2001:db8::5]:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=Kamerplanter TEST_V4='10.89.0.1@podman1 192.168.1.20 10.0.0.5' TEST_V6='2001:db8::5 2001:db8::99+temporary fd00::1@veth0@if2' run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+expect "derived: a bare host name without an address is the frontend URL" \
+    '0|http://kp:8080|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+expect "derived: no usable host name and no address end at localhost, as before" \
+    '0|http://localhost:8080|["http://localhost:8080"]' \
+    "$(TEST_HOST=localhost.localdomain run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file 'CORS_ORIGINS=["https://kp.example.org"]' FRONTEND_URL=https://kp.example.org
+expect "derived: an upgraded installation keeps the values of its user file, and nothing is said to be derived" \
+    '0|https://kp.example.org|["https://kp.example.org"]|no' \
+    "$(TEST_HOST=other.example.org TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has derived "$(cat "$SB/out")")"
+
+configure_case
+prov_map FRONTEND_URL=https://map.example.org
+expect "derived: a provisioned FRONTEND_URL is kept, CORS_ORIGINS that no layer sets is derived on its own" \
+    '0|https://map.example.org|["http://kp.example.org:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp.example.org TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file CORS_ORIGINS=
+expect "derived: a key set empty in a layer counts as set" "0||http://kp:8080" \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(app FRONTEND_URL)"
 
 configure_case
 prov_map UPDATE_WINDOW=04:00 TENANT_EXPORT_SIGNING_SECRET=short
@@ -376,6 +445,8 @@ expect "step: no reload when the generator saw the window already" "0||UPDATE_WI
 
 # --- ordering of the units (L17) ---
 units=$image/usr/lib/systemd/system
+expect "units: the configuration check runs once the network is up, without requiring it" "yes|yes|no" \
+    "$(grep -qx 'Wants=network-online.target' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^After=.*\bnetwork-online\.target\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Requires|Requisite|BindsTo)=.*network-online' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the configuration check runs after the provisioning step and not when it failed" "yes|yes" \
     "$(grep -Eq '^After=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^Requires=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the step is ordered after cloud-init's network stage and never pulls cloud-init in" "yes|no" \

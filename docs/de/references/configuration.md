@@ -3,7 +3,7 @@ title: Konfiguration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-16
+last_updated: 2026-11-21
 ---
 
 # Konfiguration
@@ -27,11 +27,20 @@ systemctl restart kamerplanter.target
 
 ## Die Appliance über ihre Adresse erreichen
 
-Die Standardwerte erwarten die Web-UI unter `http://localhost:8080`. Rufst du sie über die Adresse der Appliance oder einen Hostnamen auf, trage diese Herkunft in deine Datei ein, zum Beispiel:
+`CORS_ORIGINS` nennt die Herkünfte, von denen aus die Web-UI die API aufrufen darf, `FRONTEND_URL` die Adresse der Web-UI in Links, etwa in E-Mails. Setzt keine Schicht sie, leitet die Appliance sie bei jedem Boot und bei jedem `systemctl restart kamerplanter.target` aus ihrem Hostnamen und ihren Adressen in diesem Moment ab, sobald das Netzwerk steht:
+
+| Einstellung | Abgeleiteter Wert |
+|---|---|
+| `FRONTEND_URL` | `http://<Hostname>:8080`, wenn der Hostname einen Punkt enthält, etwa `kamerplanter.example.org`; sonst `http://<erste IPv4-Adresse>:8080`; ohne IPv4-Adresse `http://<Hostname>:8080`; ohne beides `http://localhost:8080` |
+| `CORS_ORIGINS` | `FRONTEND_URL`, `http://<Hostname>:8080`, `http://<Hostname>.local:8080` für einen Hostnamen ohne Punkt, `http://<Adresse>:8080` für jede IPv4- und IPv6-Adresse und `http://localhost:8080` |
+
+Der Hostname `localhost` zählt als keiner, und die Adressen der Container-Netzwerke bleiben außen vor. `journalctl -b -u kamerplanter-config` nennt die abgeleiteten Werte. Ein abgeleiteter Wert folgt dem Gerät: Ein neuer Hostname oder eine neue Adresse gilt ab dem nächsten Boot.
+
+Um einen Wert festzulegen, etwa einen Namen hinter einem Reverse Proxy, trage ihn in deine Datei ein; einen Wert, den irgendeine Schicht setzt, auch einen leeren, übernimmt die Appliance unverändert und leitet für diesen Schlüssel nichts ab:
 
 ```ini
-CORS_ORIGINS=["http://kamerplanter.local:8080"]
-FRONTEND_URL=http://kamerplanter.local:8080
+CORS_ORIGINS=["https://kamerplanter.example.org"]
+FRONTEND_URL=https://kamerplanter.example.org
 ```
 
 ## Erzeugte Secrets

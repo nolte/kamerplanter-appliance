@@ -3,7 +3,7 @@ title: Configuration
 audience: [self-hoster]
 content_mode: reference
 track: user-docs
-last_updated: 2026-11-16
+last_updated: 2026-11-21
 ---
 
 # Configuration
@@ -27,11 +27,20 @@ systemctl restart kamerplanter.target
 
 ## Reaching the appliance by its address
 
-The defaults expect the web UI at `http://localhost:8080`. When you open it under the appliance's address or a host name, set that origin in your file, for example:
+`CORS_ORIGINS` lists the origins the web UI may call the API from, `FRONTEND_URL` is the address of the web UI in links, for example in e-mails. When no layer sets them, the appliance derives them on every boot, and on every `systemctl restart kamerplanter.target`, from its host name and its addresses at that moment, after the network is up:
+
+| Setting | Derived value |
+|---|---|
+| `FRONTEND_URL` | `http://<host name>:8080` when the host name has a dot, such as `kamerplanter.example.org`; otherwise `http://<first IPv4 address>:8080`; without an IPv4 address `http://<host name>:8080`; without either `http://localhost:8080` |
+| `CORS_ORIGINS` | `FRONTEND_URL`, `http://<host name>:8080`, `http://<host name>.local:8080` for a host name without a dot, `http://<address>:8080` for every IPv4 and IPv6 address, and `http://localhost:8080` |
+
+The host name `localhost` counts as none, and the addresses of the container networks are left out. `journalctl -b -u kamerplanter-config` names the derived values. A derived value follows the device: a new host name or address applies at the next boot.
+
+To fix a value, for example a name behind a reverse proxy, set it in your file; a value that any layer sets, also an empty one, is used as it is and nothing is derived for that key:
 
 ```ini
-CORS_ORIGINS=["http://kamerplanter.local:8080"]
-FRONTEND_URL=http://kamerplanter.local:8080
+CORS_ORIGINS=["https://kamerplanter.example.org"]
+FRONTEND_URL=https://kamerplanter.example.org
 ```
 
 ## Generated secrets
