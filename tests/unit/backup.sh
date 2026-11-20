@@ -533,6 +533,7 @@ expect "guard: other data on the second read: the services stay stopped, the res
 expect "guard: the failure names the checksum of what was copied" yes \
     "$(grep -q 'what was copied does not match the checksum recorded with the backup' "$st/log.jsonl" && echo yes)"
 expect "guard: no rollback is recorded as done" "" "$(grep -o '"result":"done"' "$st/log.jsonl")"
+expect "guard: the console says why" yes "$(grep -q 'what was copied does not match' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && echo yes)"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

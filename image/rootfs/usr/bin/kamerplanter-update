@@ -74,6 +74,13 @@ state=/var/lib/kamerplanter/update
 # stay the same.
 volumes=/var/lib/containers/storage/volumes
 # Named volumes of the Quadlet units (image/rootfs/usr/share/containers/systemd/*.volume).
+# A restore is verified over exactly these names and the marker copy
+# (restore_data); a name added here is in every backup this release takes,
+# and a release without it, returned to, would copy all but that name and
+# find the checksum not matching. So a name is added only together with a
+# feature in /usr/lib/kamerplanter/features that the guard asks the release
+# returned to for (rollback_support) before the backup holds it. No name
+# may begin with another, nor with data-disk-release (backup_checksums).
 data_volumes=(arangodb_data valkey_data)
 issue=/run/issue.d/50-kamerplanter.issue
 # The disk service, which keeps the record of a move onto the data disk.
@@ -553,7 +560,7 @@ restore_data() {
                 if [ -e "$stage/data-disk-release" ] || [ -L "$stage/data-disk-release" ]; then echo data-disk-release; fi
             } | LC_ALL=C sort)
             if ! sum=$(backup_checksums "$format" ${pairs[@]+"${pairs[@]}"}); then
-                restore_failure="what was copied cannot be read back completely"
+                restore_failure="what was copied cannot be read completely"
             elif [ "$sum" != "$want" ]; then
                 restore_failure="what was copied does not match the checksum recorded with the backup"
             fi
@@ -1105,8 +1112,18 @@ cmd_guard() {
             # On failure the services stay stopped (they require this unit)
             # and the next boot restores again. A recorded backup is verified
             # again as restored; one without a record has no checksum.
-            restore_data "$source" "$format" "$want" ||
-                { log rollback error "the data could not be restored: $restore_failure; the services stay stopped" "$to" "$from"; return 1; }
+            if ! restore_data "$source" "$format" "$want"; then
+                case $restore_failure in
+                    "what was copied"*)
+                        # The backup or its disk is not to be trusted: told
+                        # on the console as well.
+                        restore_refused "$from" "$to" "$restore_failure"
+                        write_issue || true
+                        ;;
+                    *) log rollback error "the data could not be restored: $restore_failure; the services stay stopped" "$to" "$from" ;;
+                esac
+                return 1
+            fi
         fi
         echo "$to" >>"$state/failed"
         echo "$booted" >"$state/good"
