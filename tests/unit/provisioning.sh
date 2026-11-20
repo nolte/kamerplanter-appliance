@@ -193,10 +193,16 @@ expect "derived: an upgraded installation keeps the values of its user file, and
     "$(TEST_HOST=other.example.org TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has derived "$(cat "$SB/out")")"
 
 configure_case
-prov_map FRONTEND_URL=https://map.example.org
-expect "derived: a provisioned FRONTEND_URL is kept, CORS_ORIGINS that no layer sets is derived on its own" \
-    '0|https://map.example.org|["http://kp.example.org:8080","http://localhost:8080"]' \
+prov_map FRONTEND_URL=https://map.example.org/app
+expect "derived: a provisioned FRONTEND_URL is kept, and its origin leads the CORS_ORIGINS that no layer sets" \
+    '0|https://map.example.org/app|["https://map.example.org","http://kp.example.org:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp.example.org TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file 'FRONTEND_URL=not "a" url'
+expect "derived: a FRONTEND_URL that is no URL adds no origin" \
+    '0|not "a" url|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file CORS_ORIGINS=

@@ -32,9 +32,9 @@ systemctl restart kamerplanter.target
 | Einstellung | Abgeleiteter Wert |
 |---|---|
 | `FRONTEND_URL` | `http://<Hostname>:8080`, wenn der Hostname einen Punkt enthält, etwa `kamerplanter.example.org`; sonst `http://<erste IPv4-Adresse>:8080`; ohne IPv4-Adresse `http://<Hostname>:8080`; ohne beides `http://localhost:8080` |
-| `CORS_ORIGINS` | `FRONTEND_URL`, `http://<Hostname>:8080`, `http://<Hostname>.local:8080` für einen Hostnamen ohne Punkt, `http://<Adresse>:8080` für jede IPv4- und IPv6-Adresse und `http://localhost:8080` |
+| `CORS_ORIGINS` | die Herkunft des geltenden `FRONTEND_URL`, auch eines selbst gesetzten, `http://<Hostname>:8080`, `http://<Hostname>.local:8080` für einen Hostnamen ohne Punkt, `http://<Adresse>:8080` für jede globale IPv4- und IPv6-Adresse und `http://localhost:8080` |
 
-Der Hostname `localhost` zählt als keiner, und die Adressen der Container-Netzwerke bleiben außen vor. `journalctl -b -u kamerplanter-config` nennt die abgeleiteten Werte. Ein abgeleiteter Wert folgt dem Gerät: Ein neuer Hostname oder eine neue Adresse gilt ab dem nächsten Boot.
+Ein Hostname `localhost` oder `localhost.localdomain` oder einer, der kein gültiger DNS-Name ist, zählt als keiner. Außen vor bleiben die Adressen der Container-Netzwerke sowie temporäre, veraltete oder vorläufige IPv6-Adressen. `journalctl -b -u kamerplanter-config` nennt die abgeleiteten Werte. Ein abgeleiteter Wert folgt dem Gerät: Ein neuer Hostname oder eine neue Adresse gilt ab dem nächsten Boot.
 
 Um einen Wert festzulegen, etwa einen Namen hinter einem Reverse Proxy, trage ihn in deine Datei ein; einen Wert, den irgendeine Schicht setzt, auch einen leeren, übernimmt die Appliance unverändert und leitet für diesen Schlüssel nichts ab:
 

@@ -32,9 +32,9 @@ systemctl restart kamerplanter.target
 | Setting | Derived value |
 |---|---|
 | `FRONTEND_URL` | `http://<host name>:8080` when the host name has a dot, such as `kamerplanter.example.org`; otherwise `http://<first IPv4 address>:8080`; without an IPv4 address `http://<host name>:8080`; without either `http://localhost:8080` |
-| `CORS_ORIGINS` | `FRONTEND_URL`, `http://<host name>:8080`, `http://<host name>.local:8080` for a host name without a dot, `http://<address>:8080` for every IPv4 and IPv6 address, and `http://localhost:8080` |
+| `CORS_ORIGINS` | the origin of the `FRONTEND_URL` in effect, also of one you set, `http://<host name>:8080`, `http://<host name>.local:8080` for a host name without a dot, `http://<address>:8080` for every global IPv4 and IPv6 address, and `http://localhost:8080` |
 
-The host name `localhost` counts as none, and the addresses of the container networks are left out. `journalctl -b -u kamerplanter-config` names the derived values. A derived value follows the device: a new host name or address applies at the next boot.
+A host name of `localhost` or `localhost.localdomain`, or one that is not a valid DNS name, counts as none. Left out are the addresses of the container networks and temporary, deprecated, or tentative IPv6 addresses. `journalctl -b -u kamerplanter-config` names the derived values. A derived value follows the device: a new host name or address applies at the next boot.
 
 To fix a value, for example a name behind a reverse proxy, set it in your file; a value that any layer sets, also an empty one, is used as it is and nothing is derived for that key:
 

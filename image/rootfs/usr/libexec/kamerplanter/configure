@@ -620,9 +620,10 @@ done
 # addresses (ip), after network-online.target (kamerplanter-config.service),
 # leaving out those of the container networks (podman*, veth*, cni*).
 # FRONTEND_URL is the host name when it has a dot, else the first IPv4
-# address, else the host name, else localhost. CORS_ORIGINS lists FRONTEND_URL, the host name, the
-# host name with .local when it has no dot, every address and localhost, all
-# on the web UI's port 8080. A value of any layer is kept as it is. Nothing
+# address, else the host name, else localhost. CORS_ORIGINS lists the origin
+# of the FRONTEND_URL in effect (set in a layer or derived), the host name,
+# the host name with .local when it has no dot, every address and localhost,
+# all on the web UI's port 8080. A value of any layer is kept as it is. Nothing
 # here fails the check: without a usable host name or address the
 # derivation ends at localhost, the default of the releases before it.
 web_origin() { printf 'http://%s:8080' "$1"; }
@@ -656,6 +657,11 @@ derive_address_defaults() {
         frontend=$(web_origin localhost)
     fi
     origins=("$frontend")
+    # The origin of a FRONTEND_URL that a layer sets comes first, when it has
+    # the form scheme://host[:port], so the JSON list stays well-formed.
+    if [[ ${cfg[FRONTEND_URL]-} =~ ^https?://[][A-Za-z0-9.:-]+ ]]; then
+        origins=("${BASH_REMATCH[0],,}" "${origins[@]}")
+    fi
     if [ -n "$host" ]; then
         origins+=("$(web_origin "$host")")
         if [[ $host != *.* ]]; then origins+=("$(web_origin "$host.local")"); fi
