@@ -369,25 +369,30 @@ expect "same disk: another disk under the same name and number" "/dev/sdb is ser
     "$(identity_problem /dev/sdb 8:16 serial:A /dev/sdb 8:16 serial:B)"
 expect "same disk: a partition of another disk" "/dev/sdb1 is wwn:0x2:part1 now, not wwn:0x1:part1" \
     "$(identity_problem /dev/sdb1 8:17 wwn:0x1:part1 /dev/sdb1 8:17 wwn:0x2:part1)"
-same_disk_with() {  # same_disk_with NOW_DEV NOW_DEVNO NOW_IDENT [named]: same_disk on /dev/sdb 8:16 serial:A, with the naming, lsblk and sysfs faked
+same_disk_with() {  # same_disk_with NOW_DEV NOW_DEVNO NOW_IDENT NOW_NODE [named]: same_disk on /dev/sdb 8:16 serial:A node 5:100, with the naming, lsblk, sysfs and the node faked
     (
-        name=/dev/disk/by-id/usb-a now_dev=$1 now_devno=$2 now_ident=$3
+        name=/dev/disk/by-id/usb-a now_dev=$1 now_devno=$2 now_ident=$3 now_node=$4
+        unset disk_lock
         readlink() { printf '%s\n' "$now_dev"; }
         lsblk_field() { printf '%s' "$now_devno"; }
         identity_of() { printf '%s' "$now_ident"; }
+        node() { printf '%s' "$now_node"; }
         die() { echo "die: $1"; exit 1; }
-        same_disk /dev/sdb 8:16 serial:A "${4-}"
+        same_disk /dev/sdb 8:16 serial:A 5:100 "${5-}"
         echo written
     )
 }
-expect "same disk: the write goes ahead" written "$(same_disk_with /dev/sdb 8:16 serial:A)"
+expect "same disk: the write goes ahead" written "$(same_disk_with /dev/sdb 8:16 serial:A 5:100)"
 expect "same disk: another disk stops the start before the write" \
-    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted: /dev/sdb is serial:B now, not serial:A, as when it was selected; nothing is written to it" \
-    "$(same_disk_with /dev/sdb 8:16 serial:B)"
+    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: /dev/sdb is serial:B now, not serial:A; nothing is written to it" \
+    "$(same_disk_with /dev/sdb 8:16 serial:B 5:100)"
+expect "same disk: a disk without serial replaced under the same number stops the start" \
+    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: /dev/sdb is another device node now: a disk replaced it; nothing is written to it" \
+    "$(same_disk_with /dev/sdb 8:16 serial:A 5:200)"
 expect "same disk: a naming that leads elsewhere stops the start before the write" \
-    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted: it leads to /dev/sdc now, not to /dev/sdb, as when it was selected; nothing is written to it" \
-    "$(same_disk_with /dev/sdc 8:16 serial:A named)"
-expect "same disk: after the first write the naming is not looked at again" written "$(same_disk_with /dev/sdc 8:16 serial:A)"
+    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: it leads to /dev/sdc now, not to /dev/sdb; nothing is written to it" \
+    "$(same_disk_with /dev/sdc 8:16 serial:A 5:100 named)"
+expect "same disk: after the first write the naming is not looked at again" written "$(same_disk_with /dev/sdc 8:16 serial:A 5:100)"
 lockee=$work/disk.img
 : >"$lockee"
 locked_by_other() { if flock -n -x "$lockee" true; then echo free; else echo locked; fi; }

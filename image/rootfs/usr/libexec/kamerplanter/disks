@@ -802,17 +802,30 @@ identity_problem() {
     fi
 }
 
-# same_disk DEV DEVNO IDENT [named]: before each write that destroys what a
-# disk holds, under lock_disk: fails the unit, writing nothing, when DEV is
-# no longer the disk selected (a disk replaced or renumbered since), or, with
-# named, when the naming ($name) no longer leads to DEV. The naming is checked
-# before the first write only: a by-uuid naming goes with what is wiped.
+# node DEVICE: the device node DEVICE resolves to, as file system and inode:
+# a disk that is replaced gets a new node even under the same name and
+# device number, also when it reports neither WWN nor serial.
+node() { stat -Lc %d:%i -- "$1" 2>/dev/null || true; }
+
+# same_disk DEV DEVNO IDENT NODE [named]: before each write that destroys
+# what a disk holds, under lock_disk: fails the unit, writing nothing, when
+# DEV is no longer the disk selected (a disk replaced or renumbered since:
+# another device number, identity or node), when the node locked is gone,
+# or, with named, when the naming ($name) no longer leads to DEV. The naming
+# is checked before the first write only: a by-uuid naming goes with what
+# is wiped.
 same_disk() {
     local why now=$1
-    if [ "${4-}" = named ]; then now=$(readlink -f -- "$name" 2>/dev/null || true); fi
+    if [ "${5-}" = named ]; then now=$(readlink -e -- "$name" 2>/dev/null || true); fi
     why=$(identity_problem "$1" "$2" "$3" "$now" "$(lsblk_field "$1" MAJ:MIN)" "$(identity_of "$1")")
+    if [ -z "$why" ] && [ "$(node "$1")" != "$4" ]; then
+        why="$1 is another device node now: a disk replaced it"
+    fi
+    if [ -z "$why" ] && [ -n "${disk_lock-}" ] && [ "$(node "$disk_lock_whole")" != "$disk_lock_node" ]; then
+        why="$disk_lock_whole, which is locked, is another device node now: a disk replaced it"
+    fi
     [ -z "$why" ] ||
-        die "$name ($1) is not formatted: $why, as when it was selected; nothing is written to it" \
+        die "$name ($1) is not formatted, as it is no longer the disk selected: $why; nothing is written to it" \
             "check which disk is attached and named, then run: systemctl restart kamerplanter.target"
 }
 
@@ -827,6 +840,8 @@ lock_disk() {
     if [ -n "$parent" ] && [ -b "/dev/$parent" ]; then whole=/dev/$parent; fi
     { exec {disk_lock}<"$whole"; } 2>/dev/null ||
         die "$whole, holding $name, cannot be opened to lock it; it is not formatted"
+    disk_lock_whole=$whole
+    disk_lock_node=$(node "/dev/fd/$disk_lock")
     flock -x -w "$wait_seconds" "$disk_lock" ||
         die "$whole, holding $name, is locked by another program; it is not formatted" \
             "wait until nothing else works on the disk, then run: systemctl restart kamerplanter.target"
@@ -1196,7 +1211,7 @@ find_and_mount() {
 
 # A named disk that is not set up yet: adopt, format, or refuse it.
 set_up() {
-    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident devno
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident devno devnode
     [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
     disk_path_ok "$name" ||
         die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $(shown "$name")" \
@@ -1222,9 +1237,8 @@ set_up() {
     dev=$(readlink -f -- "$name")
     [ -b "$dev" ] || die "$name, named as $role disk, is not a block device"
     # The disk selected: before anything destroys what it holds, the naming
-    # must still lead to it (same_disk).
-    devno=$(lsblk_field "$dev" MAJ:MIN)
-    [ -n "$devno" ] || die "$name ($dev), named as $role disk, cannot be identified: lsblk reports no device number for it"
+    # must still lead to it, and it must still be that disk (same_disk).
+    devno=$(lsblk_field "$dev" MAJ:MIN) devnode=$(node "$dev")
     ident=$(identity_of "$dev")
     if [ -n "$other_name" ]; then
         other_dev=$(readlink -f -- "$other_name" 2>/dev/null || true)
@@ -1266,6 +1280,7 @@ set_up() {
                 if [ -z "$fs_type" ] && [ -z "$(wipefs --noheadings --output TYPE -- "$mapper")" ]; then
                     # A container whose set-up stopped before its file system
                     # was made: it carries nothing, and only the key opens it.
+                    same_disk "$dev" "$devno" "$ident" "$devnode" named
                     mkfs.ext4 -q -F -L "$label" "$mapper" || die "formatting inside $name ($dev) as $label failed"
                     log_event formatted "inside the LUKS2 container on $name ($dev), which held nothing yet"
                     probe "$mapper"
@@ -1288,10 +1303,18 @@ set_up() {
                 die "$name ($dev) is not formatted: two different keys are supplied for the $role disk ($(key_origin "${supplied[0]}") and $(key_origin "${supplied[1]}"))" \
                     "supply one key, then run: systemctl restart kamerplanter.target"
             fi
-            # The disk stays locked from the last check of its identity until
-            # it is formatted, and is checked again before each write.
+            [ -n "$devno" ] && [ -n "$devnode" ] ||
+                die "$name ($dev), named as $role disk, cannot be identified: it has no device number or node; it is not formatted"
+            # The disk stays locked from the check of its identity and content
+            # until its raw device is written (the container is formatted
+            # after the lock is let go, as udev must see the container first),
+            # and is checked again before each write.
             lock_disk "$dev"
-            same_disk "$dev" "$devno" "$ident" named
+            same_disk "$dev" "$devno" "$ident" "$devnode" named
+            if why=$(in_use "$dev"); then die "$name ($dev) is not formatted: $why"; fi
+            [ "$(signatures "$dev")" = "$out" ] ||
+                die "$name ($dev) is not formatted: what it holds changed since it was looked at" \
+                    "check what the disk holds, then run: systemctl restart kamerplanter.target"
             if [ "$action" = wipe ]; then
                 # Recorded before the wipe, so a crash cannot make the force
                 # apply a second time.
@@ -1300,7 +1323,7 @@ set_up() {
                 # Partitions first, the device itself last.
                 local d
                 while IFS= read -r d; do
-                    same_disk "$dev" "$devno" "$ident"
+                    same_disk "$dev" "$devno" "$ident" "$devnode"
                     wipefs --all --quiet -- "$d" || die "the signatures on $d could not be removed"
                 done < <(tree "$dev" | tac)
                 log_event wiped "removed ${sigs[*]} from $name ($dev), as the naming forced"
@@ -1309,7 +1332,7 @@ set_up() {
                 # E14: the container comes first; nothing is written to the
                 # disk outside it.
                 encryption=luks2
-                same_disk "$dev" "$devno" "$ident"
+                same_disk "$dev" "$devno" "$ident" "$devnode"
                 cryptsetup luksFormat --batch-mode --type luks2 --label "$label" \
                     --cipher "$luks_cipher" --key-size "$luks_key_bits" \
                     --key-file "${supplied[0]}" ${luks_options[@]+"${luks_options[@]}"} "$dev" ||
@@ -1322,13 +1345,13 @@ set_up() {
                     die "$name ($dev) does not carry a LUKS2 container labelled $label after encrypting it"
                 open_disk "$dev" "$uuid"
                 # The container just opened lies on the disk selected.
-                same_disk "$dev" "$devno" "$ident"
+                same_disk "$dev" "$devno" "$ident" "$devnode"
                 mkfs.ext4 -q -F -L "$label" "$mapper" || die "formatting inside $name ($dev) as $label failed"
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
                 probe "$mapper"
                 [ "$fs_label" = "$label" ] || die "the container on $name ($dev) does not hold $label after formatting"
             else
-                same_disk "$dev" "$devno" "$ident"
+                same_disk "$dev" "$devno" "$ident" "$devnode"
                 mkfs.ext4 -q -F -L "$label" "$dev" || die "formatting $name ($dev) as $label failed"
                 unlock_disk
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
