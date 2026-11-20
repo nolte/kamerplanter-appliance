@@ -65,11 +65,11 @@ jobs:
     runs-on: ubuntu-latest
     # Reusing a draft's assets downloads them (each under 2 GiB) to verify them.
     timeout-minutes: 20
-    # Draft releases are only visible to a token with write access; packages
-    # and attestations are read to verify reused assets.
+    # Draft releases are only visible to a token with write access;
+    # attestations are read to verify reused assets. The system image is
+    # public (docs/en/references/verify.md), so verifying it needs no login.
     permissions:
       contents: write
-      packages: read
       attestations: read
     outputs:
       commit: ${{ steps.check.outputs.commit }}
@@ -157,11 +157,14 @@ jobs:
           for file in *; do
             case $file in
               SHA256SUMS | SHA256SUMS.sigstore.json) continue ;;
-              *.sigstore.json) name=${file%.sigstore.json} ;;
+              # Only the disk images carry a bundle, and it is verified.
+              *.raw.xz.sigstore.json) name=${file%.sigstore.json} ;;
               *) name=$file ;;
             esac
-            grep -Fqx -- "$name" <<<"$listed" ||
-              { echo "::error::$file on $TAG is not covered by its SHA256SUMS; delete the assets from the draft and dispatch again"; exit 1; }
+            if [[ $name == *.sigstore.json ]] || ! grep -Fqx -- "$name" <<<"$listed"; then
+              echo "::error::$file on $TAG is not covered by its SHA256SUMS; delete the assets from the draft and dispatch again"
+              exit 1
+            fi
           done
           ref=$(cat -- "kamerplanter-appliance-$TAG-system-image.txt")
           [[ $ref =~ ^$IMAGE:$TAG@sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected system image reference '$ref'"; exit 1; }

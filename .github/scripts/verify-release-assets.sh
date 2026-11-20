@@ -23,7 +23,6 @@ image_ref=$1
 identity="https://github.com/$GH_REPO/.github/workflows/release-publish.yml@refs/heads/develop"
 issuer=https://token.actions.githubusercontent.com
 
-sha256sum --check SHA256SUMS
 cosign verify "$image_ref" --certificate-identity "$identity" \
   --certificate-oidc-issuer "$issuer" >/dev/null
 shopt -s nullglob
@@ -41,3 +40,5 @@ for file in "${disks[@]}" SHA256SUMS; do
     --signer-workflow "$GH_REPO/.github/workflows/release-publish.yml" \
     --source-ref refs/heads/develop --deny-self-hosted-runners
 done
+# Only now that SHA256SUMS is known to be this workflow's own.
+sha256sum --check SHA256SUMS

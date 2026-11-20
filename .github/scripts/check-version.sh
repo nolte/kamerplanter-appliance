@@ -17,6 +17,7 @@ value=$2
 # The first character is a letter or digit: `gh` reads a value that starts
 # with '-' as an option (`gh release view -Rx` parses as `--repo x`).
 if [[ ! $value =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
-  echo "::error::$label '$value' must start with a letter or digit and may only contain letters, digits, '.', '_' and '-'"
+  # Quoted with %q: a raw newline in the value would start a workflow command.
+  printf "::error::%s %q must start with a letter or digit and may only contain letters, digits, '.', '_' and '-'\n" "$label" "$value"
   exit 1
 fi
