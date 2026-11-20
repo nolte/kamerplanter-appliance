@@ -788,6 +788,56 @@ identity_of() {
         "$(cat "/sys/class/block/$(kname "$1")/partition" 2>/dev/null || true)" "$(lsblk_field "$1" MAJ:MIN)"
 }
 
+# identity_problem DEV DEVNO IDENT NOW_DEV NOW_DEVNO NOW_IDENT: why the
+# device a naming leads to now (NOW_*) is not the one selected for set-up:
+# another device, another device number MAJOR:MINOR, or another disk
+# (identity_of). Empty when it is the same. Reads only.
+identity_problem() {
+    if [ "$4" != "$1" ]; then
+        echo "it leads to $(shown "${4:-no device}") now, not to $1"
+    elif [ "$5" != "$2" ]; then
+        echo "$1 has the device number $(shown "${5:-none}") now, not $2"
+    elif [ "$6" != "$3" ]; then
+        echo "$1 is $(shown "${6:-a disk that cannot be identified}") now, not $3"
+    fi
+}
+
+# same_disk DEV DEVNO IDENT [named]: before each write that destroys what a
+# disk holds, under lock_disk: fails the unit, writing nothing, when DEV is
+# no longer the disk selected (a disk replaced or renumbered since), or, with
+# named, when the naming ($name) no longer leads to DEV. The naming is checked
+# before the first write only: a by-uuid naming goes with what is wiped.
+same_disk() {
+    local why now=$1
+    if [ "${4-}" = named ]; then now=$(readlink -f -- "$name" 2>/dev/null || true); fi
+    why=$(identity_problem "$1" "$2" "$3" "$now" "$(lsblk_field "$1" MAJ:MIN)" "$(identity_of "$1")")
+    [ -z "$why" ] ||
+        die "$name ($1) is not formatted: $why, as when it was selected; nothing is written to it" \
+            "check which disk is attached and named, then run: systemctl restart kamerplanter.target"
+}
+
+# lock_disk DEVICE: takes the exclusive BSD lock on the whole disk DEVICE
+# lies on, the lock systemd-udevd and disk tools honour (systemd's "Locking
+# Block Device Access"): nothing that honours it probes or writes the disk
+# while it is wiped and formatted. Waits wait_seconds for another holder.
+# unlock_disk lets go of it, before udev is waited for; exiting does too.
+lock_disk() {
+    local whole=$1 parent
+    parent=$(lsblk_field "$1" PKNAME)
+    if [ -n "$parent" ] && [ -b "/dev/$parent" ]; then whole=/dev/$parent; fi
+    { exec {disk_lock}<"$whole"; } 2>/dev/null ||
+        die "$whole, holding $name, cannot be opened to lock it; it is not formatted"
+    flock -x -w "$wait_seconds" "$disk_lock" ||
+        die "$whole, holding $name, is locked by another program; it is not formatted" \
+            "wait until nothing else works on the disk, then run: systemctl restart kamerplanter.target"
+}
+unlock_disk() {
+    if [ -n "${disk_lock-}" ]; then
+        exec {disk_lock}<&-
+        disk_lock=
+    fi
+}
+
 # kept DEVICE: which part of DEVICE carries kp-data or kp-backup; empty when none.
 kept() {
     local d
@@ -1146,7 +1196,7 @@ find_and_mount() {
 
 # A named disk that is not set up yet: adopt, format, or refuse it.
 set_up() {
-    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident devno
     [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
     disk_path_ok "$name" ||
         die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $(shown "$name")" \
@@ -1171,6 +1221,11 @@ set_up() {
     done
     dev=$(readlink -f -- "$name")
     [ -b "$dev" ] || die "$name, named as $role disk, is not a block device"
+    # The disk selected: before anything destroys what it holds, the naming
+    # must still lead to it (same_disk).
+    devno=$(lsblk_field "$dev" MAJ:MIN)
+    [ -n "$devno" ] || die "$name ($dev), named as $role disk, cannot be identified: lsblk reports no device number for it"
+    ident=$(identity_of "$dev")
     if [ -n "$other_name" ]; then
         other_dev=$(readlink -f -- "$other_name" 2>/dev/null || true)
         [ "$other_dev" != "$dev" ] || die "$name is named as data disk and as backup disk"
@@ -1196,7 +1251,6 @@ set_up() {
     if [ -n "$out" ]; then mapfile -t sigs < <(awk '!seen[$0]++' <<<"$out"); fi
     # A force is used once per device, whatever path names it (S7); a path
     # recorded by an older release counts as well.
-    ident=$(identity_of "$dev")
     if grep -Fqx -e "$ident" -e "$name" -- "$records/forced" 2>/dev/null; then forced_before=1; fi
     action=$(setup_action "$label" "$type" "$found" "$kept_by" "$force" "$forced_before" "$keyed" ${sigs[@]+"${sigs[@]}"})
     case $action in
@@ -1234,6 +1288,10 @@ set_up() {
                 die "$name ($dev) is not formatted: two different keys are supplied for the $role disk ($(key_origin "${supplied[0]}") and $(key_origin "${supplied[1]}"))" \
                     "supply one key, then run: systemctl restart kamerplanter.target"
             fi
+            # The disk stays locked from the last check of its identity until
+            # it is formatted, and is checked again before each write.
+            lock_disk "$dev"
+            same_disk "$dev" "$devno" "$ident" named
             if [ "$action" = wipe ]; then
                 # Recorded before the wipe, so a crash cannot make the force
                 # apply a second time.
@@ -1242,6 +1300,7 @@ set_up() {
                 # Partitions first, the device itself last.
                 local d
                 while IFS= read -r d; do
+                    same_disk "$dev" "$devno" "$ident"
                     wipefs --all --quiet -- "$d" || die "the signatures on $d could not be removed"
                 done < <(tree "$dev" | tac)
                 log_event wiped "removed ${sigs[*]} from $name ($dev), as the naming forced"
@@ -1250,22 +1309,28 @@ set_up() {
                 # E14: the container comes first; nothing is written to the
                 # disk outside it.
                 encryption=luks2
+                same_disk "$dev" "$devno" "$ident"
                 cryptsetup luksFormat --batch-mode --type luks2 --label "$label" \
                     --cipher "$luks_cipher" --key-size "$luks_key_bits" \
                     --key-file "${supplied[0]}" ${luks_options[@]+"${luks_options[@]}"} "$dev" ||
                     die "encrypting $name ($dev) as $label failed"
+                unlock_disk
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
                 probe "$dev"
                 uuid=$fs_uuid
                 [ "$fs_type" = crypto_LUKS ] && [ "$fs_label" = "$label" ] && [ -n "$uuid" ] ||
                     die "$name ($dev) does not carry a LUKS2 container labelled $label after encrypting it"
                 open_disk "$dev" "$uuid"
+                # The container just opened lies on the disk selected.
+                same_disk "$dev" "$devno" "$ident"
                 mkfs.ext4 -q -F -L "$label" "$mapper" || die "formatting inside $name ($dev) as $label failed"
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
                 probe "$mapper"
                 [ "$fs_label" = "$label" ] || die "the container on $name ($dev) does not hold $label after formatting"
             else
+                same_disk "$dev" "$devno" "$ident"
                 mkfs.ext4 -q -F -L "$label" "$dev" || die "formatting $name ($dev) as $label failed"
+                unlock_disk
                 udevadm settle --timeout="$wait_seconds" >/dev/null 2>&1 || true
                 probe "$dev"
                 uuid=$fs_uuid
