@@ -118,7 +118,7 @@ Jeder Eintrag unter `settings:` wird zu einer Zeile `KEY=VALUE`. Eine Zahl oder 
 
 Statt der Map oder zusätzlich kann `write_files` die Datei `/var/lib/kamerplanter/provisioning/provisioning.env` im Format [deiner eigenen Datei](configuration.md) schreiben. Für einen Schlüssel, den beide setzen, gewinnt die Map. Keine von beiden schreibt je `/etc/kamerplanter/kamerplanter.env`.
 
-`write_files` läuft einmal je Instanz, beim ersten Boot mit einer neuen `instance-id`. Ein Eintrag mit `defer: true` gilt erst ab dem nächsten Boot.
+`write_files` läuft einmal je Instanz, beim ersten Boot mit einer neuen `instance-id`. Ein Eintrag mit `defer: true` gilt erst ab dem nächsten Boot. Ein Boot, bei dem die Quelle nicht antwortet, etwa weil eine Seed-URL nicht erreichbar ist, schreibt deine Dateien nicht erneut, und auch der Boot, bei dem sie wieder antwortet, tut es nicht: cloud-init merkt sich, welche Instanzen es eingerichtet hat, sodass deine Änderungen an `provisioning.env` bleiben, ebenso der Hostname aus den Provisionierungsdaten.
 
 ## Lebenszyklus der Einstellungen { #lifecycle-of-the-settings }
 

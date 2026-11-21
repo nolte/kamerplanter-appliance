@@ -747,12 +747,25 @@ late_evidence() {
 # A seed URL that stops answering after the first boot (#33). The next boot
 # finds no source, so cloud-init falls back to the datasource None, whose
 # instance id differs, and sets up a new instance; once the URL answers
-# again, it sets up the first instance anew. The SSH host keys of the first
-# boot stay through both. Waits only for SSH and cloud-init.
+# again, it returns to the first instance. The SSH host keys of the first
+# boot stay through both. So do the provisioned hostname and a
+# provisioning.env that write_files wrote on the first boot and that was
+# then edited in place (#67): cloud-init records per instance which
+# once-per-instance steps ran, in /var/lib/cloud/instances/<id>/sem/, which
+# the scrub keeps, so on the return it does not run write_files again, and on
+# the fallback the datasource None has nothing to write. The hostname it sets
+# on every boot with a source; the step shows it is the provisioned one.
 run_12() {
     local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off VM_MONITOR=10046
-    local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs
-    nocloud_seed "$seed" kp-run12 run12 </dev/null
+    local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs edited written
+    local prov=/var/lib/kamerplanter/provisioning/provisioning.env sem=/var/lib/cloud/instances/run12/sem/config_write_files
+    nocloud_seed "$seed" kp-run12 run12 <<EOF
+write_files:
+  - path: $prov
+    permissions: '0600'
+    content: |
+      REGISTRATION_MODE=invite_only
+EOF
     python3 -m http.server 8098 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
     server=$!
     new_overlay "$overlay"
@@ -777,6 +790,22 @@ run_12() {
         record run12-up FAIL - "seed URL: web UI and API did not answer within ${FIRST_BOOT_TIMEOUT}s"
         kill "$server"; stop_vm; return
     fi
+    # Edited in place, as the documentation allows; a comment, so the
+    # configuration check reads the same values.
+    if ! expect_rec run12-written "REGISTRATION_MODE=invite_only|yes|kp-run12" \
+        "$(guest cat "$prov")|$(guest "[ -e $sem ] && echo yes")|$(guest hostnamectl hostname)" \
+        "seed URL: write_files wrote provisioning.env once for instance run12, hostname from the provisioning data"; then
+        diagnose run12; kill "$server"; stop_vm; return
+    fi
+    if ! guest "echo '# edited in place (#67)' >>$prov && grep -qxF '# edited in place (#67)' $prov"; then
+        record run12-written FAIL - "seed URL: provisioning.env could not be edited in place"
+        diagnose run12; kill "$server"; stop_vm; return
+    fi
+    edited=$(guest sha256sum "$prov" | cut -d' ' -f1) written=$(guest stat -c %Y "$sem")
+    if [ -z "$edited" ] || [ -z "$written" ]; then
+        record run12-written FAIL - "seed URL: provisioning.env or the record of write_files could not be read after the edit"
+        diagnose run12; kill "$server"; stop_vm; return
+    fi
 
     kill "$server"; wait "$server" 2>/dev/null
     if ! secs=$(reboot_to_ssh) || ! scrubbed; then
@@ -789,6 +818,9 @@ run_12() {
         "seed URL down: cloud-init fell back to the datasource None, a new instance" || diagnose run12-fallback
     expect_rec run12-fallback-keys "$keys" "$(host_keys)" \
         "seed URL down: the SSH host keys of the first boot stay"
+    expect_rec run12-fallback-kept "$edited|kp-run12" \
+        "$(guest sha256sum "$prov" | cut -d' ' -f1)|$(guest hostnamectl hostname)" \
+        "seed URL down: provisioning.env stays as edited, the hostname as provisioned" || diagnose run12-fallback
     if ! wait_up "$REBOOT_TIMEOUT" >/dev/null; then
         diagnose run12-fallback-up
         record run12-fallback-up FAIL - "seed URL down: web UI and API did not answer within ${REBOOT_TIMEOUT}s"
@@ -800,9 +832,13 @@ run_12() {
     if secs=$(reboot_to_ssh); then
         record run12-back PASS "${secs}s" "reboot with the seed URL answering again"
         expect_rec run12-back-instance run12 "$(instance_id)" \
-            "seed URL back: cloud-init set up instance run12 again" || diagnose run12-back
+            "seed URL back: cloud-init returned to instance run12" || diagnose run12-back
         expect_rec run12-back-keys "$keys" "$(host_keys)" \
             "seed URL back: the SSH host keys of the first boot stay"
+        expect_rec run12-back-kept "$edited|$written|kp-run12" \
+            "$(guest sha256sum "$prov" | cut -d' ' -f1)|$(guest stat -c %Y "$sem")|$(guest hostnamectl hostname)" \
+            "seed URL back: write_files did not run again, provisioning.env stays as edited, the hostname as provisioned" ||
+            diagnose run12-back
     else
         diagnose run12-back
         record run12-back FAIL - "seed URL back: no SSH after the reboot"
