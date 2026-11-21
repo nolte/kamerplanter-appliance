@@ -568,7 +568,7 @@ $(key Mount)(.*,)?[[:space:]]*(source|src)=${host}(,|[[:space:]]*$)
 $(key Device)[[:space:]]*${host}[[:space:]]*$
 $(key '(Volume|Mount|Device)').*(podman|docker)\.sock
 $(key '(Volume|Mount|Device)').*(//|/\.\.?([/:,]|[[:space:]]*$))
-$(key '(PodmanArgs|GlobalArgs|Volume|Mount|Device)').*\\\$
+$(key '(PodmanArgs|GlobalArgs|AddCapability|Volume|Mount|Device)').*\\\$
 $(key '(ContainersConfModule|Rootfs)')"
 }
 expect "host namespace: no unit is privileged, joins a host namespace, adds such a capability or mounts the host's /proc, /run, /etc or /" none \
