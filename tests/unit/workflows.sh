@@ -53,7 +53,7 @@ else:
 # vm-tests run on pull_request, vm-gate on pull_request_target.
 condition = str((automerge_doc["jobs"]["automerge"]).get("if", ""))
 for event in ("pull_request", "pull_request_target"):
-    if not condition or f"'{event}'" in condition:
+    if not condition or f"== '{event}'" in condition:
         print(f"ok automerge takes a workflow_run of a {event} event")
     else:
         print(f"FAIL automerge's condition drops a workflow_run of a {event} event")
