@@ -167,7 +167,7 @@ jobs:
             fi
           done
           ref=$(cat -- "kamerplanter-appliance-$TAG-system-image.txt")
-          [[ $ref =~ ^$IMAGE:$TAG@sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected system image reference '$ref'"; exit 1; }
+          [[ $ref =~ ^"$IMAGE:$TAG"@sha256:[0-9a-f]{64}$ ]] || { printf '::error::unexpected system image reference %q\n' "$ref"; exit 1; }
           "$verify" "$IMAGE@${ref##*@}"
           echo "The assets on $TAG verify against this workflow's signatures; reusing them."
 
@@ -393,7 +393,7 @@ jobs:
             exit 0
           fi
           ref=$(gh release download "$TAG" --pattern "kamerplanter-appliance-$TAG-system-image.txt" --output -)
-          [[ $ref =~ ^$IMAGE:$TAG@sha256:[0-9a-f]{64}$ ]] || { echo "::error::unexpected system image reference '$ref'"; exit 1; }
+          [[ $ref =~ ^"$IMAGE:$TAG"@sha256:[0-9a-f]{64}$ ]] || { printf '::error::unexpected system image reference %q\n' "$ref"; exit 1; }
           digest=${ref##*@}
           skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
           # Signatures are stored per digest, so the channel tag carries them too.
