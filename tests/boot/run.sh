@@ -753,8 +753,10 @@ late_evidence() {
 # then edited in place (#67): cloud-init records per instance which
 # once-per-instance steps ran, in /var/lib/cloud/instances/<id>/sem/, which
 # the scrub keeps, so on the return it does not run write_files again, and on
-# the fallback the datasource None has nothing to write. The hostname it sets
-# on every boot with a source; the step shows it is the provisioned one.
+# the fallback the datasource None has nothing to write. The hostname it
+# checks on every boot that a source answers on and sets it only when it
+# differs from the one recorded in data/set-hostname; the steps show it is
+# the provisioned one, not that it was left untouched.
 run_12() {
     local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off VM_MONITOR=10046
     local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs edited written
@@ -798,12 +800,12 @@ EOF
         diagnose run12; kill "$server"; stop_vm; return
     fi
     if ! guest "echo '# edited in place (#67)' >>$prov && grep -qxF '# edited in place (#67)' $prov"; then
-        record run12-written FAIL - "seed URL: provisioning.env could not be edited in place"
+        record run12-edited FAIL - "seed URL: provisioning.env could not be edited in place"
         diagnose run12; kill "$server"; stop_vm; return
     fi
     edited=$(guest sha256sum "$prov" | cut -d' ' -f1) written=$(guest stat -c %Y "$sem")
     if [ -z "$edited" ] || [ -z "$written" ]; then
-        record run12-written FAIL - "seed URL: provisioning.env or the record of write_files could not be read after the edit"
+        record run12-edited FAIL - "seed URL: provisioning.env or the record of write_files could not be read after the edit"
         diagnose run12; kill "$server"; stop_vm; return
     fi
 
