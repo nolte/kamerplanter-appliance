@@ -393,6 +393,30 @@ expect "same disk: a naming that leads elsewhere stops the start before the writ
     "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: it leads to /dev/sdc now, not to /dev/sdb; nothing is written to it" \
     "$(same_disk_with /dev/sdc 8:16 serial:A 5:100 named)"
 expect "same disk: after the first write the naming is not looked at again" written "$(same_disk_with /dev/sdc 8:16 serial:A 5:100)"
+expect "same disk: nothing recorded to compare with stops the start" \
+    "die: /dev/disk/by-id/usb-a (/dev/sdb) cannot be identified: it had no device number or node when it was selected; nothing is written to it" \
+    "$(
+        (
+            name=/dev/disk/by-id/usb-a
+            unset disk_lock
+            die() { echo "die: $1"; exit 1; }
+            same_disk /dev/sdb 8:16 serial:A ''
+            echo written
+        )
+    )"
+expect "same disk: the locked whole disk replaced stops the start" \
+    "die: /dev/disk/by-id/usb-a (/dev/sdb1) is not formatted, as it is no longer the disk selected: /dev/sdb, which is locked, is another device node now: a disk replaced it; nothing is written to it" \
+    "$(
+        (
+            name=/dev/disk/by-id/usb-a disk_lock=9 disk_lock_whole=/dev/sdb disk_lock_node=5:100
+            lsblk_field() { printf 8:17; }
+            identity_of() { printf serial:A:part1; }
+            device_node() { if [ "$1" = /dev/sdb ]; then printf 5:200; else printf 5:101; fi; }
+            die() { echo "die: $1"; exit 1; }
+            same_disk /dev/sdb1 8:17 serial:A:part1 5:101
+            echo written
+        )
+    )"
 lockee=$work/disk.img
 : >"$lockee"
 locked_by_other() { if flock -n -x "$lockee" true; then echo free; else echo locked; fi; }
@@ -415,6 +439,18 @@ expect "lock: held by another program, the start stops without writing" \
         lsblk_field() { :; }
         die() { echo "die: $1"; exit 1; }
         lock_disk "$lockee"
+        echo written
+    )
+)"
+
+expect "lock: a partition whose disk cannot be found stops the start" \
+    "die: /dev/sdb1, holding /dev/disk/by-id/usb-a, is a partition whose disk cannot be found to lock it; it is not formatted" "$(
+    (
+        name=/dev/disk/by-id/usb-a
+        lsblk_field() { if [ "$2" = TYPE ]; then printf part; fi; }
+        kname() { printf sdb1; }
+        die() { echo "die: $1"; exit 1; }
+        lock_disk /dev/sdb1
         echo written
     )
 )"

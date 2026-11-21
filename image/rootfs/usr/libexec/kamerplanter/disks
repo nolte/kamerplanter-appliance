@@ -813,9 +813,13 @@ device_node() { stat -Lc %d:%i -- "$1" 2>/dev/null || true; }
 # another device number, identity or node), when the node locked is gone,
 # or, with named, when the naming ($name) no longer leads to DEV. The naming
 # is checked before the first write only: a by-uuid naming goes with what
-# is wiped.
+# is wiped. Without a recorded DEVNO or NODE nothing can be compared: that
+# fails the unit too.
 same_disk() {
     local why now=$1
+    [ -n "$2" ] && [ -n "$4" ] ||
+        die "$name ($1) cannot be identified: it had no device number or node when it was selected; nothing is written to it" \
+            "check which disk is attached and named, then run: systemctl restart kamerplanter.target"
     if [ "${5-}" = named ]; then now=$(readlink -e -- "$name" 2>/dev/null || true); fi
     why=$(identity_problem "$1" "$2" "$3" "$now" "$(lsblk_field "$1" MAJ:MIN)" "$(identity_of "$1")")
     if [ -z "$why" ] && [ "$(device_node "$1")" != "$4" ]; then
@@ -834,12 +838,17 @@ same_disk() {
 # Block Device Access"): nothing that honours it probes or writes the disk
 # while it is wiped and formatted. Waits wait_seconds for another holder.
 # Sets disk_lock (the descriptor), disk_lock_whole and disk_lock_node (what
-# is locked, for same_disk).
+# is locked, for same_disk). A partition whose disk cannot be found fails
+# the unit: a lock on the partition alone is one udev does not honour.
 # unlock_disk lets go of it, before udev is waited for; exiting does too.
 lock_disk() {
     local whole=$1 parent
     parent=$(lsblk_field "$1" PKNAME)
-    if [ -n "$parent" ] && [ -b "/dev/$parent" ]; then whole=/dev/$parent; fi
+    if [ -n "$parent" ] && [ -b "/dev/$parent" ]; then
+        whole=/dev/$parent
+    elif [ "$(lsblk_field "$1" TYPE)" = part ] || [ -e "/sys/class/block/$(kname "$1")/partition" ]; then
+        die "$1, holding $name, is a partition whose disk cannot be found to lock it; it is not formatted"
+    fi
     { exec {disk_lock}<"$whole"; } 2>/dev/null ||
         die "$whole, holding $name, cannot be opened to lock it; it is not formatted"
     disk_lock_whole=$whole
@@ -1214,7 +1223,7 @@ find_and_mount() {
 
 # A named disk that is not set up yet: adopt, format, or refuse it.
 set_up() {
-    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident devno devnode
+    local dev other_dev why kept_by action out sigs=() forced_before=0 deadline held ident devno devnode now
     [ -z "$conflict" ] || die "$conflict" "name the $role disk once, then run: systemctl restart kamerplanter.target"
     disk_path_ok "$name" ||
         die "$key is not a /dev/disk/by-id/ or /dev/disk/by-uuid/ path: $(shown "$name")" \
@@ -1315,7 +1324,10 @@ set_up() {
             lock_disk "$dev"
             same_disk "$dev" "$devno" "$ident" "$devnode" named
             if why=$(in_use "$dev"); then die "$name ($dev) is not formatted: $why"; fi
-            [ "$(signatures "$dev")" = "$out" ] ||
+            now=$(signatures "$dev") ||
+                die "$name ($dev) is not formatted: what it holds cannot be read again under the lock" \
+                    "check the disk and its connection, then run: systemctl restart kamerplanter.target"
+            [ "$now" = "$out" ] ||
                 die "$name ($dev) is not formatted: what it holds changed since it was looked at" \
                     "check what the disk holds, then run: systemctl restart kamerplanter.target"
             if [ "$action" = wipe ]; then
