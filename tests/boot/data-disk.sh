@@ -28,6 +28,7 @@
 #   downgrade  an older system on the disk: refused, then allowed (d6)
 #   luks     an encrypted data disk with its key from a credential (d7)
 #   backup   a backup disk next to the data disk (d8)
+#   retire   retiring that backup disk, then a reboot without it (d9)
 #
 # shellcheck disable=SC2016,SC2329
 # SC2016: guest commands are single-quoted on purpose; they expand in the guest.
@@ -579,10 +580,71 @@ step_backup() {
     stop_vm
 }
 
+# Extra: retiring the backup disk of d8 while the appliance runs (#59).
+# Refused while the credential still names it; without the credential, done
+# with the services up; after a reboot with the disk still attached, it is not
+# set up again, and the update tool's guard and status run without it.
+step_retire() {
+    [ -f "$WORK/d3.qcow2" ] && [ -f "$(disk_file backup)" ] || { record d9 SKIP - "needs the backup disk of d8"; return 1; }
+    reset_extras
+    with_disk data
+    with_disk backup
+    VM_CREDENTIALS+=("kamerplanter.backup-disk $(by_id backup)")
+    start_vm d9-named bios virtio-scsi virtio off "$WORK/d3.qcow2" || { record d9 FAIL - "qemu did not start"; return 1; }
+    local secs out status problems=() rec=/var/lib/kamerplanter/disks/backup.env backups=/var/lib/kamerplanter/update/backups
+    secs=$(boot_up d9 "$REBOOT_TIMEOUT") || return 1
+    out=$(guest '/usr/libexec/kamerplanter/disks retire backup 2>&1; echo "rc=$?"')
+    echo "$out" >"$OUT/d9.refused.txt"
+    { grep -q '^rc=1$' <<<"$out" && grep -qF 'still named by the credential kamerplanter.backup-disk' <<<"$out"; } ||
+        problems+=("not refused while the credential names the disk: ${out//$'\n'/; }")
+    guest "test -e $rec && mountpoint -q /var/mnt/kamerplanter-backup" || problems+=("the refused retire changed the disk")
+    stop_vm
+    reset_extras
+    with_disk data
+    with_disk backup
+    start_vm d9 bios virtio-scsi virtio off "$WORK/d3.qcow2" || { record d9 FAIL - "qemu did not start"; return 1; }
+    secs=$(boot_up d9 "$REBOOT_TIMEOUT") || return 1
+    # Set up by its record alone; named in the naming file too, and with a
+    # record of a pre-update backup on it, so that retiring has both to delete.
+    guest "test -e $rec && mountpoint -q /var/mnt/kamerplanter-backup" || problems+=("the backup disk is not set up without the credential")
+    guest "/usr/libexec/kamerplanter/disks name backup $(by_id backup) >/dev/null && install -d -m 0700 $backups &&
+        printf 'LOCATION=backup-disk\n' >$backups/retire-test" || problems+=("the naming and the backup record could not be written")
+    out=$(guest '/usr/libexec/kamerplanter/disks retire backup 2>&1; echo "rc=$?"')
+    echo "$out" >"$OUT/d9.retire.txt"
+    grep -q '^rc=0$' <<<"$out" || problems+=("retire failed: ${out//$'\n'/; }")
+    guest '! mountpoint -q /var/mnt/kamerplanter-backup && ! test -b /dev/mapper/kamerplanter-backup' || problems+=("the disk is still mounted")
+    guest "! test -e $rec && ! grep -q '^BACKUP_DISK' /var/lib/kamerplanter/disks/naming.env && ! test -e $backups/retire-test" ||
+        problems+=("the record, the naming or the backup record is left")
+    status=$(guest /usr/libexec/kamerplanter/disks status)
+    grep -qx 'backup disk: not set up' <<<"$status" || problems+=("status after retire: ${status//$'\n'/; }")
+    wait_up 120 >/dev/null || problems+=("the services did not keep running")
+    if [ ${#problems[@]} -gt 0 ]; then
+        fail d9 "$(IFS=';'; echo "${problems[*]}")"
+        return 1
+    fi
+    record d9 PASS "${secs}s" "retire refused while the credential names the backup disk; without it, disk unmounted and forgotten (naming, record, backup record) while the services ran"
+    if ! secs=$(reboot_guest); then
+        fail d9-reboot "the appliance did not come up again after the retire"
+        return 1
+    fi
+    guest 'systemctl is-active -q kamerplanter-backup-disk.service && systemctl is-active -q kamerplanter-update-guard.service' || problems+=("the backup disk service or the guard is not active")
+    guest "journalctl -b -u kamerplanter-backup-disk.service -o cat | grep -qF 'no backup disk is set up or named'" ||
+        problems+=("the backup disk service did not start without a disk")
+    guest "! mountpoint -q /var/mnt/kamerplanter-backup && ! test -e $rec && blkid -L kp-backup >/dev/null" ||
+        problems+=("the attached disk was set up again, or its file system is gone")
+    guest 'kamerplanter-update status >/dev/null' || problems+=("kamerplanter-update status failed")
+    if [ ${#problems[@]} -gt 0 ]; then
+        fail d9-reboot "$(IFS=';'; echo "${problems[*]}")"
+        return 1
+    fi
+    record d9-reboot PASS "${secs}s" "after a reboot with the retired disk attached: not set up again, guard active, kamerplanter-update status runs"
+    stop_vm
+}
+
 kill_vm 2>/dev/null
 : >"$RESULTS"
 steps=("$@")
-[ ${#steps[@]} -gt 0 ] || steps=(build none move data replace missing downgrade luks backup)
+[ ${#steps[@]} -gt 0 ] || steps=(build none move data replace missing downgrade luks backup retire)
 for step in "${steps[@]}"; do
     # Only move continues on the VM a step before it left running.
     if [ "$step" != move ] && vm_alive; then stop_vm; fi

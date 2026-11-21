@@ -51,7 +51,7 @@ Name it in one of these ways:
     /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
     ```
 
-    This writes `/var/lib/kamerplanter/disks/naming.env` (root, 0600), which you may also edit by hand as `DATA_DISK=…` and `BACKUP_DISK=…`. `disks name backup none` removes a naming.
+    This writes `/var/lib/kamerplanter/disks/naming.env` (root, 0600), which you may also edit by hand as `DATA_DISK=…` and `BACKUP_DISK=…`. `disks name backup none` removes a naming; a backup disk set up already stays in use until you [retire it](#retiring-a-disk).
 
 - **In your file** `/etc/kamerplanter/kamerplanter.env` as `DATA_DISK=…` or `BACKUP_DISK=…`, but only while no data disk is set up. Once one is, that file lies on the data disk, and anyone who has had the disk in their hands could have changed it. So the appliance then ignores `DATA_DISK`, `BACKUP_DISK`, and their `…_FORCE` in that file and says so in `systemctl status kamerplanter-data-disk`; name the backup disk with `disks name` instead. When the appliance copies your file onto the data disk, it comments these lines out there, and the configuration check doesn't check them in the file on the disk, so they never keep the services stopped.
 
@@ -227,7 +227,20 @@ A binary key goes in base64 as `io.systemd.credential.binary:kamerplanter.data-d
 
 Deleted files may remain readable on the medium, also the copy on the system disk after a move. Wipe or destroy a disk before it leaves your hands.
 
-- **Backup disk:** remove the naming (`/usr/libexec/kamerplanter/disks name backup none`, or the credential), delete `/var/lib/kamerplanter/disks/backup.env`, and reboot. The stored key of the disk is deleted then. Backups on that disk can no longer be restored.
+- **Backup disk:** run, as root:
+
+    ```bash
+    /usr/libexec/kamerplanter/disks retire backup
+    ```
+
+    This unmounts the backup disk (and closes it, when it's encrypted) while the services keep running, then deletes its naming in `/var/lib/kamerplanter/disks/naming.env`, its record `/var/lib/kamerplanter/disks/backup.env`, its stored key, and the update tool's records of the pre-update backups on it. The next pre-update backup goes to the data disk, else to the system disk. The disk itself is left as it is; unplug it, or wipe it before it leaves your hands. Backups on that disk can no longer be restored.
+
+    The command changes nothing and says why when:
+
+    - a credential `kamerplanter.backup-disk` or the setting `BACKUP_DISK` in your file still names the disk: remove that naming first, else the next start would set the disk up again;
+    - an update isn't decided yet (`kamerplanter-update status`), since its return would restore the backup taken before it, or another update action, the backup before an update, or its health check is running: try again once it's done;
+    - the disk can't be unmounted because something uses it.
+
 - **Data disk:** this release has no way to move the data back to the system disk or onto another data disk; while a data disk is set up, a different naming is ignored. Don't delete `/var/lib/kamerplanter/disks/data.env` while your data is on the disk: without it, the appliance no longer uses that disk.
 
 ## Residual risks

@@ -51,7 +51,7 @@ Benenne sie auf einem dieser Wege:
     /usr/libexec/kamerplanter/disks name backup /dev/disk/by-id/ata-Example_SSD_ABC123
     ```
 
-    Das schreibt `/var/lib/kamerplanter/disks/naming.env` (root, 0600), die du auch von Hand als `DATA_DISK=…` und `BACKUP_DISK=…` bearbeiten kannst. `disks name backup none` entfernt eine Benennung.
+    Das schreibt `/var/lib/kamerplanter/disks/naming.env` (root, 0600), die du auch von Hand als `DATA_DISK=…` und `BACKUP_DISK=…` bearbeiten kannst. `disks name backup none` entfernt eine Benennung; ein schon eingerichteter Sicherungs-Datenträger bleibt in Gebrauch, bis du [ihn außer Dienst stellst](#retiring-a-disk).
 
 - **In deiner Datei** `/etc/kamerplanter/kamerplanter.env` als `DATA_DISK=…` oder `BACKUP_DISK=…`, aber nur, solange kein Datenträger eingerichtet ist. Ist einer eingerichtet, liegt diese Datei auf dem Datenträger, und wer die Platte in den Händen hatte, kann sie geändert haben. Deshalb ignoriert die Appliance dann `DATA_DISK`, `BACKUP_DISK` und ihre `…_FORCE` in dieser Datei und sagt das in `systemctl status kamerplanter-data-disk`; benenne den Sicherungs-Datenträger dann mit `disks name`. Kopiert die Appliance deine Datei auf den Datenträger, kommentiert sie diese Zeilen dort aus, und die Konfigurationsprüfung prüft sie in der Datei auf dem Datenträger nicht, sodass sie die Dienste nie angehalten lassen.
 
@@ -227,7 +227,20 @@ Ein binärer Schlüssel geht base64-kodiert als `io.systemd.credential.binary:ka
 
 Gelöschte Dateien können auf dem Medium lesbar bleiben, auch die Kopie auf der Systemplatte nach einem Umzug. Lösche eine Platte sicher oder zerstöre sie, bevor sie aus der Hand gegeben wird.
 
-- **Sicherungs-Datenträger:** Entferne die Benennung (`/usr/libexec/kamerplanter/disks name backup none` oder das Credential), lösche `/var/lib/kamerplanter/disks/backup.env` und starte neu. Der gespeicherte Schlüssel der Platte wird dann gelöscht. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
+- **Sicherungs-Datenträger:** Führe als root aus:
+
+    ```bash
+    /usr/libexec/kamerplanter/disks retire backup
+    ```
+
+    Das hängt den Sicherungs-Datenträger aus (und schließt ihn, wenn er verschlüsselt ist), während die Dienste weiterlaufen, und löscht dann seine Benennung in `/var/lib/kamerplanter/disks/naming.env`, seinen Eintrag `/var/lib/kamerplanter/disks/backup.env`, seinen gespeicherten Schlüssel und die Einträge des Update-Werkzeugs zu den Sicherungen vor einem Update, die auf ihm liegen. Die nächste Sicherung vor einem Update geht auf den Datenträger, sonst auf die Systemplatte. Die Platte selbst bleibt, wie sie ist; zieh sie ab oder lösche sie sicher, bevor sie aus der Hand gegeben wird. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
+
+    Der Befehl ändert nichts und sagt, warum, wenn:
+
+    - ein Credential `kamerplanter.backup-disk` oder die Einstellung `BACKUP_DISK` in deiner Datei die Platte noch benennt: Entferne diese Benennung zuerst, sonst richtet der nächste Start die Platte wieder ein;
+    - ein Update noch nicht entschieden ist (`kamerplanter-update status`), da seine Rückkehr die Sicherung von davor wiederherstellen würde, oder eine andere Update-Aktion, die Sicherung vor einem Update oder ihre Gesundheitsprüfung läuft: Versuche es wieder, wenn sie fertig ist;
+    - die Platte sich nicht aushängen lässt, weil etwas sie verwendet.
+
 - **Datenträger:** Dieses Release kann die Daten weder auf die Systemplatte zurück noch auf einen anderen Datenträger umziehen; solange ein Datenträger eingerichtet ist, wird eine andere Benennung übergangen. Lösche `/var/lib/kamerplanter/disks/data.env` nicht, solange deine Daten auf der Platte liegen: Ohne diese Datei verwendet die Appliance die Platte nicht mehr.
 
 ## Verbleibende Risiken { #residual-risks }

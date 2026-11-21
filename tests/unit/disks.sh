@@ -749,6 +749,74 @@ expect "move: copied and recorded as moved, then placed and checked; the copied 
 expect "move: the record cannot say moved: the start fails, nothing is placed" "|1|" "$(start_move record-fails)"
 expect "move: abandoned for lack of space: the services start, nothing is placed" "failed||0|" "$(start_move no-space)"
 
+# Retiring the backup disk: refused with nothing changed while an update is
+# not decided or something other than the naming file names the disk; else
+# the naming of the backup disk, the update tool's records of the backups on
+# it, its record and its key go, and the data disk's naming and records stay.
+retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|update records|keys|last line of the output
+    (
+        sb=$(mktemp -d "$work/retire.XXXXXX")
+        records=$sb/disks naming_file=$sb/disks/naming.env user=$sb/user.env keys=$sb/disks/keys lock=$sb/lock
+        update_state=$sb/update update_backups=$sb/update/backups
+        credstores=("$sb/credstore") credstores_encrypted=("$sb/credstore.encrypted") retire_credstores=()
+        system_credentials=$sb/system-credentials
+        mkdir -p "$records/keys" "$update_backups" "$sb/credstore" "$sb/system-credentials"
+        printf 'DATA_DISK=/dev/disk/by-id/virtio-a\nBACKUP_DISK=/dev/disk/by-id/virtio-b\nBACKUP_DISK_FORCE=1\n' >"$naming_file"
+        touch "$records/data.env" "$records/backup.env" "$records/keys/backup.key" "$records/keys/data.key"
+        printf 'LOCATION=backup-disk\n' >"$update_backups/d1"
+        printf 'LOCATION=data-disk\n' >"$update_backups/d2"
+        printf 'UPDATE_WINDOW=04:00\n' >"$user"
+        # cmd_retire sources /usr/lib/kamerplanter/env.sh, sourced here already.
+        .() { :; }
+        id() { echo 0; }
+        owner_problem() { :; }
+        mountpoint() { return 1; }
+        clear_report() { :; }
+        log_event() { :; }
+        systemctl() { echo active; }
+        eval "real_role_vars() $(declare -f role_vars | tail -n +2)"
+        role_vars() { real_role_vars "$@" && mapper=$sb/no-mapper; }
+        case $1 in
+            pending) echo 'a b checking' >"$update_state/pending" ;;
+            credential) echo /dev/disk/by-id/virtio-b >"$system_credentials/kamerplanter.backup-disk" ;;
+            stored-credential) echo /dev/disk/by-id/virtio-b >"$sb/credstore/kamerplanter.backup-disk" ;;
+            user-file) rm "$records/data.env"; echo BACKUP_DISK=/dev/disk/by-id/virtio-b >"$user" ;;
+            twice) (cmd_retire backup) >/dev/null 2>&1 ;;
+            guard) systemctl() { echo activating; } ;;
+        esac
+        out=$(cmd_retire "${2:-backup}" 2>&1)
+        rc=$?
+        out=${out//$sb/SB}
+        printf '%s|%s|%s|%s|%s|%s' "$rc" "$(grep -v '^#' "$naming_file" | paste -sd,)" \
+            "$(find "$records" -maxdepth 1 -name '*.env' ! -name naming.env -printf '%f\n' | sort | paste -sd,)" \
+            "$(find "$update_backups" -mindepth 1 -printf '%f\n' | sort | paste -sd,)" \
+            "$(find "$keys" -mindepth 1 -printf '%f\n' | sort | paste -sd,)" "${out##*$'\n'}"
+    )
+}
+expect "retire: the backup disk's naming, backup records, record and key go; the data disk's stay" \
+    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the data disk, else to the system disk (see: kamerplanter-update status)" \
+    "$(retire_with ok)"
+expect "retire: run again, there is nothing left to retire" \
+    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|no backup disk is set up or named; nothing to retire" \
+    "$(retire_with twice)"
+unchanged="DATA_DISK=/dev/disk/by-id/virtio-a,BACKUP_DISK=/dev/disk/by-id/virtio-b,BACKUP_DISK_FORCE=1|backup.env,data.env|d1,d2|backup.key,data.key"
+expect "retire: refused while an update is not decided, nothing changed" \
+    "1|$unchanged|an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" \
+    "$(retire_with pending)"
+expect "retire: refused while the guard runs, nothing changed" \
+    "1|$unchanged|kamerplanter-update-guard.service is running; retire the backup disk once it is done" \
+    "$(retire_with guard)"
+expect "retire: refused while a credential from the firmware names the disk, nothing changed" \
+    "1|$unchanged|the backup disk is still named by the credential kamerplanter.backup-disk in SB/system-credentials/kamerplanter.backup-disk, which would set it up again at the next start; remove that naming first; nothing is changed" \
+    "$(retire_with credential)"
+expect "retire: refused while a credential store names the disk, nothing changed" \
+    "1|$unchanged|the backup disk is still named by the credential kamerplanter.backup-disk in SB/credstore/kamerplanter.backup-disk, which would set it up again at the next start; remove that naming first; nothing is changed" \
+    "$(retire_with stored-credential)"
+expect "retire: refused while the user file on the system disk names the disk, nothing changed" \
+    "1|DATA_DISK=/dev/disk/by-id/virtio-a,BACKUP_DISK=/dev/disk/by-id/virtio-b,BACKUP_DISK_FORCE=1|backup.env|d1,d2|backup.key,data.key|the backup disk is still named by the setting BACKUP_DISK in SB/user.env, which would set it up again at the next start; remove that naming first; nothing is changed" \
+    "$(retire_with user-file)"
+expect "retire: the data disk is never retired" "2" "$(retire_with ok data | cut -d'|' -f1)"
+
 # The configuration check checks the disk naming of the user file only where
 # the disk service reads it: not on the data disk.
 # shellcheck source=tests/unit/lib/sandbox.sh

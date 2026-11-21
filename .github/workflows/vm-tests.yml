@@ -320,7 +320,8 @@ jobs:
   # tests/boot/data-disk.sh: every chain builds the release and its disk
   # (build) and takes the baseline of SELinux denials (none) itself; move
   # continues on the running VM of none; replace, missing, downgrade and backup
-  # need the data disk and the login of data. downgrade boots the development
+  # need the data disk and the login of data, and retire the backup disk of
+  # backup. downgrade boots the development
   # disk of the build job.
   data-disk:
     name: data-disk (${{ matrix.name }})
@@ -338,7 +339,7 @@ jobs:
             dev-disk: false
           - name: data to backup
             id: data
-            steps: build none data replace missing backup
+            steps: build none data replace missing backup retire
             dev-disk: false
           - name: downgrade
             id: downgrade

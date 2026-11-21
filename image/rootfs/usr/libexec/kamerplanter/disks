@@ -12,6 +12,9 @@
 #                        as root: name the disk of ROLE (data or backup) on
 #                        the system disk, optionally forcing its format once,
 #                        or remove that naming; takes effect at the next start
+#   disks retire backup  as root: stop using the backup disk now and forget
+#                        it: its naming, its record, its stored key, and the
+#                        records of the pre-update backups on it
 #
 # Run by the update tool (/usr/bin/kamerplanter-update), not by the user:
 #   disks move healthy | unhealthy REASON | missing REASON
@@ -81,7 +84,9 @@
 #   ROLE.env    the disk is set up: its label, file system, UUID and
 #               encryption (with cipher and key size). Only this record
 #               makes a disk "set up", so a missing disk is told apart from
-#               one that never was. Delete it only to retire the disk.
+#               one that never was. `disks retire backup` deletes the
+#               backup disk's; the data disk's is never to be deleted while
+#               the data is on that disk.
 #   keys/       the stored keys (ROLE.key) and the provisioned key files
 #   naming.env  DATA_DISK, BACKUP_DISK and their *_FORCE (see Naming)
 #   forced      the devices a forced format was used for, one per line
@@ -170,6 +175,16 @@ wait_seconds=30
 keys=$records/keys
 credstores=(/etc/credstore /run/credstore)
 credstores_encrypted=(/etc/credstore.encrypted /run/credstore.encrypted)
+# Where else ImportCredential= finds a credential that names a disk, and so
+# what `disks retire` cannot remove (retire_sources): the stores below
+# /usr/local (writable on this image), and the credentials systemd received
+# from the firmware, the hypervisor or the kernel command line.
+retire_credstores=(/usr/local/lib/credstore /usr/local/lib/credstore.encrypted)
+system_credentials=/run/credentials/@system
+# The update tool's state (/usr/bin/kamerplanter-update): its lock, the
+# pending update, and the records of the pre-update backups (backups/D).
+update_state=/var/lib/kamerplanter/update
+update_backups=$update_state/backups
 # The kernel command line, which must not carry a key: every user reads it.
 cmdline=/proc/cmdline
 # Disk naming on the system disk (see Naming); the keys read from it.
@@ -1387,7 +1402,7 @@ set_up() {
     if [ -n "$held" ]; then move_begin "$uuid"; fi
     {
         echo "# The $role disk of this appliance, set up by /usr/libexec/kamerplanter/disks."
-        echo "# Delete this file only to retire the disk."
+        echo "# Delete it only to retire the disk (the backup disk: disks retire backup)."
         echo "LABEL=$label"
         echo "TYPE=ext4"
         echo "UUID=$uuid"
@@ -2175,6 +2190,21 @@ cmd_status() {
     done
 }
 
+# write_naming: writes the naming file from cfg (loaded from it, then
+# changed), with the keys of naming_keys that are set; under the lock.
+write_naming() {
+    local k v
+    install -d -m 0700 "$records"
+    {
+        echo "# The disks of this appliance, named on the system disk by"
+        echo "# /usr/libexec/kamerplanter/disks name (or by hand, as root); see its comments."
+        for k in "${naming_keys[@]}"; do
+            v=$(get "$k")
+            if [ -n "$v" ]; then echo "$k=$v"; fi
+        done
+    } | replace "$naming_file"
+}
+
 # cmd_name ROLE PATH [force] | ROLE none: as root, names the disk of ROLE in
 # the naming file on the system disk (see Naming), with force to format it
 # once although it carries other signatures, or removes that naming; the
@@ -2185,7 +2215,7 @@ cmd_name() {
     role_vars "${1-}" || usage
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
-    local path=${2-} force=${3-} why k v
+    local path=${2-} force=${3-} why
     [ -n "$path" ] && { [ -z "$force" ] || [ "$force" = force ]; } && [ $# -le 3 ] || usage
     if [ "$path" = none ]; then
         [ -z "$force" ] || usage
@@ -2201,15 +2231,7 @@ cmd_name() {
     load "$naming_file"
     cfg[$key]=$path
     if [ -n "$force" ]; then cfg[${key}_FORCE]=1; else cfg[${key}_FORCE]=; fi
-    install -d -m 0700 "$records"
-    {
-        echo "# The disks of this appliance, named on the system disk by"
-        echo "# /usr/libexec/kamerplanter/disks name (or by hand, as root); see its comments."
-        for k in "${naming_keys[@]}"; do
-            v=$(get "$k")
-            if [ -n "$v" ]; then echo "$k=$v"; fi
-        done
-    } | replace "$naming_file"
+    write_naming
     if [ -n "$path" ]; then
         log_event named "$key=$path${force:+, forced once} in $naming_file"
     else
@@ -2218,7 +2240,120 @@ cmd_name() {
     echo "takes effect at the next boot, or with: systemctl restart $unit"
 }
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+# retire_sources: what names this role's disk besides the naming file, one
+# per line; `disks retire` cannot remove it, and the next start would set the
+# disk up again from it. That is a copy of the credential in a writable
+# credential store, plain or encrypted, or from the firmware or the hypervisor
+# (system_credentials), and the setting in the user file while that file may
+# name disks (user_file_trusted). Reads the naming state only; changes cfg.
+retire_sources() {
+    local f
+    for f in "${credstores[@]/%//$cred}" "${credstores_encrypted[@]/%//$cred}" \
+        "${retire_credstores[@]/%//$cred}" "$system_credentials/$cred"; do
+        if [ -e "$f" ] || [ -L "$f" ]; then echo "the credential $cred in $f"; fi
+    done
+    load "$user"
+    if user_file_trusted "$records/data.env" && [ -n "$(get "$key")" ]; then
+        echo "the setting $key in $user"
+    fi
+}
+
+# disk_backups: the pre-update backups the update tool records on the backup
+# disk (LOCATION=backup-disk in its records, update_backups), one name per
+# line. Once the disk is retired they can never be restored.
+disk_backups() {
+    local rec
+    for rec in "$update_backups"/*; do
+        [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+        if [ "$(record_field LOCATION "$rec")" = backup-disk ]; then echo "${rec##*/}"; fi
+    done
+}
+
+# cmd_retire backup: as root, retires the backup disk while the appliance
+# runs: unmounts and closes it, then deletes its naming in the naming file,
+# the update tool's records of the backups on it, its record and its stored
+# key, in that order, so that an interrupted run leaves a disk that is still
+# set up, and running it again completes it. The services keep running; the
+# next pre-update backup goes to the next location. Refused, with nothing
+# changed, while an update action runs or an update is not decided (its
+# return would restore the backup on the disk), and while something other
+# than the naming file names the disk (retire_sources). The disk itself is
+# left as it is. The data disk cannot be retired: its data is not moved off.
+cmd_retire() {
+    [ "$(id -u)" = 0 ] || { echo "disks retire must be run as root" >&2; exit 1; }
+    [ $# -eq 1 ] || usage
+    role_vars "$1" || usage
+    if [ "$role" != backup ]; then
+        echo "only the backup disk can be retired; the data on a data disk is not moved off it" >&2
+        exit 2
+    fi
+    # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
+    . /usr/lib/kamerplanter/env.sh
+    local why sources d targets
+    # The lock of the update actions (kamerplanter-update, update_lock) first,
+    # never waited for: no update action writes, restores or deletes a backup
+    # on the disk meanwhile.
+    install -d -m 0700 "$update_state"
+    exec 8>"$update_state/.lock"
+    flock -n 8 || { echo "an update action is running; retire the backup disk once it is done" >&2; exit 1; }
+    exec 9>"$lock"
+    flock -w 60 9 || { echo "the disk service is busy; try again once it is done" >&2; exit 1; }
+    # The guard writes the pre-update backup at the first boot of a new
+    # version without that lock, and the health check decides it.
+    local unit_name
+    for unit_name in kamerplanter-update-guard.service kamerplanter-update-health.service; do
+        if [ "$(systemctl show -P ActiveState "$unit_name" 2>/dev/null || true)" = activating ]; then
+            echo "$unit_name is running; retire the backup disk once it is done" >&2
+            exit 1
+        fi
+    done
+    if [ -s "$update_state/pending" ]; then
+        echo "an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" >&2
+        exit 1
+    fi
+    why=$(owner_problem "$naming_file" "the naming file")
+    if [ -n "$why" ]; then echo "$why; nothing is changed" >&2; exit 1; fi
+    sources=$(retire_sources)
+    if [ -n "$sources" ]; then
+        echo "the backup disk is still named by ${sources//$'\n'/, }, which would set it up again at the next start; remove that naming first; nothing is changed" >&2
+        exit 1
+    fi
+    load "$naming_file"
+    if [ ! -e "$record" ] && [ -z "$(get "$key")$(get "${key}_FORCE")" ] && [ ! -e "$key_store" ] &&
+        [ -z "$(disk_backups)" ]; then
+        echo "no backup disk is set up or named; nothing to retire"
+        return 0
+    fi
+    if mountpoint -q "$mnt" && ! umount "$mnt"; then
+        echo "$mnt could not be unmounted (see: fuser -vm $mnt); nothing is changed" >&2
+        exit 1
+    fi
+    if [ -b "$mapper" ]; then
+        targets=$(findmnt -rno TARGET -S "$mapper" 2>/dev/null || true)
+        if [ -n "$targets" ]; then
+            echo "$mapper is still mounted at ${targets//$'\n'/, }; nothing else is changed" >&2
+            exit 1
+        fi
+        cryptsetup close "$mapper_name" || { echo "$mapper could not be closed; nothing else is changed, run this again or reboot" >&2; exit 1; }
+    fi
+    if [ -e "$naming_file" ]; then
+        cfg[$key]='' cfg[${key}_FORCE]=''
+        write_naming
+    fi
+    while IFS= read -r d; do
+        rm -f -- "${update_backups:?}/${d:?}"
+        log_event backup-forgotten "the record of the pre-update backup $d on the disk; that backup can no longer be restored"
+    done < <(disk_backups)
+    if [ -d "$update_backups" ]; then sync "$update_backups"; fi
+    if [ -e "$record" ]; then rm -f -- "$record"; fi
+    sync "$records"
+    forget_key
+    clear_report
+    log_event retired "the $role disk is no longer used: its naming in $naming_file and its record $record are deleted; the disk itself is left as it is"
+    echo "the next pre-update backup goes to the data disk, else to the system disk (see: kamerplanter-update status)"
+}
+
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 main() {
     case ${1-} in
@@ -2229,6 +2364,7 @@ main() {
         cleanup) shift; cmd_cleanup "$@" ;;
         clean-underneath) cmd_clean_underneath ;;
         name) shift; cmd_name "$@" ;;
+        retire) shift; cmd_retire "$@" ;;
         *) usage ;;
     esac
 }
