@@ -58,9 +58,11 @@
 # (#76): when jq cannot run or fails on the combined cloud-config or on a
 # copy, so that the values in it are not known (without jq none are, and
 # nothing is scrubbed, as without Python's YAML module); and when there is
-# something to scrub and /var/lib/cloud, /run/cloud-init or /var/log is a
-# symbolic link, which is not entered, or one of cloud-init's logs is, which
-# is not rewritten through it. The next boot retries. The services
+# something to scrub and /run/cloud-init or /var/log is a symbolic link,
+# which is not entered, or one of cloud-init's logs is, which is not
+# rewritten through it; and whenever /var/lib/cloud or its instances/ is a
+# symbolic link, behind which copies could lie unread. The next boot retries.
+# A copy that cannot be deleted is named, and the unit fails. The services
 # do not wait for the scrub, and the update's health check does not look at
 # it: a failed scrub stops nothing.
 #
@@ -505,29 +507,40 @@ log_kind() {
 }
 
 # delete_copies: deletes the copies of the user-data, and prints how many.
+# Names a copy that cannot be deleted and fails: the copies are not
+# rewritten (scanned), so such a copy still holds the values.
 delete_copies() {
-    local args=() name f count=0
+    local args=() name f count=0 rc=0
     for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
     if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
         while IFS= read -r -d '' f; do
-            rm -f -- "$f"
-            count=$((count + 1))
+            if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+                count=$((count + 1))
+            else
+                echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
+                rc=1
+            fi
         done < <(find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0)
     fi
     if own_dir "$cloud_run"; then
         for name in "${run_copies[@]}"; do
             f=$cloud_run$name
             if [ -f "$f" ] && [ ! -L "$f" ]; then
-                rm -f -- "$f"
-                count=$((count + 1))
+                if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+                    count=$((count + 1))
+                else
+                    echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
+                    rc=1
+                fi
             fi
         done
     fi
     printf '%s' "$count"
+    return "$rc"
 }
 
 main() {
-    local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies=
+    local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies='' undeleted=''
     [ -z "$(config_copies | head -c1)" ] || copies=yes
     # Without the YAML module that cloud-init itself uses, every copy would
     # count as unreadable and the logs would go on every boot: fail instead.
@@ -556,8 +569,13 @@ main() {
     # that is one is not rewritten or deleted through it (logs): when there
     # is something to scrub, what lies behind it keeps the values, so the
     # copies stay too.
+    # Behind a link in place of /var/lib/cloud or its instances/ there can be
+    # copies whose values are not known here at all: kept and named always.
+    for d in "$cloud_lib" "${cloud_lib}instances"; do
+        if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the copies of the provisioning data in it are neither read nor deleted"); fi
+    done
     if [ "${#pats[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
-        for d in "$cloud_lib" "$cloud_run" "$cloud_log"; do
+        for d in "$cloud_run" "$cloud_log"; do
             if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the provisioned secrets in it are not scrubbed"); fi
         done
         if own_dir "$cloud_log" 2>/dev/null; then
@@ -625,12 +643,14 @@ main() {
     # replaced, keeps the copies, so that the next boot can learn the values
     # again, or find them unknown again, and retry; so do values that are not
     # known and places that are not scrubbed (unscrubbed).
-    if [ "${#left[@]}" -eq 0 ] && [ "${#unwritten[@]}" -eq 0 ] && [ "${#unscrubbed[@]}" -eq 0 ]; then deleted=$(delete_copies); else deleted=0; fi
+    if [ "${#left[@]}" -eq 0 ] && [ "${#unwritten[@]}" -eq 0 ] && [ "${#unscrubbed[@]}" -eq 0 ]; then deleted=$(delete_copies) || undeleted=yes; else deleted=0; fi
     echo "cloud-init's copies of the provisioning data deleted: $deleted; files with provisioned secrets replaced: $redacted"
     [ "$dropped" = 0 ] || echo "compressed logs with provisioned secrets deleted: $dropped"
     for f in "${seeded[@]}"; do
         echo "warning: the seed file $f holds provisioned secrets in plain text; once the appliance has started, delete the seed files and the configuration file that names them (it keeps its settings without them)" >&2
     done
+    # delete_copies has named the copies it could not delete.
+    [ -z "$undeleted" ] || return 1
     if [ "${#left[@]}" -gt 0 ] || [ "${#unwritten[@]}" -gt 0 ] || [ "${#unscrubbed[@]}" -gt 0 ]; then
         for f in "${left[@]}"; do echo "$f still holds provisioned secrets" >&2; done
         for f in "${unwritten[@]}"; do echo "$f cannot be rewritten; its error messages are not replaced" >&2; done
