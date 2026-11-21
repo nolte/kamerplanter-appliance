@@ -535,6 +535,7 @@ expect "guard: the failure names the checksum of what was copied" yes \
     "$(grep -q 'what was copied does not match the checksum recorded with the backup' "$st/log.jsonl" && echo yes)"
 expect "guard: no rollback is recorded as done" "" "$(grep -o '"result":"done"' "$st/log.jsonl")"
 expect "guard: the console says why" yes "$(grep -q 'what was copied does not match' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && echo yes)"
+expect "guard: the console does not call the checked backup damaged" yes "$(grep -q 'the backup passed its check' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && ! grep -q 'damaged or gone' "$SB/run/issue.d/45-kamerplanter-restore.issue" && echo yes)"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

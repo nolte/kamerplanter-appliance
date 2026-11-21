@@ -475,6 +475,11 @@ restore_refused() {
     local message hint
     message="the data backup from before the update to $(short "$2") cannot be restored: $3; the services stay stopped, so that $(slot booted version) does not run on data the newer release may have changed"
     case $3 in
+        "what was copied"*)
+            # The backup passed its check before the copy: the copy is
+            # what differs, so the backup is not to be replaced by hand.
+            hint="the backup passed its check, the data copied from it did not: its disk returned other data on the second read, or the copy lost something such as a label; the data of the newer release is already replaced; the next boot copies again; if this repeats, check the backup's disk and the disk with the data (see: kamerplanter-update status)"
+            ;;
         *"does not match the checksum"* | *"cannot be read completely"* | *"is not there"* | *"no known location"*)
             hint="the backup is damaged or gone; restore the data by hand from another backup (see: kamerplanter-update status)"
             ;;
