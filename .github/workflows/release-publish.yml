@@ -146,6 +146,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
+          COMMIT: ${{ steps.check.outputs.commit }}
           IMAGE: ghcr.io/${{ github.repository }}
         run: |
           set -euo pipefail
@@ -169,6 +170,12 @@ jobs:
           ref=$(cat -- "kamerplanter-appliance-$TAG-system-image.txt")
           [[ $ref =~ ^"$IMAGE:$TAG"@sha256:[0-9a-f]{64}$ ]] || { printf '::error::unexpected system image reference %q\n' "$ref"; exit 1; }
           "$verify" "$IMAGE@${ref##*@}"
+          # The signed set is checked, but it could come from an earlier run for
+          # this tag; the source commit it names must be the one checked above.
+          if [ "$(cat -- "kamerplanter-appliance-$TAG-source-commit.txt")" != "$COMMIT" ]; then
+            echo "::error::the assets on $TAG were not built from $COMMIT; delete them from the draft and dispatch again"
+            exit 1
+          fi
           echo "The assets on $TAG verify against this workflow's signatures; reusing them."
 
   disk:
