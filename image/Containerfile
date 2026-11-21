@@ -68,6 +68,7 @@ RUN chmod 0755 /usr/libexec/kamerplanter/configure /usr/libexec/kamerplanter/dis
         kamerplanter-data-disk.service kamerplanter-backup-disk.service \
         kamerplanter-update-guard.service kamerplanter-update-health.service \
         kamerplanter-update-fetch.timer kamerplanter-update-apply.timer \
+        kamerplanter-issue-staging.service \
     # bootc's own timer applies updates with an immediate reboot at any hour;
     # kamerplanter-update-*.timer replace it.
     && systemctl mask bootc-fetch-apply-updates.timer \

@@ -1,0 +1,34 @@
+[Unit]
+Description=Label the staging directory of the console messages of console-login-helper-messages
+Documentation=https://github.com/coreos/console-login-helper-messages
+# console-login-helper-messages (fedora-bootc's issuegen) writes its console
+# messages (the addresses of each interface, from its NetworkManager
+# dispatcher script, and the SSH host keys) into a temporary file in
+# /run/console-login-helper-messages, moves it into /run/issue.d and only then
+# runs restorecon on it. The policy labels that directory
+# NetworkManager_dispatcher_console_var_run_t, the temporary file inherits that
+# type and `mv` keeps it, so until restorecon has run the message in
+# /run/issue.d carries a type kmscon may not read: a console that opens in that
+# moment is denied the message and shows the login prompt without it (#94).
+# With the policy's type of the console messages on the directory, the file
+# carries that type from its creation, which the dispatcher may create and
+# rename (systemd_ssh_issue_manage_pid_files) and the console may read;
+# restorecon then has nothing to change.
+# The directory comes from the package's tmpfiles entry; this runs after
+# systemd-tmpfiles-setup.service and before anything that writes into it.
+# A later `systemd-tmpfiles --create` or `restorecon` on it gives it the
+# policy's type back, which only reopens that moment until the next boot.
+DefaultDependencies=no
+ConditionSecurity=selinux
+ConditionPathExists=/usr/lib/console-login-helper-messages/libutil.sh
+After=systemd-tmpfiles-setup.service
+Before=sysinit.target NetworkManager.service NetworkManager-dispatcher.service console-login-helper-messages-gensnippet-ssh-keys.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/install -d -m 0755 /run/console-login-helper-messages
+ExecStart=/usr/bin/chcon -t systemd_ssh_issue_var_run_t /run/console-login-helper-messages
+
+[Install]
+WantedBy=sysinit.target

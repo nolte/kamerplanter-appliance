@@ -233,6 +233,7 @@ jobs:
             .build/boot/*.tsv
             .build/boot/*.serial.log
             .build/boot/*.diagnose.txt
+            .build/boot/*.console.txt
             .build/boot/*.update-log.txt
             .build/boot/*.screen*.ppm
           if-no-files-found: warn
@@ -409,6 +410,8 @@ jobs:
             .build/boot/*.serial.log
             .build/boot/*.diagnose.txt
             .build/boot/*.update-log.txt
+            .build/boot/*.avc*.txt
+            .build/boot/*.console.txt
           if-no-files-found: warn
           retention-days: 14
 

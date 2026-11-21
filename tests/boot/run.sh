@@ -269,10 +269,14 @@ expect_rec() {
 # agetty) read them, and the NetworkManager dispatcher write there, only with
 # the policy's type systemd_ssh_issue_var_run_t: the directory and each file
 # carry it, and this boot has no denial on a console message or for those
-# domains. The labels and the denials go to $OUT/NAME.console.txt.
+# domains. So does the directory in which console-login-helper-messages
+# stages its messages before it moves them into /run/issue.d (#94): `mv`
+# keeps the type, and with the policy's type of that directory a console that
+# opens before restorecon has run is denied the message, which only some
+# boots catch. The labels and the denials go to $OUT/NAME.console.txt.
 check_console() {
     local name=$1 file=$2 labels denials wrong
-    labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1")
+    labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1; [ ! -e /run/console-login-helper-messages ] || stat -c '%C %n' /run/console-login-helper-messages 2>&1")
     denials=$(guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null' |
         grep -E 'name="[^"]*issue|scontext=[^ ]*:(kmscon|getty|NetworkManager_dispatcher[a-z_]*)_t:' | sort -u)
     wrong=$(grep -v ':systemd_ssh_issue_var_run_t:' <<<"$labels")
@@ -284,7 +288,7 @@ check_console() {
     elif [ -n "$denials" ]; then
         record "$name" FAIL - "$(grep -c . <<<"$denials") SELinux denials for the console messages, see $name.console.txt"
     else
-        record "$name" PASS - "console messages ($file) labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
+        record "$name" PASS - "console messages ($file) and their staging directory labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
         return 0
     fi
     return 1

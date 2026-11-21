@@ -102,25 +102,35 @@ stopped_services() {
         ! systemctl is-active -q kamerplanter-backend.service'
 }
 
-# The SELinux denials of this boot, one signature per line: command,
-# permission, class and target type, without the probe bootc runs on every
-# `bootc status` (an invalid label it expects to be refused).
+# avc_records: the SELinux denials of this boot as the journal has them, with
+# the name of the file, the source context and the process.
+avc_records() {
+    guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null'
+}
+
+# avc_signatures [FILE]: the SELinux denials of this boot (or those recorded
+# in FILE), one signature per line: command, permission, class and target
+# type, without the probe bootc runs on every `bootc status` (an invalid label
+# it expects to be refused).
 avc_signatures() {
-    guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null' |
+    if [ -n "${1-}" ]; then cat "$1"; else avc_records; fi |
         sed -n 's/.*denied  { \([^}]*\) }.*comm="\([^"]*\)".*tcontext=[^:]*:[^:]*:\([^:]*\):.*tclass=\([a-z_0-9]*\).*/\2 \1 \4 \3/p' |
         sed 's/  */ /g' | sort -u
 }
 
 # new_avcs NAME: the denials of this boot that the boot without a data disk
-# did not have; written to NAME.avc.txt.
+# did not have; written to NAME.avc.txt, and every denial record of this boot
+# to NAME.avc-records.txt, so that a failure names the file and the process
+# (#94). Both go into the run's artifacts.
 # Without the baseline every check would pass unseen: a run that leaves out
 # the step none (CI splits the steps into jobs) reports that as a denial.
 new_avcs() {
+    avc_records >"$OUT/$1.avc-records.txt"
     if [ ! -f "$WORK/avc-baseline.txt" ]; then
         echo "no baseline of SELinux denials: run the step none before" | tee "$OUT/$1.avc.txt"
         return
     fi
-    avc_signatures | comm -23 - "$WORK/avc-baseline.txt" >"$OUT/$1.avc.txt"
+    avc_signatures "$OUT/$1.avc-records.txt" | comm -23 - "$WORK/avc-baseline.txt" >"$OUT/$1.avc.txt"
     cat "$OUT/$1.avc.txt"
 }
 
@@ -257,7 +267,8 @@ step_none() {
     start_vm d1 bios virtio-scsi virtio off "$WORK/d1.qcow2" || { record d1 FAIL - "qemu did not start"; return 1; }
     local secs
     secs=$(boot_up d1 "$FIRST_BOOT_TIMEOUT") || return 1
-    avc_signatures >"$WORK/avc-baseline.txt"
+    avc_records >"$OUT/d1.avc-records.txt"
+    avc_signatures "$OUT/d1.avc-records.txt" >"$WORK/avc-baseline.txt"
     cp "$WORK/avc-baseline.txt" "$OUT/d1.avc-baseline.txt"
     local status
     status=$(guest /usr/libexec/kamerplanter/disks status)
