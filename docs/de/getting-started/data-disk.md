@@ -233,13 +233,15 @@ Gelöschte Dateien können auf dem Medium lesbar bleiben, auch die Kopie auf der
     /usr/libexec/kamerplanter/disks retire backup
     ```
 
-    Das hängt den Sicherungs-Datenträger aus (und schließt ihn, wenn er verschlüsselt ist), während die Dienste weiterlaufen, und löscht dann seine Benennung in `/var/lib/kamerplanter/disks/naming.env`, seinen Eintrag `/var/lib/kamerplanter/disks/backup.env`, seinen gespeicherten Schlüssel und die Einträge des Update-Werkzeugs zu den Sicherungen vor einem Update, die auf ihm liegen. Die nächste Sicherung vor einem Update geht auf den Datenträger, sonst auf die Systemplatte. Die Platte selbst bleibt, wie sie ist; zieh sie ab oder lösche sie sicher, bevor sie aus der Hand gegeben wird. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
+    Das hängt den Sicherungs-Datenträger aus (und schließt ihn, wenn er verschlüsselt ist), während die Dienste weiterlaufen, und löscht dann seine Benennung in `/var/lib/kamerplanter/disks/naming.env`, seinen Eintrag `/var/lib/kamerplanter/disks/backup.env`, seinen gespeicherten Schlüssel und die Einträge des Update-Werkzeugs zu den Sicherungen vor einem Update, die auf ihm liegen. Die nächste Sicherung vor einem Update geht an den nächsten Ort, der sie aufnehmen darf (`kamerplanter-update status` zeigt, welcher). Die Platte selbst bleibt, wie sie ist; zieh sie ab oder lösche sie sicher, bevor sie aus der Hand gegeben wird. Sicherungen auf dieser Platte lassen sich nicht mehr wiederherstellen.
 
     Der Befehl ändert nichts und sagt, warum, wenn:
 
     - ein Credential `kamerplanter.backup-disk` oder die Einstellung `BACKUP_DISK` in deiner Datei die Platte noch benennt: Entferne diese Benennung zuerst, sonst richtet der nächste Start die Platte wieder ein;
     - ein Update noch nicht entschieden ist (`kamerplanter-update status`), da seine Rückkehr die Sicherung von davor wiederherstellen würde, oder eine andere Update-Aktion, die Sicherung vor einem Update oder ihre Gesundheitsprüfung läuft: Versuche es wieder, wenn sie fertig ist;
     - die Platte sich nicht aushängen lässt, weil etwas sie verwendet.
+
+    Ist die Platte ausgehängt, lässt sich ihr verschlüsselter Container aber nicht schließen, sagt der Befehl das und bricht ab; bis du ihn erneut ausführst oder neu startest, behandelt das Update-Werkzeug den Sicherungs-Datenträger als fehlend.
 
 - **Datenträger:** Dieses Release kann die Daten weder auf die Systemplatte zurück noch auf einen anderen Datenträger umziehen; solange ein Datenträger eingerichtet ist, wird eine andere Benennung übergangen. Lösche `/var/lib/kamerplanter/disks/data.env` nicht, solange deine Daten auf der Platte liegen: Ohne diese Datei verwendet die Appliance die Platte nicht mehr.
 

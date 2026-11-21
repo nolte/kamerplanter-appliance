@@ -2299,13 +2299,18 @@ cmd_retire() {
     exec 9>"$lock"
     flock -w 60 9 || { echo "the disk service is busy; try again once it is done" >&2; exit 1; }
     # The guard writes the pre-update backup at the first boot of a new
-    # version without that lock, and the health check decides it.
-    local unit_name
+    # version without that lock, and the health check decides it. The guard
+    # (Type=oneshot, RemainAfterExit=yes) runs while activating and stays
+    # active once done; the health check (Type=exec) runs while active.
+    local unit_name unit_state
     for unit_name in kamerplanter-update-guard.service kamerplanter-update-health.service; do
-        if [ "$(systemctl show -P ActiveState "$unit_name" 2>/dev/null || true)" = activating ]; then
-            echo "$unit_name is running; retire the backup disk once it is done" >&2
-            exit 1
-        fi
+        unit_state=$(systemctl show -P ActiveState "$unit_name" 2>/dev/null || true)
+        case $unit_name:$unit_state in
+            *:activating | *:deactivating | kamerplanter-update-health.service:active)
+                echo "$unit_name is running; retire the backup disk once it is done" >&2
+                exit 1
+                ;;
+        esac
     done
     if [ -s "$update_state/pending" ]; then
         echo "an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" >&2
@@ -2320,7 +2325,7 @@ cmd_retire() {
     fi
     load "$naming_file"
     if [ ! -e "$record" ] && [ -z "$(get "$key")$(get "${key}_FORCE")" ] && [ ! -e "$key_store" ] &&
-        [ -z "$(disk_backups)" ]; then
+        [ -z "$(disk_backups)" ] && ! mountpoint -q "$mnt" && [ ! -b "$mapper" ]; then
         echo "no backup disk is set up or named; nothing to retire"
         return 0
     fi
@@ -2334,7 +2339,10 @@ cmd_retire() {
             echo "$mapper is still mounted at ${targets//$'\n'/, }; nothing else is changed" >&2
             exit 1
         fi
-        cryptsetup close "$mapper_name" || { echo "$mapper could not be closed; nothing else is changed, run this again or reboot" >&2; exit 1; }
+        cryptsetup close "$mapper_name" || {
+            echo "$mapper could not be closed; the disk is unmounted, and until this is run again or the appliance is rebooted the update tool treats the backup disk as missing; nothing else is changed" >&2
+            exit 1
+        }
     fi
     if [ -e "$naming_file" ]; then
         cfg[$key]='' cfg[${key}_FORCE]=''
@@ -2350,7 +2358,7 @@ cmd_retire() {
     forget_key
     clear_report
     log_event retired "the $role disk is no longer used: its naming in $naming_file and its record $record are deleted; the disk itself is left as it is"
-    echo "the next pre-update backup goes to the data disk, else to the system disk (see: kamerplanter-update status)"
+    echo "the next pre-update backup goes to the next location that may take it (see: kamerplanter-update status)"
 }
 
 usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }

@@ -773,7 +773,8 @@ retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|upda
         mountpoint() { return 1; }
         clear_report() { :; }
         log_event() { :; }
-        systemctl() { echo active; }
+        # Idle: the guard stays active once done, the health check is inactive.
+        systemctl() { case $4 in kamerplanter-update-health.service) echo inactive ;; *) echo active ;; esac; }
         eval "real_role_vars() $(declare -f role_vars | tail -n +2)"
         role_vars() { real_role_vars "$@" && mapper=$sb/no-mapper; }
         case $1 in
@@ -783,6 +784,14 @@ retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|upda
             user-file) rm "$records/data.env"; echo BACKUP_DISK=/dev/disk/by-id/virtio-b >"$user" ;;
             twice) (cmd_retire backup) >/dev/null 2>&1 ;;
             guard) systemctl() { echo activating; } ;;
+            health) systemctl() { echo active; } ;;
+            left-mounted)
+                # The record, naming, key and update record deleted by hand, not rebooted yet.
+                rm "$records/backup.env" "$records/keys/backup.key" "$update_backups/d1"
+                printf 'DATA_DISK=/dev/disk/by-id/virtio-a\n' >"$naming_file"
+                mountpoint() { [ ! -e "$sb/unmounted" ]; }
+                umount() { touch "$sb/unmounted"; }
+                ;;
         esac
         out=$(cmd_retire "${2:-backup}" 2>&1)
         rc=$?
@@ -794,7 +803,7 @@ retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|upda
     )
 }
 expect "retire: the backup disk's naming, backup records, record and key go; the data disk's stay" \
-    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the data disk, else to the system disk (see: kamerplanter-update status)" \
+    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the next location that may take it (see: kamerplanter-update status)" \
     "$(retire_with ok)"
 expect "retire: run again, there is nothing left to retire" \
     "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|no backup disk is set up or named; nothing to retire" \
@@ -806,6 +815,12 @@ expect "retire: refused while an update is not decided, nothing changed" \
 expect "retire: refused while the guard runs, nothing changed" \
     "1|$unchanged|kamerplanter-update-guard.service is running; retire the backup disk once it is done" \
     "$(retire_with guard)"
+expect "retire: refused while the health check runs (Type=exec: active), nothing changed" \
+    "1|$unchanged|kamerplanter-update-health.service is running; retire the backup disk once it is done" \
+    "$(retire_with health)"
+expect "retire: a disk retired by hand but still mounted is unmounted, not reported as nothing to retire" \
+    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the next location that may take it (see: kamerplanter-update status)" \
+    "$(retire_with left-mounted)"
 expect "retire: refused while a credential from the firmware names the disk, nothing changed" \
     "1|$unchanged|the backup disk is still named by the credential kamerplanter.backup-disk in SB/system-credentials/kamerplanter.backup-disk, which would set it up again at the next start; remove that naming first; nothing is changed" \
     "$(retire_with credential)"

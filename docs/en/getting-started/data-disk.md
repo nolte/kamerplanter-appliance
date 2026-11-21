@@ -233,13 +233,15 @@ Deleted files may remain readable on the medium, also the copy on the system dis
     /usr/libexec/kamerplanter/disks retire backup
     ```
 
-    This unmounts the backup disk (and closes it, when it's encrypted) while the services keep running, then deletes its naming in `/var/lib/kamerplanter/disks/naming.env`, its record `/var/lib/kamerplanter/disks/backup.env`, its stored key, and the update tool's records of the pre-update backups on it. The next pre-update backup goes to the data disk, else to the system disk. The disk itself is left as it is; unplug it, or wipe it before it leaves your hands. Backups on that disk can no longer be restored.
+    This unmounts the backup disk (and closes it, when it's encrypted) while the services keep running, then deletes its naming in `/var/lib/kamerplanter/disks/naming.env`, its record `/var/lib/kamerplanter/disks/backup.env`, its stored key, and the update tool's records of the pre-update backups on it. The next pre-update backup goes to the next location that may take it (`kamerplanter-update status` shows which). The disk itself is left as it is; unplug it, or wipe it before it leaves your hands. Backups on that disk can no longer be restored.
 
     The command changes nothing and says why when:
 
     - a credential `kamerplanter.backup-disk` or the setting `BACKUP_DISK` in your file still names the disk: remove that naming first, else the next start would set the disk up again;
     - an update isn't decided yet (`kamerplanter-update status`), since its return would restore the backup taken before it, or another update action, the backup before an update, or its health check is running: try again once it's done;
     - the disk can't be unmounted because something uses it.
+
+    If the disk is unmounted but its encrypted container can't be closed, the command says so and stops; until you run it again or reboot, the update tool treats the backup disk as missing.
 
 - **Data disk:** this release has no way to move the data back to the system disk or onto another data disk; while a data disk is set up, a different naming is ignored. Don't delete `/var/lib/kamerplanter/disks/data.env` while your data is on the disk: without it, the appliance no longer uses that disk.
 
