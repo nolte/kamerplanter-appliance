@@ -19,7 +19,8 @@
 # container joins kamerplanter.network and nothing else, and none can enter
 # the host's network namespace (privileged, the host's PID namespace, a
 # capability to join or change namespaces, a mount of the host's /proc, /run,
-# /etc or /), which would let it send as uid 0 past the output rule. The same check
+# /etc, /var or /, its /proc/sys made writable or its confinement lifted),
+# which would let it send as uid 0 past the output rule. The same check
 # runs on planted units, one way out each, so that it can fail.
 # tests/unit/scrub.sh checks the units' source on every pull request.
 #
@@ -36,7 +37,8 @@ image=${1:-${IMAGE_REF:-localhost/kamerplanter-appliance:poc}}
 # Options are read as Podman's parser reads them (--opt VALUE, --opt=VALUE,
 # -vVALUE, -tv VALUE); an option after the image, in the container's own
 # command, is read as one too, which can only refuse more. A $ is refused:
-# systemd would expand it from the unit's environment.
+# systemd would expand it from the unit's environment; so is a specifier but
+# %t in a host path (%E is /etc, %S /var/lib), which systemd expands too.
 IFS= read -r -d '' quadlet_check <<'PY' || true
 import posixpath
 import re
@@ -50,21 +52,27 @@ verbs = {"run", "create", "kube", "pod", "build", "network", "volume",
          "rm", "stop", "start", "image", "pull", "secret"}
 valued = {"--network", "--net", "--pid", "--pod", "--cap-add", "--volume",
           "--mount", "--module", "--driver", "--opt", "--rootfs",
-          "--hooks-dir"}
+          "--hooks-dir", "--security-opt"}
+# --security-opt values that make /proc/sys writable or lift the confinement
+unconfined = ("unmask=", "systempaths=unconfined", "seccomp=", "label=disable",
+              "label=type:", "apparmor=unconfined")
 
 
 def host(src):
     # True for a host path that leads into the host's namespaces.
     if src.startswith("%t"):
         src = "/run" + src[2:]
+    if re.search(r"%[^%]", src.replace("%%", "")):
+        return True  # another specifier: systemd expands it to a host path
     if not src.startswith("/"):
         return False
     path = "/" + posixpath.normpath(src).lstrip("/")
     if posixpath.basename(path) in ("podman.sock", "docker.sock"):
         return True
-    return path == "/" or any(path == d or path.startswith(d + "/")
-                              for d in ("/proc", "/run", "/var/run", "/etc",
-                                        "/var/lib/containers"))
+    return path in ("/", "/var", "/var/lib") or any(
+        path == d or path.startswith(d + "/")
+        for d in ("/proc", "/run", "/var/run", "/etc", "/var/lib/containers",
+                  "/root", "/var/roothome", "/sysroot", "/ostree", "/boot"))
 
 
 def options(args, short):
@@ -135,6 +143,9 @@ for unit, body in zip(units[1::2], units[2::2]):
                 elif name == "--privileged" and value != "false":
                     refuse("privileged")
                 elif name in ("--pid", "--pod", "--rootfs"):
+                    refuse(f"{name} {value}")
+                elif name == "--security-opt" and \
+                        (value or "").lower().startswith(unconfined):
                     refuse(f"{name} {value}")
                 elif name == "--cap-add":
                     for cap in (value or "").lower().split(","):
@@ -211,13 +222,18 @@ plant socket Network=kamerplanter.network Volume=%t/podman/podman.sock:/sock
 plant module Network=kamerplanter.network GlobalArgs=--module=/etc/containers/host.conf
 plant host Network=host
 plant net2 Network=kamerplanter.network PodmanArgs=--network=host
+plant specifier Network=kamerplanter.network Volume=%E:/host-etc
+plant parent Network=kamerplanter.network Volume=/var/lib:/l
+plant sysroot Network=kamerplanter.network Mount=type=bind,source=/sysroot,destination=/s
+plant unmask Network=kamerplanter.network Unmask=ALL
+plant seccomp Network=kamerplanter.network PodmanArgs=--security-opt=seccomp=unconfined
 plant harmless Network=kamerplanter.network "AddCapability=CHOWN NET_BIND_SERVICE" Volume=/var/lib/kamerplanter/x:/x:ro,z
 printf "[Pod]\n" >"$planted/bad.pod"
 printf "[Network]\nDriver=macvlan\n" >"$planted/bad.network"
 printf "[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n" >"$planted/bad.volume"
 found=$(generated "$planted")
 expect "quadlets: the check refuses each planted way out, and passes the harmless unit" \
-    "exit 0|14|bad-network;bad-pod;bad-volume;cap;cluster;etc;host;module;net2;netns;pid;privileged;proc;rootfs;socket;sys-admin" \
+    "exit 0|19|bad-network;bad-pod;bad-volume;cap;cluster;etc;host;module;net2;netns;parent;pid;privileged;proc;rootfs;seccomp;socket;specifier;sys-admin;sysroot;unmask" \
     "$(grep "^exit " <<<"$found")|$(grep -c "^container " <<<"$found")|$(refused <<<"$found")"
 rm -rf "$planted"
 

@@ -519,7 +519,8 @@ for f in /usr/share/containers/systemd/kamerplanter-*.container; do
         [[ $r == *" kamerplanter-metadata-guard.service "* ]] && [[ $a == *" kamerplanter-metadata-guard.service "* ]] || early=$((early + 1))
 done
 if [ "${g:-0}" -gt 0 ] && [ "$n" -gt 0 ] && [ "$early" = 0 ]; then echo yes; else echo "guard at ${g:-none}, $early of $n containers not bound to it or started before it"; fi')" \
-        "every container requires the metadata rules and started after they were loaded"
+        "every container requires the metadata rules and started after they were loaded" ||
+        diagnose run9
     # A request to the metadata address is refused on the running device, for
     # another user (output chain) and for a container (forward chain), and
     # the rules count it. Refused, curl fails at once (exit 7, no
