@@ -424,12 +424,12 @@ expect "a short value: the scrub succeeds, names the key, not the value, and lea
 # --- a NUL in a key or value: the pairs stay aligned, no value is named as a key ---
 new_appliance
 booted iid-1
-jq -c '.kamerplanter.secrets += {"ARANGODB_PASSWORD": "nulpartone\u0000nulparttwo", "ODD\u0000KEY": "nulshiftedsecret"}' \
+jq -c '.kamerplanter.secrets += {"NUL_IN_VALUE": "nulpartone\u0000nulparttwo", "ODD\u0000KEY": "nulshiftedsecret"}' \
     "$SB/run/cloud-init/combined-cloud-config.json" >"$SB/c" &&
     mv "$SB/c" "$SB/run/cloud-init/combined-cloud-config.json"
 echo "a log line with nulparttwo and nulshiftedsecret in it" >>"$SB/var/log/cloud-init.log"
-expect "a NUL in a key or value: both parts and the next value are replaced, no value is named in the output" "0|no|no|no|no" \
-    "$(run_scrub)|$(has nulparttwo "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(out)")|$(has nulpartone "$(out)")"
+expect "a NUL in a key or value: both parts and the next value are replaced, no value is named in the output" "0|no|no|no|no|no" \
+    "$(run_scrub)|$(has nulparttwo "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(out)")|$(has nulpartone "$(out)")|$(has nulparttwo "$(out)")"
 
 # --- a file that cannot be rewritten: the unit fails and names it ---
 new_appliance
