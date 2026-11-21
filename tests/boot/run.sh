@@ -627,13 +627,38 @@ reboot_to_ssh() {
     echo $((SECONDS - start))
 }
 
+# late_evidence NAME: what a boot that did not answer over SSH in time shows
+# (#33). The image writes nothing to the serial port, so the VGA console is
+# saved through QEMU's monitor (VM_MONITOR) as $OUT/NAME.screen.ppm; then
+# guest gets up to fifteen minutes more. If it answers late, the diagnosis
+# says after how long and what held up cloud-init and sshd; if not, a second
+# screen is saved. Diagnosis only: the step has failed already.
+late_evidence() {
+    local secs dir
+    dir=$(pwd)/$OUT
+    monitor "screendump $dir/$1.screen.ppm" || true
+    if secs=$(wait_ssh 900); then
+        diagnose "$1"
+        {
+            echo "== SSH answered ${secs}s after the step's timeout"
+            echo "== boot timing"; guest "systemd-analyze; systemd-analyze critical-chain sshd.service"
+            echo "== cloud-init"; guest "cloud-init status --long; cloud-init analyze blame | head -n 30"
+            echo "== this boot: cloud-init and sshd"
+            guest "journalctl -b --no-pager -o short-precise -u cloud-init-local -u cloud-init -u cloud-config -u cloud-final -u sshd -u 'sshd-keygen@*' | tail -n 200"
+        } >>"$OUT/$1.diagnose.txt" 2>&1
+    else
+        monitor "screendump $dir/$1.screen-late.ppm" || true
+        echo "== no SSH within another 900s either; see $1.screen.ppm and $1.screen-late.ppm" >"$OUT/$1.diagnose.txt"
+    fi
+}
+
 # A seed URL that stops answering after the first boot (#33). The next boot
 # finds no source, so cloud-init falls back to the datasource None, whose
 # instance id differs, and sets up a new instance; once the URL answers
 # again, it sets up the first instance anew. The SSH host keys of the first
 # boot stay through both. Waits only for SSH and cloud-init.
 run_12() {
-    local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off
+    local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off VM_MONITOR=10046
     local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs
     nocloud_seed "$seed" kp-run12 run12 </dev/null
     python3 -m http.server 8098 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
@@ -655,7 +680,7 @@ run_12() {
 
     kill "$server"; wait "$server" 2>/dev/null
     if ! secs=$(reboot_to_ssh) || ! scrubbed; then
-        diagnose run12-fallback
+        late_evidence run12-fallback
         record run12-fallback FAIL - "seed URL down: no SSH after the reboot, or the scrub did not finish"
         stop_vm; return
     fi

@@ -234,6 +234,7 @@ jobs:
             .build/boot/*.serial.log
             .build/boot/*.diagnose.txt
             .build/boot/*.update-log.txt
+            .build/boot/*.screen*.ppm
           if-no-files-found: warn
           retention-days: 14
 
