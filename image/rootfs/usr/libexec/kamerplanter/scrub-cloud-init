@@ -36,7 +36,8 @@
 # the documentation asks to delete them after the first boot (L20).
 #
 # The provisioned secrets are searched for, as values, in everything under
-# /var/lib/cloud (the seed files apart) and /run/cloud-init, and in
+# /var/lib/cloud (the seed files apart) and /run/cloud-init but the copies
+# that are deleted, which keep their values until then (#76), and in
 # cloud-init's logs /var/log/cloud-init*.log, rotated ones included
 # (cloud-init*.log*), and every occurrence is replaced by "REDACTED" in place:
 # the values of kamerplanter: -> secrets:, and those of the secret keys under
@@ -47,9 +48,23 @@
 # #cloud-config, MIME or gzip), all read before anything is deleted. A copy
 # that holds no cloud-config, such as a shell script, is read with nothing
 # learned; one that holds what is not read here, such as a Jinja template or
-# an #include, counts as a copy that cannot be read. The copies are deleted last: a boot that ends before the scrub is
-# through leaves them, and a later boot learns the values from them even when
-# the source is gone by then and cloud-init does not run (#30, #46).
+# an #include, counts as a copy that cannot be read. Each copy is read once,
+# for its values and for whether it can be read (#76). The copies are deleted
+# last: a boot that ends before the scrub is through leaves them, and a later
+# boot learns the values from them even when the source is gone by then and
+# cloud-init does not run (#30, #46).
+#
+# The copies are kept, and the unit fails, whenever the scrub is not through
+# (#76): when jq cannot run or fails on the combined cloud-config or on a
+# copy, so that the values in it are not known (without jq none are, and
+# nothing is scrubbed, as without Python's YAML module); and when there is
+# something to scrub and /run/cloud-init or /var/log is a symbolic link,
+# which is not entered, or one of cloud-init's logs is, which is not
+# rewritten through it; and whenever /var/lib/cloud or its instances/ is a
+# symbolic link, behind which copies could lie unread. The next boot retries.
+# A copy that cannot be deleted is named, and the unit fails. The services
+# do not wait for the scrub, and the update's health check does not look at
+# it: a failed scrub stops nothing.
 #
 # When an instance has copies but none of them can be read, its secrets are
 # not known. Then cloud-init's logs are deleted instead, rotated ones
@@ -103,8 +118,9 @@ own_dir() {
 }
 
 # secret_pairs: the provisioned secrets of the cloud-config on stdin, as JSON,
-# as NUL-separated pairs KEY, VALUE; nothing when there is none or it cannot
-# be read. jq's messages are dropped: they could quote the input. A NUL in a
+# as NUL-separated pairs KEY, VALUE; nothing when there is none. Fails when jq
+# fails, such as on input that is not JSON: then the secrets in it are not
+# known. jq's messages are dropped: they could quote the input. A NUL in a
 # key or value would shift every later pair, so a value would be named as a
 # key in the journal and never searched for: in a key it becomes "?" (no KEY
 # name), in a value a line break (each part is searched for on its own).
@@ -117,7 +133,18 @@ secret_pairs() {
         | ((($kp.secrets // {}) | select(type == "object") | to_entries[] | pair),
            (($kp.settings // {}) | select(type == "object") | to_entries[]
                 | select(.key as $k | $ARGS.positional | index($k)) | pair))
-        | . + "\u0000"' "${provisionable_secret_keys[@]}" 2>/dev/null || true
+        | . + "\u0000"' "${provisionable_secret_keys[@]}" 2>/dev/null
+}
+
+# take_pairs: adds the pairs of secret_pairs, of the cloud-config on stdin,
+# to pairs; fails, adding none, when secret_pairs fails. The pairs go from jq
+# through a pipe into memory, never into a file.
+take_pairs() {
+    local got=() rc=0
+    mapfile -d '' -t got < <(secret_pairs)
+    wait "$!" || rc=$?
+    [ "$rc" = 0 ] || return 1
+    pairs+=("${got[@]}")
 }
 
 # config_copies: the copies of the user-data that cloud-init keeps per
@@ -194,38 +221,39 @@ except Exception:
 ' "$1" 2>/dev/null
 }
 
-# values: the provisioned secrets of this boot's combined cloud-config and of
-# every copy of the user-data, as NUL-separated pairs KEY, VALUE.
-values() {
-    local f json
-    if [ -f "$combined" ] && [ ! -L "$combined" ]; then secret_pairs <"$combined"; fi
-    while IFS= read -r -d '' f; do
-        json=$(as_json "$f") || continue
-        [ -z "$json" ] || printf '%s\n' "$json" | secret_pairs
-    done < <(config_copies)
-}
-
-# unknown_instances: the instance directories whose provisioned secrets are
-# not known, NUL-separated: those with a copy of the user-data none of which
-# can be read (as_json). Where cloud-config.txt is there but cannot be read,
-# a copy of the user-data counts only when it gives a cloud-config: one that
-# gives none, such as a shell script, says nothing about what cloud-config.txt
-# holds.
-unknown_instances() {
+# learn: reads this boot's combined cloud-config and every copy of the
+# user-data, each once (#76), and sets
+#   pairs      their provisioned secrets, as pairs KEY, VALUE;
+#   unknown    the instance directories whose provisioned secrets are not
+#              known: those with a copy of the user-data none of which can
+#              be read (as_json). Where cloud-config.txt is there but cannot
+#              be read, a copy of the user-data counts only when it gives a
+#              cloud-config: one that gives none, such as a shell script,
+#              says nothing about what cloud-config.txt holds;
+#   unlearned  the files that can be read but whose secrets jq could not
+#              take out (take_pairs).
+learn() {
     local f dir json
     local -A seen=() known=()
+    pairs=() unknown=() unlearned=()
+    if [ -f "$combined" ] && [ ! -L "$combined" ]; then
+        take_pairs <"$combined" || unlearned+=("$combined")
+    fi
     while IFS= read -r -d '' f; do
         dir=${f%/*}
         seen[$dir]=1
-        [ -z "${known[$dir]:-}" ] || continue
         json=$(as_json "$f") || continue
+        if [ -n "$json" ]; then
+            take_pairs < <(printf '%s\n' "$json") || unlearned+=("$f")
+        fi
         if [ "${f##*/}" = cloud-config.txt ] || [ -n "$json" ] || { [ ! -e "$dir/cloud-config.txt" ] && [ ! -L "$dir/cloud-config.txt" ]; }; then
             known[$dir]=1
         fi
     done < <(config_copies)
     for dir in "${!seen[@]}"; do
-        if [ -z "${known[$dir]:-}" ]; then printf '%s\0' "$dir"; fi
-    done | sort -z
+        if [ -z "${known[$dir]:-}" ]; then unknown+=("$dir"); fi
+    done
+    if [ "${#unknown[@]}" -gt 0 ]; then mapfile -d '' -t unknown < <(printf '%s\0' "${unknown[@]}" | sort -z); fi
 }
 
 # status_files: cloud-init's status and result, NUL-separated: the regular
@@ -246,14 +274,13 @@ status_files() {
     fi
 }
 
-# patterns: the strings to search for, NUL-separated, longest first, from the
-# pairs of values: each line of a value, and the same as it stands inside a
+# patterns: the strings to search for, NUL-separated, longest first, from
+# pairs (learn): each line of a value, and the same as it stands inside a
 # JSON text when that differs. Names a key whose value is not searched for.
+# Fails, printing nothing, when jq fails.
 patterns() {
-    local pairs key value line escaped
+    local key value line escaped i
     local -A seen=()
-    mapfile -d '' pairs < <(values)
-    local i
     for ((i = 0; i + 1 < ${#pairs[@]}; i += 2)); do
         key=${pairs[i]}
         value=${pairs[i + 1]}
@@ -265,7 +292,7 @@ patterns() {
                 continue
             fi
             seen[$line]=1
-            escaped=$(printf '%s' "$line" | jq -Rrs 'tojson | .[1:-1]')
+            escaped=$(printf '%s' "$line" | jq -Rrs 'tojson | .[1:-1]' 2>/dev/null) || return 1
             seen[$escaped]=1
         done < <(printf '%s\n' "$value")
     done
@@ -433,17 +460,38 @@ sys.exit(0 if data is None or any(p in data for p in patterns) else 1)
 
 # scanned: the files the provisioned secrets are searched for in,
 # NUL-separated: the regular files under /var/lib/cloud but its seed files,
-# under /run/cloud-init, and cloud-init's logs, rotated ones included.
+# under /run/cloud-init, and cloud-init's logs, rotated ones included; not the
+# copies that delete_copies deletes. Those are deleted when the scrub is
+# through and otherwise kept as they are, values included, so that the next
+# boot can learn the values from them again (#76): a copy with its values
+# replaced would teach it nothing.
 scanned() {
-    if own_dir "$cloud_lib"; then
-        find "$cloud_lib" -xdev -path "${cloud_lib}seed" -prune -o -type f -print0
+    local f
+    {
+        if own_dir "$cloud_lib"; then
+            find "$cloud_lib" -xdev -path "${cloud_lib}seed" -prune -o -type f -print0
+        fi
+        if own_dir "$cloud_run"; then
+            find "$cloud_run" -xdev -type f -print0
+        fi
+        if own_dir "$cloud_log"; then
+            logs
+        fi
+    } | while IFS= read -r -d '' f; do
+        is_copy "$f" || printf '%s\0' "$f"
+    done
+}
+
+# is_copy FILE: whether FILE is one of the copies that delete_copies deletes.
+is_copy() {
+    local name=${1##*/} dir=${1%/*} copy
+    if [ "${dir%/*}/" = "${cloud_lib}instances/" ]; then
+        for copy in "${user_data_copies[@]}"; do [ "$name" != "$copy" ] || return 0; done
     fi
-    if own_dir "$cloud_run"; then
-        find "$cloud_run" -xdev -type f -print0
+    if [ "$dir/" = "$cloud_run" ]; then
+        for copy in "${run_copies[@]}"; do [ "$name" != "$copy" ] || return 0; done
     fi
-    if own_dir "$cloud_log"; then
-        logs
-    fi
+    return 1
 }
 
 # logs: cloud-init's logs, rotated ones included, NUL-separated.
@@ -459,39 +507,83 @@ log_kind() {
 }
 
 # delete_copies: deletes the copies of the user-data, and prints how many.
+# Names a copy that cannot be deleted and fails: the copies are not
+# rewritten (scanned), so such a copy still holds the values.
 delete_copies() {
-    local args=() name f count=0
+    local args=() name f count=0 rc=0
     for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
     if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
         while IFS= read -r -d '' f; do
-            rm -f -- "$f"
-            count=$((count + 1))
+            if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+                count=$((count + 1))
+            else
+                echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
+                rc=1
+            fi
         done < <(find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0)
     fi
     if own_dir "$cloud_run"; then
         for name in "${run_copies[@]}"; do
             f=$cloud_run$name
             if [ -f "$f" ] && [ ! -L "$f" ]; then
-                rm -f -- "$f"
-                count=$((count + 1))
+                if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+                    count=$((count + 1))
+                else
+                    echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
+                    rc=1
+                fi
             fi
         done
     fi
     printf '%s' "$count"
+    return "$rc"
 }
 
 main() {
-    local pats=() unknown=() f rc redacted=0 dropped=0 left=() unwritten=() seeded=() deleted
+    local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies='' undeleted=''
+    [ -z "$(config_copies | head -c1)" ] || copies=yes
     # Without the YAML module that cloud-init itself uses, every copy would
     # count as unreadable and the logs would go on every boot: fail instead.
-    if [ -n "$(config_copies | head -c1)" ] && ! python3 -I -c 'import yaml' 2>/dev/null; then
+    if [ -n "$copies" ] && ! python3 -I -c 'import yaml' 2>/dev/null; then
         echo "Python has no YAML module; cloud-init's copies of the cloud-config cannot be read, nothing is scrubbed" >&2
+        return 1
+    fi
+    # Without jq no value would be learned and the copies would go with the
+    # values still in the logs (#76): fail instead, and keep everything.
+    if { [ -n "$copies" ] || { [ -f "$combined" ] && [ ! -L "$combined" ]; }; } && ! jq -n 1 >/dev/null 2>&1; then
+        echo "jq cannot run; the provisioned secrets cannot be learned, nothing is scrubbed and cloud-init's copies of the provisioning data are kept" >&2
         return 1
     fi
     # Read before anything is deleted: the copies are deleted last, so that a
     # boot that ends before this is through can learn the values again.
-    mapfile -d '' pats < <(patterns)
-    mapfile -d '' unknown < <(unknown_instances)
+    learn
+    for f in "${unlearned[@]}"; do
+        unscrubbed+=("$f: jq cannot take the provisioned secrets out of it; they are not known")
+    done
+    mapfile -d '' -t pats < <(patterns)
+    if ! wait "$!"; then
+        pats=()
+        unscrubbed+=("jq cannot make the provisioned secrets into search patterns; none is searched for")
+    fi
+    # A place that is a symbolic link is not entered (own_dir), and a log
+    # that is one is not rewritten or deleted through it (logs): when there
+    # is something to scrub, what lies behind it keeps the values, so the
+    # copies stay too.
+    # Behind a link in place of /var/lib/cloud or its instances/ there can be
+    # copies whose values are not known here at all: kept and named always.
+    for d in "$cloud_lib" "${cloud_lib}instances"; do
+        if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the copies of the provisioning data in it are neither read nor deleted"); fi
+    done
+    if [ "${#pats[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
+        for d in "$cloud_run" "$cloud_log"; do
+            if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the provisioned secrets in it are not scrubbed"); fi
+        done
+        if own_dir "$cloud_log" 2>/dev/null; then
+            while IFS= read -r -d '' f; do
+                unscrubbed+=("$f is a symbolic link; the provisioned secrets behind it are not scrubbed")
+            done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
+        fi
+    fi
     if [ "${#unknown[@]}" -gt 0 ]; then
         for f in "${unknown[@]}"; do
             echo "$f: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted and the error messages in its status are replaced" >&2
@@ -549,16 +641,20 @@ main() {
     fi
     # A file that still holds a value, or whose error messages could not be
     # replaced, keeps the copies, so that the next boot can learn the values
-    # again, or find them unknown again, and retry.
-    if [ "${#left[@]}" -eq 0 ] && [ "${#unwritten[@]}" -eq 0 ]; then deleted=$(delete_copies); else deleted=0; fi
+    # again, or find them unknown again, and retry; so do values that are not
+    # known and places that are not scrubbed (unscrubbed).
+    if [ "${#left[@]}" -eq 0 ] && [ "${#unwritten[@]}" -eq 0 ] && [ "${#unscrubbed[@]}" -eq 0 ]; then deleted=$(delete_copies) || undeleted=yes; else deleted=0; fi
     echo "cloud-init's copies of the provisioning data deleted: $deleted; files with provisioned secrets replaced: $redacted"
     [ "$dropped" = 0 ] || echo "compressed logs with provisioned secrets deleted: $dropped"
     for f in "${seeded[@]}"; do
         echo "warning: the seed file $f holds provisioned secrets in plain text; once the appliance has started, delete the seed files and the configuration file that names them (it keeps its settings without them)" >&2
     done
-    if [ "${#left[@]}" -gt 0 ] || [ "${#unwritten[@]}" -gt 0 ]; then
+    # delete_copies has named the copies it could not delete.
+    [ -z "$undeleted" ] || return 1
+    if [ "${#left[@]}" -gt 0 ] || [ "${#unwritten[@]}" -gt 0 ] || [ "${#unscrubbed[@]}" -gt 0 ]; then
         for f in "${left[@]}"; do echo "$f still holds provisioned secrets" >&2; done
         for f in "${unwritten[@]}"; do echo "$f cannot be rewritten; its error messages are not replaced" >&2; done
+        for f in "${unscrubbed[@]}"; do echo "$f" >&2; done
         echo "cloud-init's copies of the provisioning data are kept until the next boot retries" >&2
         return 1
     fi
