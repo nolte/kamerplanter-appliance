@@ -273,22 +273,38 @@ expect_rec() {
 # stages its messages before it moves them into /run/issue.d (#94): `mv`
 # keeps the type, and with the policy's type of that directory a console that
 # opens before restorecon has run is denied the message, which only some
-# boots catch. The labels and the denials go to $OUT/NAME.console.txt.
+# boots catch. Where console-login-helper-messages is installed, the staging
+# directory must exist (kamerplanter-issue-staging.service creates it; absent,
+# the unit did not run) and a message of its NetworkManager dispatcher script
+# (22_clhm_<iface>.issue) must have reached /run/issue.d: a staging directory
+# the dispatcher may not write into drops the message without a denial the
+# grep below would see. The labels and the denials go to
+# $OUT/NAME.console.txt.
 check_console() {
-    local name=$1 file=$2 labels denials wrong
-    labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1; [ ! -e /run/console-login-helper-messages ] || stat -c '%C %n' /run/console-login-helper-messages 2>&1")
+    local name=$1 file=$2 labels denials wrong staging clhm
+    labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1")
+    clhm=$(guest '[ -e /usr/lib/console-login-helper-messages/libutil.sh ] && echo yes || echo no')
+    staging=$(guest "stat -c '%C %n' /run/console-login-helper-messages 2>&1")
     denials=$(guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null' |
         grep -E 'name="[^"]*issue|scontext=[^ ]*:(kmscon|getty|NetworkManager_dispatcher[a-z_]*)_t:' | sort -u)
     wrong=$(grep -v ':systemd_ssh_issue_var_run_t:' <<<"$labels")
-    printf '== labels\n%s\n== denials\n%s\n' "$labels" "$denials" >"$OUT/$name.console.txt"
+    printf '== labels\n%s\n== staging (console-login-helper-messages installed: %s)\n%s\n== denials\n%s\n' \
+        "$labels" "$clhm" "$staging" "$denials" >"$OUT/$name.console.txt"
     if ! grep -q " /run/issue.d/$file\$" <<<"$labels"; then
         record "$name" FAIL - "the console message $file is not in /run/issue.d"
     elif [ -n "$wrong" ]; then
         record "$name" FAIL - "not readable by the console: ${wrong//$'\n'/; }"
+    elif [ "$clhm" = yes ] && ! grep -q ':systemd_ssh_issue_var_run_t:.* /run/console-login-helper-messages$' <<<"$staging"; then
+        record "$name" FAIL - "staging directory of console-login-helper-messages missing or not labelled systemd_ssh_issue_var_run_t: ${staging//$'\n'/; }"
+    elif [ "$clhm" = yes ] && ! grep -qE ' /run/issue.d/22_clhm_[^/]+\.issue$' <<<"$labels"; then
+        record "$name" FAIL - "no message of the NetworkManager dispatcher (22_clhm_*.issue) in /run/issue.d"
     elif [ -n "$denials" ]; then
         record "$name" FAIL - "$(grep -c . <<<"$denials") SELinux denials for the console messages, see $name.console.txt"
+    elif [ "$clhm" = yes ]; then
+        record "$name" PASS - "console messages ($file, 22_clhm_*) and the staging directory labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
+        return 0
     else
-        record "$name" PASS - "console messages ($file) and their staging directory labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
+        record "$name" PASS - "console messages ($file) labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher (console-login-helper-messages not installed)"
         return 0
     fi
     return 1
