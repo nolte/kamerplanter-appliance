@@ -211,7 +211,8 @@ ln -s _data/f "$ck/b/arangodb_data/current"
 printf 'three' >"$ck/b/valkey_data/_data/dump.rdb"
 printf 'four' >"$ck/b/valkey_data/_data/"$'a\nb'
 printf '1.2\n' >"$ck/b/data-disk-release"
-chmod 0644 "$ck/b/arangodb_data/_data/"* "$ck/b/valkey_data/_data/"* "$ck/b/data-disk-release"
+# Files only: a directory with mode 0644 cannot be searched.
+find "$ck/b" -type f -exec chmod 0644 -- {} +
 read -r legacy full <<<"$(backup_checksums both "$ck/b" .)"
 expect "checksums: two SHA-256 digests" yes "$([[ $legacy =~ ^[0-9a-f]{64}$ && $full =~ ^[0-9a-f]{64}$ ]] && echo yes)"
 expect "checksums: legacy is what the earlier releases verify" "$(earlier_releases_checksum "$ck/b")" "$legacy"
