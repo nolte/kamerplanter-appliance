@@ -677,6 +677,14 @@ run_12() {
         [ -n "$keys" ] || record run12 FAIL - "seed URL: no SSH host keys after the first boot"
         diagnose run12; kill "$server"; stop_vm; return
     fi
+    # Reboot only once the services are up: a reboot while the first boot
+    # still pulls and starts them waits up to 25 minutes for
+    # kamerplanter-arangodb to stop (vm-tests run 44891190451).
+    if ! wait_up "$FIRST_BOOT_TIMEOUT" >/dev/null; then
+        diagnose run12-up
+        record run12-up FAIL - "seed URL: web UI and API did not answer within ${FIRST_BOOT_TIMEOUT}s"
+        kill "$server"; stop_vm; return
+    fi
 
     kill "$server"; wait "$server" 2>/dev/null
     if ! secs=$(reboot_to_ssh) || ! scrubbed; then
@@ -689,6 +697,11 @@ run_12() {
         "seed URL down: cloud-init fell back to the datasource None, a new instance" || diagnose run12-fallback
     expect_rec run12-fallback-keys "$keys" "$(host_keys)" \
         "seed URL down: the SSH host keys of the first boot stay"
+    if ! wait_up "$REBOOT_TIMEOUT" >/dev/null; then
+        diagnose run12-fallback-up
+        record run12-fallback-up FAIL - "seed URL down: web UI and API did not answer within ${REBOOT_TIMEOUT}s"
+        stop_vm; return
+    fi
 
     python3 -m http.server 8098 --bind 127.0.0.1 --directory "$seed" </dev/null >/dev/null 2>&1 &
     server=$!
