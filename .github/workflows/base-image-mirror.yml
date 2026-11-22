@@ -1,11 +1,16 @@
 name: base-image-mirror
 
-# Copies the Fedora bootc base image into this project's registry. Fedora
-# publishes it under moving tags only and deletes superseded digests within
-# about a day, so a digest pinned in image/Containerfile stops resolving soon
+# Copies the Fedora base images into this project's registry. Fedora
+# publishes them under moving tags only and deletes superseded digests within
+# about a day, so a digest pinned in a Containerfile stops resolving soon
 # after it was pinned. The mirror keeps every digest it has seen under a tag
 # of its own (`46-<digest prefix>`) and the newest one under `46`; Renovate
 # proposes the move of the pin from the `46` tag.
+#
+# Two pairs: the bootc base of the system image (image/Containerfile, #42)
+# and the Fedora base of the tool container (build/tools.Containerfile, #48).
+# A new pair has no mirror tag until this workflow ran once: dispatch it on
+# the branch that adds the pair before that branch builds from it.
 
 on:
   schedule:
@@ -21,15 +26,24 @@ concurrency:
 
 jobs:
   mirror:
-    name: base-image-mirror
+    name: base-image-mirror (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+    strategy:
+      # One pair failing must not stop the other from being mirrored.
+      fail-fast: false
+      matrix:
+        include:
+          - source: quay.io/fedora/fedora-bootc:46
+            target: base
+          - source: quay.io/fedora/fedora:46
+            target: tools-base
     env:
-      SOURCE: quay.io/fedora/fedora-bootc:46
-      TARGET: ghcr.io/${{ github.repository }}-base
+      SOURCE: ${{ matrix.source }}
+      TARGET: ghcr.io/${{ github.repository }}-${{ matrix.target }}
     steps:
       - name: Copy the base image when it changed
         env:
@@ -37,17 +51,18 @@ jobs:
         run: |
           set -euo pipefail
           skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          version=${SOURCE##*:}
           digest=$(skopeo inspect --raw "docker://$SOURCE" | sha256sum | cut -d' ' -f1)
-          tag="46-${digest::12}"
+          tag="$version-${digest::12}"
           if skopeo inspect --raw "docker://$TARGET:$tag" >/dev/null 2>&1; then
             echo "$SOURCE is sha256:$digest, already mirrored as $TARGET:$tag"
           else
             # By digest alone: skopeo refuses a reference with a tag and a
-          # digest (#42).
-          skopeo copy --all --preserve-digests --retry-times 3 \
+            # digest (#42).
+            skopeo copy --all --preserve-digests --retry-times 3 \
               "docker://${SOURCE%:*}@sha256:$digest" "docker://$TARGET:$tag"
           fi
           skopeo copy --all --preserve-digests --retry-times 3 \
-            "docker://$TARGET:$tag" "docker://$TARGET:46"
+            "docker://$TARGET:$tag" "docker://$TARGET:$version"
           echo "### Mirrored \`$SOURCE\`" >>"$GITHUB_STEP_SUMMARY"
-          echo "\`$TARGET:$tag\` and \`:46\` → \`sha256:$digest\`" >>"$GITHUB_STEP_SUMMARY"
+          echo "\`$TARGET:$tag\` and \`:$version\` → \`sha256:$digest\`" >>"$GITHUB_STEP_SUMMARY"

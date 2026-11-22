@@ -1,7 +1,11 @@
 # Tool container for the proof of concept: builds the system image, turns it
 # into a disk image and boots that in QEMU, with NoCloud drives and a seed URL
 # server for the provisioning tests. Runs privileged with /dev/kvm.
-FROM quay.io/fedora/fedora:46@sha256:65f229c50e5a6ec4b4468da58835c1a30db77fe835914ffa2086a05a79db0e24
+# Fedora removes superseded digests of quay.io/fedora/fedora:46 within about a
+# day, so the base comes from the project's mirror of it
+# (.github/workflows/base-image-mirror.yml), which keeps every digest it has
+# seen; the digest is the upstream one (#48).
+FROM ghcr.io/nolte/kamerplanter-appliance-tools-base:46@sha256:65f229c50e5a6ec4b4468da58835c1a30db77fe835914ffa2086a05a79db0e24
 
 RUN dnf -y install \
         podman skopeo image-builder \

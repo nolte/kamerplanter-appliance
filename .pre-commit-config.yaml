@@ -30,3 +30,16 @@ repos:
         files: '^(\.github/scripts/.*\.sh|build/.*\.sh|scripts/.*\.sh|tests/.*\.sh|image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*))$'
         types: [file]
         args: [-x]
+
+  - repo: local
+    hooks:
+      # Fedora deletes superseded digests of its quay.io images within about
+      # a day, so a base pinned there stops resolving (#42, #48). Every Fedora
+      # base builds from the project's mirror (.github/workflows/base-image-mirror.yml).
+      - id: fedora-base-from-mirror
+        name: Fedora bases build from the base image mirror
+        language: pygrep
+        # A FROM line, or an ARG default that a FROM ${...} would use.
+        entry: '^\s*(FROM\s+(--\S+\s+)*|ARG\s+\w+=)(quay\.io/fedora/|registry\.fedoraproject\.org/)'
+        args: [--ignore-case]
+        files: '(^|/)([^/]*\.)?(Containerfile|Dockerfile)(\.[^/]*)?$'
