@@ -58,11 +58,11 @@
 # (#76): when jq cannot run or fails on the combined cloud-config or on a
 # copy, so that the values in it are not known (without jq none are, and
 # nothing is scrubbed, as without Python's YAML module); and when there is
-# something to scrub and /run/cloud-init or /var/log is a symbolic link,
-# which is not entered, or one of cloud-init's logs is, which is not
-# rewritten through it, or /var/lib/cloud/data or the status or result in
-# it is, which are not scrubbed through it; and whenever /var/lib/cloud, its
-# instances/, an instance directory in it or a copy is a symbolic link,
+# something to scrub and /var/log is a symbolic link, which is not entered,
+# or one of cloud-init's logs is, which is not rewritten through it, or
+# /var/lib/cloud/data or the status or result in it is, which are not
+# scrubbed through it; and whenever /var/lib/cloud, its instances/, an
+# instance directory in it, /run/cloud-init or a copy is a symbolic link,
 # behind which copies could lie unread (#93). Each such link is named once.
 # The next boot retries. A copy that cannot be deleted is named, and the unit
 # fails, and so does a log that cannot be deleted when it is to be (see

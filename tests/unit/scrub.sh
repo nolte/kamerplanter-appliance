@@ -498,7 +498,7 @@ new_appliance
 mkdir -p "$SB/outside/run"
 echo '{"userdata": "outside"}' >"$SB/outside/run/instance-data-sensitive.json"
 echo '{}' >"$SB/outside/run/combined-cloud-config.json"
-rm -rf "$SB/run/cloud-init"
+mkdir -p "$SB/run"
 ln -sfn "$SB/outside/run" "$SB/run/cloud-init"
 rc=$(run_scrub)
 expect "/run/cloud-init as a link, no provisioning data: the scrub fails, names it once, the files behind it are untouched" "1|1|yes|yes" \
