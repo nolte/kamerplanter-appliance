@@ -510,6 +510,27 @@ reboot
 rc=$(run_configure)
 expect "migration: a stale keyed pin beside a matching legacy one is written anew, the services start" "0|yes|no|yes|yes" \
     "$rc|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$(hmac_of "$(pin_key)" "$(fernet_of rotated)")" ] && echo yes)|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$SB/run/kamerplanter/app.env")|$(has "the keyed pin of FERNET_KEY was older than $(pins_dir)/FERNET_KEY" "$(out)")"
+# A keyed pin that is a link leading nowhere beside a legacy one: the legacy
+# pin decides. Matching, the keyed pin is written anew and nothing stops;
+# differing, the message is that of a changed value, not of a pin that cannot
+# be checked (whose advice would pin the changed value).
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+rm "$(pins_dir)/FERNET_KEY.hmac"
+ln -s "$work/nowhere" "$(pins_dir)/FERNET_KEY.hmac"
+mkdir -p "$SB/var/lib/kamerplanter/update"
+echo "sha256:a sha256:b checking" >"$SB/var/lib/kamerplanter/update/pending"
+reboot
+rc=$(run_configure)
+expect "migration: a keyed pin leading nowhere beside a matching legacy one is written anew, the services start" "0|yes|yes|yes" \
+    "$rc|$([ ! -L "$(pins_dir)/FERNET_KEY.hmac" ] && [ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$(exists "$SB/run/kamerplanter/app.env")|$(has "the keyed pin of FERNET_KEY was a link that leads nowhere" "$(out)")"
+rm "$(pins_dir)/FERNET_KEY.hmac"
+ln -s "$work/nowhere" "$(pins_dir)/FERNET_KEY.hmac"
+pin_of "$(fernet_of elsewhere)" >"$(pins_dir)/FERNET_KEY"
+reboot
+rc=$(run_configure)
+expect "migration: a differing legacy pin beside a keyed pin leading nowhere is a changed value" "1|yes|no" \
+    "$rc|$(has "FERNET_KEY differs from the value Kamerplanter started with" "$(out)")|$(has "leads nowhere" "$(out)")"
+rm "$SB/var/lib/kamerplanter/update/pending"
 
 new_appliance
 run_configure >/dev/null
