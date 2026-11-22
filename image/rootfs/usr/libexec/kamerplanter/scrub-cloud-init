@@ -260,7 +260,7 @@ learn() {
     local f dir json
     local -A seen=() known=()
     pairs=() unknown=() unlearned=()
-    if [ -f "$combined" ] && [ ! -L "$combined" ]; then
+    if own_dir "$cloud_run" && [ -f "$combined" ] && [ ! -L "$combined" ]; then
         take_pairs <"$combined" || unlearned+=("$combined")
     fi
     while IFS= read -r -d '' f; do
@@ -574,7 +574,7 @@ main() {
     fi
     # Without jq no value would be learned and the copies would go with the
     # values still in the logs (#76): fail instead, and keep everything.
-    if { [ -n "$copies" ] || { [ -f "$combined" ] && [ ! -L "$combined" ]; }; } && ! jq -n 1 >/dev/null 2>&1; then
+    if { [ -n "$copies" ] || { own_dir "$cloud_run" && [ -f "$combined" ] && [ ! -L "$combined" ]; }; } && ! jq -n 1 >/dev/null 2>&1; then
         echo "jq cannot run; the provisioned secrets cannot be learned, nothing is scrubbed and cloud-init's copies of the provisioning data are kept" >&2
         return 1
     fi
@@ -594,9 +594,9 @@ main() {
     # behind it keeps what it holds. Each such link is named here, once.
     # Behind a link in place of /var/lib/cloud, its instances/, an instance
     # directory or a copy there can be copies whose values are not known here
-    # at all, and so behind a link in place of a copy in /run/cloud-init:
-    # kept and named always (#93).
-    for d in "$cloud_lib" "${cloud_lib}instances"; do
+    # at all, and so behind /run/cloud-init or a copy in it as a link: kept
+    # and named always (#93).
+    for d in "$cloud_lib" "${cloud_lib}instances" "$cloud_run"; do
         if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the copies of the provisioning data in it are neither read nor deleted"); fi
     done
     while IFS= read -r -d '' f; do
@@ -605,13 +605,12 @@ main() {
     while IFS= read -r -d '' f; do
         unscrubbed+=("$f is a symbolic link; the copy of the provisioning data behind it is neither read nor deleted")
     done < <(linked_copies)
-    # Behind /run/cloud-init, /var/lib/cloud/data (cloud-init's status and
-    # result), /var/log or one of cloud-init's logs as a link, the values
-    # stay when there is something to scrub: then the copies stay too.
+    # Behind /var/lib/cloud/data (cloud-init's status and result), /var/log
+    # or one of cloud-init's logs as a link, the values stay when there is
+    # something to scrub: then the copies stay too. Otherwise the link is
+    # only named.
     if [ "${#pats[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
-        for d in "$cloud_run" "$cloud_log"; do
-            if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the provisioned secrets in it are not scrubbed"); fi
-        done
+        if [ -L "${cloud_log%/}" ]; then unscrubbed+=("${cloud_log%/} is a symbolic link; the provisioned secrets in it are not scrubbed"); fi
         if [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}data" ]; then
             unscrubbed+=("${cloud_lib}data is a symbolic link; the provisioned secrets in cloud-init's status and result behind it are not scrubbed")
         elif own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
@@ -627,11 +626,18 @@ main() {
             done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
         fi
     else
-        for d in "$cloud_run" "$cloud_log"; do
-            if [ -L "${d%/}" ]; then echo "${d%/} is a symbolic link; it is not entered, and there is nothing to scrub" >&2; fi
-        done
+        if [ -L "${cloud_log%/}" ]; then echo "${cloud_log%/} is a symbolic link; it is not entered, and there is nothing to scrub" >&2; fi
         if [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}data" ]; then
             echo "${cloud_lib}data is a symbolic link; it is not entered, and there is nothing to scrub" >&2
+        elif own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
+            for f in "${status_names[@]}"; do
+                if [ -L "${cloud_lib}data/$f" ]; then echo "${cloud_lib}data/$f is a symbolic link; it is not followed, and there is nothing to scrub" >&2; fi
+            done
+        fi
+        if own_dir "$cloud_log"; then
+            while IFS= read -r -d '' f; do
+                echo "$f is a symbolic link; it is not followed, and there is nothing to scrub" >&2
+            done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
         fi
     fi
     if [ "${#unknown[@]}" -gt 0 ]; then

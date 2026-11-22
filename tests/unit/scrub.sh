@@ -490,7 +490,19 @@ mv "$SB/run/cloud-init" "$SB/outside/run"
 ln -sfn "$SB/outside/run" "$SB/run/cloud-init"
 rc=$(run_scrub)
 expect "/run/cloud-init as a link: the scrub fails, says so, keeps the copies, the files behind it are untouched" "1|yes|yes|yes|yes" \
-    "$rc|$(has "$SB/run/cloud-init is a symbolic link; the provisioned secrets in it are not scrubbed" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(exists "$SB/outside/run/instance-data-sensitive.json")|$([ "$(found "$SB/outside/run")" != none ] && echo yes)"
+    "$rc|$(has "$SB/run/cloud-init is a symbolic link; the copies of the provisioning data in it are neither read nor deleted" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(exists "$SB/outside/run/instance-data-sensitive.json")|$([ "$(found "$SB/outside/run")" != none ] && echo yes)"
+# The same without provisioning data: what lies behind the link is neither
+# read nor known, so it fails all the same (#93), and the file behind it is
+# untouched.
+new_appliance
+mkdir -p "$SB/outside/run"
+echo '{"userdata": "outside"}' >"$SB/outside/run/instance-data-sensitive.json"
+echo '{}' >"$SB/outside/run/combined-cloud-config.json"
+rm -rf "$SB/run/cloud-init"
+ln -sfn "$SB/outside/run" "$SB/run/cloud-init"
+rc=$(run_scrub)
+expect "/run/cloud-init as a link, no provisioning data: the scrub fails, names it once, the files behind it are untouched" "1|1|yes|yes" \
+    "$rc|$(grep -cF "$SB/run/cloud-init is a symbolic link" "$SB/out")|$(exists "$SB/outside/run/instance-data-sensitive.json")|$(exists "$SB/outside/run/combined-cloud-config.json")"
 
 # A file outside the logs that starts like a compressed one is searched as it
 # is, never deleted.
