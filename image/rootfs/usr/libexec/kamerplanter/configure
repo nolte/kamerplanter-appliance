@@ -681,25 +681,75 @@ done
 # once per run: one that arrives later (an IPv6 address still tentative, a
 # new DHCP lease) is an origin from the next boot or restart of
 # kamerplanter.target on.
-# FRONTEND_URL is the host name when it has a dot, else the first IPv4
-# address, else the host name, else localhost. CORS_ORIGINS lists the origin
-# of the FRONTEND_URL in effect (set in a layer or derived), the host name,
-# the host name with .local when it has no dot, every address and localhost,
-# all on the web UI's port 8080. A value of any layer is kept as it is. Nothing
-# here fails the check: without a usable host name or address the
-# derivation ends at localhost, the default of the releases before it.
+# FRONTEND_URL is the host name when it has a dot and does not end in a
+# suffix that clients do not resolve (unresolved_suffixes), else the first
+# IPv4 address, else the host name, else localhost. CORS_ORIGINS lists the
+# origin of the FRONTEND_URL in effect (set in a layer or derived), the host
+# name, the host name with .local when it has no dot, every address and
+# localhost, all on the web UI's port 8080. A value of any layer is kept as it
+# is. Nothing here fails the check: without a usable host name or address the
+# derivation ends at localhost, the default of the releases before it, and a
+# set FRONTEND_URL whose origin cannot be read only adds no origin.
 web_origin() { printf 'http://%s:8080' "$1"; }
+# A DNS name: labels of letters, digits and inner hyphens, joined by dots.
+dns_label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+dns_name="^$dns_label(\\.$dns_label)*\$"
+# Suffixes a distribution, a hypervisor or a cloud puts on a host name that no
+# client resolves: such a name is a CORS origin, but the FRONTEND_URL only
+# when the device has no IPv4 address, like a name without a dot.
+unresolved_suffixes=(localdomain novalocal localhost)
+# valid_ipv4 ADDR: four decimal octets of 0-255 without leading zeros.
+valid_ipv4() {
+    local octet octets
+    IFS=. read -r -a octets <<<"$1"
+    [ ${#octets[@]} -eq 4 ] && [[ $1 != *. ]] || return 1
+    for octet in "${octets[@]}"; do
+        [[ $octet =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$octet" -le 255 ] || return 1
+    done
+}
+# valid_ipv6 ADDR: an IPv6 address in lower case without brackets (RFC 4291
+# 2.2): eight groups of one to four hex digits, at most one :: for one group
+# or more, the last two groups optionally an IPv4 address.
+valid_ipv6() {
+    local a=$1 head tail groups=0 part colons hex='[0-9a-f]{1,4}'
+    if [[ $a == *.* ]]; then
+        [[ $a =~ ^(.*:)([0-9.]+)$ ]] && valid_ipv4 "${BASH_REMATCH[2]}" || return 1
+        a=${BASH_REMATCH[1]}0:0
+    fi
+    case $a in *:::*) return 1 ;; esac
+    if [[ $a == *::* ]]; then
+        head=${a%%::*} tail=${a#*::}
+        case $tail in *::*) return 1 ;; esac
+    else
+        head=$a tail=
+    fi
+    for part in "$head" "$tail"; do
+        [ -n "$part" ] || continue
+        [[ $part =~ ^$hex(:$hex)*$ ]] || return 1
+        colons=${part//[^:]/}
+        groups=$((groups + ${#colons} + 1))
+    done
+    if [[ $a == *::* ]]; then [ "$groups" -le 7 ]; else [ "$groups" -eq 8 ]; fi
+}
 derive_address_defaults() {
-    local host dev addr rest origin set_url origins=() unique=() v4=() v6=() frontend json=
+    local host named suffix dev addr rest origin set_url url_host port origins=() unique=() v4=() v6=() frontend json=
     host=
     if [ -r /etc/hostname ]; then
-        host=$(sed -n '/^[[:space:]]*#/d; /[^[:space:]]/{s/[[:space:]]//g; p; q}' /etc/hostname 2>/dev/null) || host=
+        # The first line that is neither blank nor a comment, without the
+        # white space around it; white space inside makes it no DNS name.
+        host=$(sed -n '/^[[:space:]]*#/d; /[^[:space:]]/{s/^[[:space:]]*//; s/[[:space:]]*$//; p; q}' /etc/hostname 2>/dev/null) || host=
     fi
     host=${host,,}
     host=${host%.}
-    if [[ ! $host =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] ||
-        [ "$host" = localhost ] || [ "$host" = localhost.localdomain ]; then
+    if [[ ! $host =~ $dns_name ]] || [ "$host" = localhost ] || [ "$host" = localhost.localdomain ]; then
         host=
+    fi
+    named=
+    if [[ $host == *.* ]]; then
+        named=$host
+        for suffix in "${unresolved_suffixes[@]}"; do
+            case $host in *."$suffix") named= ;; esac
+        done
     fi
     if command -v ip >/dev/null 2>&1; then
         while read -r _ dev _ addr _; do
@@ -712,8 +762,8 @@ derive_address_defaults() {
             if [ -n "$addr" ]; then v6+=("[${addr%/*}]"); fi
         done < <(ip -o -6 addr show scope global 2>/dev/null || true)
     fi
-    if [[ $host == *.* ]]; then
-        frontend=$(web_origin "$host")
+    if [ -n "$named" ]; then
+        frontend=$(web_origin "$named")
     elif [ ${#v4[@]} -gt 0 ]; then
         frontend=$(web_origin "${v4[0]}")
     elif [ -n "$host" ]; then
@@ -723,17 +773,36 @@ derive_address_defaults() {
     fi
     origins=("$frontend")
     # The origin of a FRONTEND_URL that a layer sets comes first, as a browser
-    # sends it (lower case, no default port), when the URL has the form
-    # http[s]://host[:port][/?#...] with a host name, an IPv4 address or an
-    # IPv6 one in brackets; anything else adds no origin, so the JSON list
-    # stays well-formed, and is said in the journal.
+    # sends it (lower case, the port without leading zeros, no default or
+    # empty port), when the URL has the form http[s]://host[:port][/?#...]
+    # with a DNS name (a trailing dot kept), an IPv4 address or an IPv6 one
+    # in brackets, and a port up to 65535. Anything else adds no origin, so
+    # the JSON list stays well-formed and holds no origin a browser never
+    # sends; when CORS_ORIGINS is derived, the journal says so. It is never
+    # a failure: the FRONTEND_URL itself is passed on as it is set.
     set_url=${cfg[FRONTEND_URL]-}
     set_url=${set_url,,}
-    if [[ $set_url =~ ^(https?)://(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(:[0-9]{1,5})?([/?#]|$) ]]; then
-        origin=${BASH_REMATCH[1]}://${BASH_REMATCH[2]}${BASH_REMATCH[3]}
-        case $origin in https://*:443) origin=${origin%:443} ;; http://*:80) origin=${origin%:80} ;; esac
+    origin=
+    if [[ $set_url =~ ^(https?)://(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(:([0-9]*))?([/?#]|$) ]]; then
+        url_host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]}
+        origin=${BASH_REMATCH[1]}://$url_host
+        while [[ $port == 0?* ]]; do port=${port#0}; done
+        if [[ $url_host == \[*\] ]]; then
+            valid_ipv6 "${url_host:1:${#url_host}-2}" || origin=
+        elif [[ ! ${url_host%.} =~ $dns_name ]]; then
+            origin=
+        fi
+        if [ ${#port} -gt 5 ] || { [ -n "$port" ] && [ "$port" -gt 65535 ]; }; then
+            origin=
+        fi
+        case $origin:$port in
+        :* | *: | https://*:443 | http://*:80) ;;
+        ?*) origin=$origin:$port ;;
+        esac
+    fi
+    if [ -n "$origin" ]; then
         origins=("$origin" "${origins[@]}")
-    elif [ -n "$set_url" ]; then
+    elif [ -n "$set_url" ] && [ -z "${cfg[CORS_ORIGINS]+set}" ]; then
         echo "warning: FRONTEND_URL is not of the form http[s]://host[:port][/...]; its origin is not added to CORS_ORIGINS" >&2
     fi
     if [ -n "$host" ]; then

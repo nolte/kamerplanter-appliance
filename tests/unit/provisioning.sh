@@ -195,6 +195,26 @@ expect "derived: a bare host name without an address is the frontend URL" \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
+expect "derived: a host name ending in .localdomain is used like one without a dot, the IPv4 address is the frontend URL" \
+    '0|http://10.0.2.15:8080|["http://10.0.2.15:8080","http://kamerplanter.localdomain:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kamerplanter.localdomain TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+expect "derived: a host name ending in .novalocal without an address is the frontend URL" \
+    '0|http://host.novalocal:8080|["http://host.novalocal:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=Host.NovaLocal TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+expect "derived: the white space around the static host name is trimmed" \
+    '0|http://kp.example.org:8080' \
+    "$(TEST_HOST='  kp.example.org  ' TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)"
+
+configure_case
+expect "derived: a static host name with white space inside counts as none" \
+    '0|http://10.0.2.15:8080|["http://10.0.2.15:8080","http://localhost:8080"]' \
+    "$(TEST_HOST='kp example.org' TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
 expect "derived: no usable host name and no address end at localhost, as before" \
     '0|http://localhost:8080|["http://localhost:8080"]' \
     "$(TEST_HOST=localhost.localdomain run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
@@ -240,6 +260,49 @@ user_file 'FRONTEND_URL=http://kp:abc/'
 expect "derived: a FRONTEND_URL with a port that is no number adds no origin" \
     '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+# A FRONTEND_URL whose host or port no browser sends adds no origin (#116).
+for url in 'http://a..b/' 'http://-x/' 'http://kp-/' 'http://kp:99999/' 'http://kp:65536/' 'http://kp:123456/' \
+    'http://[:::]/' 'http://[1::2::3]/' 'http://[1:2:3:4:5:6:7:8:9]/' 'http://[1:2:3]/' 'http://[::1.2.3.256]/'; do
+    configure_case
+    user_file "FRONTEND_URL=$url"
+    expect "derived: a FRONTEND_URL with a host or port no browser sends ($url) adds no origin, and the journal says so" \
+        '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]|yes' \
+        "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(has 'its origin is not added to CORS_ORIGINS' "$(cat "$SB/out")")"
+done
+
+configure_case
+user_file 'FRONTEND_URL=http://kp:/'
+expect "derived: a FRONTEND_URL with an empty port gives the origin of the default port" \
+    '0|["http://kp","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file 'FRONTEND_URL=http://KP:08080/app'
+expect "derived: the port of a set FRONTEND_URL loses its leading zeros, as a browser sends it" \
+    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file 'FRONTEND_URL=https://kp.example.org.:65535/'
+expect "derived: a FRONTEND_URL with a trailing dot and the highest port gives its origin" \
+    '0|["https://kp.example.org.:65535","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+for url in 'http://[2001:db8::1]:8443/' 'http://[::]/' 'http://[1:2:3:4:5:6:7:8]/'; do
+    configure_case
+    user_file "FRONTEND_URL=$url"
+    origin=${url%/}
+    expect "derived: a FRONTEND_URL with an IPv6 address ($url) gives its origin" \
+        "0|[\"$origin\",\"http://kp:8080\",\"http://kp.local:8080\",\"http://localhost:8080\"]" \
+        "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+done
+
+configure_case
+user_file 'CORS_ORIGINS=["https://kp.example.org"]' 'FRONTEND_URL=not a url'
+expect "derived: a FRONTEND_URL that adds no origin is not warned about when a layer sets CORS_ORIGINS" \
+    '0|["https://kp.example.org"]|not a url|no' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(app FRONTEND_URL)|$(has 'its origin is not added to CORS_ORIGINS' "$(cat "$SB/out")")"
 
 configure_case
 user_file CORS_ORIGINS=
