@@ -89,8 +89,9 @@
 # Nothing is followed: only regular files are deleted or rewritten, found
 # without following symbolic links and without leaving the file system of the
 # directory they are found in; a directory that is a symbolic link is not
-# entered, and a link in a place that matters is named (see above). Values are never printed, passed on a command line or written to
-# a file of their own: they go from jq to Python through pipes only.
+# entered, and a link in a place that matters is named (see above). Values
+# are never printed, passed on a command line or written to a file of their
+# own: they go from jq to Python through pipes only.
 set -euo pipefail
 umask 077
 
@@ -620,7 +621,7 @@ main() {
                 if [ -L "${cloud_lib}data/$f" ]; then unscrubbed+=("${cloud_lib}data/$f is a symbolic link; the provisioned secrets behind it are not scrubbed"); fi
             done
         fi
-        if own_dir "$cloud_log" 2>/dev/null; then
+        if own_dir "$cloud_log"; then
             while IFS= read -r -d '' f; do
                 unscrubbed+=("$f is a symbolic link; the provisioned secrets behind it are not scrubbed")
             done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
