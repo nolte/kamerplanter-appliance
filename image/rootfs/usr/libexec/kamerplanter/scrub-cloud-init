@@ -60,11 +60,14 @@
 # nothing is scrubbed, as without Python's YAML module); and when there is
 # something to scrub and /run/cloud-init or /var/log is a symbolic link,
 # which is not entered, or one of cloud-init's logs is, which is not
-# rewritten through it; and whenever /var/lib/cloud or its instances/ is a
-# symbolic link, behind which copies could lie unread. The next boot retries.
-# A copy that cannot be deleted is named, and the unit fails. The services
-# do not wait for the scrub, and the update's health check does not look at
-# it: a failed scrub stops nothing.
+# rewritten through it, or /var/lib/cloud/data or the status or result in
+# it is, which are not scrubbed through it; and whenever /var/lib/cloud, its
+# instances/, an instance directory in it or a copy is a symbolic link,
+# behind which copies could lie unread (#93). Each such link is named once.
+# The next boot retries. A copy that cannot be deleted is named, and the unit
+# fails, and so does a log that cannot be deleted when it is to be (see
+# below). The services do not wait for the scrub, and the update's health
+# check does not look at it: a failed scrub stops nothing.
 #
 # When an instance has copies but none of them can be read, its secrets are
 # not known. Then cloud-init's logs are deleted instead, rotated ones
@@ -86,7 +89,7 @@
 # Nothing is followed: only regular files are deleted or rewritten, found
 # without following symbolic links and without leaving the file system of the
 # directory they are found in; a directory that is a symbolic link is not
-# entered. Values are never printed, passed on a command line or written to
+# entered, and a link in a place that matters is named (see above). Values are never printed, passed on a command line or written to
 # a file of their own: they go from jq to Python through pipes only.
 set -euo pipefail
 umask 077
@@ -107,14 +110,11 @@ run_copies=(combined-cloud-config.json instance-data-sensitive.json)
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
-# own_dir DIR: whether DIR is a directory of its own, not a symbolic link;
-# says so when it is something else.
+# own_dir DIR: whether DIR is a directory of its own, not a symbolic link.
+# Says nothing: it is asked several times per run, in subshells too, and main
+# names each place that is a link once (#93).
 own_dir() {
-    if [ -L "${1%/}" ]; then
-        echo "${1%/} is a symbolic link; it is not scrubbed" >&2
-        return 1
-    fi
-    [ -d "$1" ]
+    [ ! -L "${1%/}" ] && [ -d "$1" ]
 }
 
 # secret_pairs: the provisioned secrets of the cloud-config on stdin, as JSON,
@@ -154,6 +154,29 @@ config_copies() {
     own_dir "$cloud_lib" && own_dir "${cloud_lib}instances" || return 0
     for name in "${config_names[@]}"; do args+=(-o -name "$name"); done
     find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0
+}
+
+# linked_instances: the symbolic links in /var/lib/cloud/instances, each in
+# place of an instance directory, NUL-separated. linked_copies: the symbolic
+# links in place of a copy of the provisioning data, in an instance directory
+# (user_data_copies) or in /run/cloud-init (run_copies), NUL-separated.
+# Neither is followed, so the copies behind them are neither read nor deleted
+# (#93).
+linked_instances() {
+    own_dir "$cloud_lib" && own_dir "${cloud_lib}instances" || return 0
+    find "${cloud_lib}instances" -xdev -mindepth 1 -maxdepth 1 -type l -print0
+}
+linked_copies() {
+    local args=() name
+    if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
+        for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
+        find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type l \( "${args[@]:1}" \) -print0
+    fi
+    if own_dir "$cloud_run"; then
+        for name in "${run_copies[@]}"; do
+            if [ -L "$cloud_run$name" ]; then printf '%s\0' "$cloud_run$name"; fi
+        done
+    fi
 }
 
 # as_json FILE: the cloud-config documents in FILE, a copy of the user-data,
@@ -565,23 +588,49 @@ main() {
         pats=()
         unscrubbed+=("jq cannot make the provisioned secrets into search patterns; none is searched for")
     fi
-    # A place that is a symbolic link is not entered (own_dir), and a log
-    # that is one is not rewritten or deleted through it (logs): when there
-    # is something to scrub, what lies behind it keeps the values, so the
-    # copies stay too.
-    # Behind a link in place of /var/lib/cloud or its instances/ there can be
-    # copies whose values are not known here at all: kept and named always.
+    # A place that is a symbolic link is not entered (own_dir), and a file
+    # that is one is not read, rewritten or deleted through it: what lies
+    # behind it keeps what it holds. Each such link is named here, once.
+    # Behind a link in place of /var/lib/cloud, its instances/, an instance
+    # directory or a copy there can be copies whose values are not known here
+    # at all, and so behind a link in place of a copy in /run/cloud-init:
+    # kept and named always (#93).
     for d in "$cloud_lib" "${cloud_lib}instances"; do
         if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the copies of the provisioning data in it are neither read nor deleted"); fi
     done
+    while IFS= read -r -d '' f; do
+        unscrubbed+=("$f is a symbolic link; the copies of the provisioning data in it are neither read nor deleted")
+    done < <(linked_instances)
+    while IFS= read -r -d '' f; do
+        unscrubbed+=("$f is a symbolic link; the copy of the provisioning data behind it is neither read nor deleted")
+    done < <(linked_copies)
+    # Behind /run/cloud-init, /var/lib/cloud/data (cloud-init's status and
+    # result), /var/log or one of cloud-init's logs as a link, the values
+    # stay when there is something to scrub: then the copies stay too.
     if [ "${#pats[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
         for d in "$cloud_run" "$cloud_log"; do
             if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the provisioned secrets in it are not scrubbed"); fi
         done
+        if [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}data" ]; then
+            unscrubbed+=("${cloud_lib}data is a symbolic link; the provisioned secrets in cloud-init's status and result behind it are not scrubbed")
+        elif own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
+            # cloud-init writes these as files; its links to them are in
+            # /run/cloud-init.
+            for f in "${status_names[@]}"; do
+                if [ -L "${cloud_lib}data/$f" ]; then unscrubbed+=("${cloud_lib}data/$f is a symbolic link; the provisioned secrets behind it are not scrubbed"); fi
+            done
+        fi
         if own_dir "$cloud_log" 2>/dev/null; then
             while IFS= read -r -d '' f; do
                 unscrubbed+=("$f is a symbolic link; the provisioned secrets behind it are not scrubbed")
             done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
+        fi
+    else
+        for d in "$cloud_run" "$cloud_log"; do
+            if [ -L "${d%/}" ]; then echo "${d%/} is a symbolic link; it is not entered, and there is nothing to scrub" >&2; fi
+        done
+        if [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}data" ]; then
+            echo "${cloud_lib}data is a symbolic link; it is not entered, and there is nothing to scrub" >&2
         fi
     fi
     if [ "${#unknown[@]}" -gt 0 ]; then
@@ -590,8 +639,13 @@ main() {
         done
         if own_dir "$cloud_log"; then
             while IFS= read -r -d '' f; do
-                rm -f -- "$f"
-                echo "deleted $f"
+                # Not under set -e: a log that stays is named, and the copies
+                # stay with it, so that the next boot retries (#93).
+                if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+                    echo "deleted $f"
+                else
+                    unscrubbed+=("$f cannot be deleted; the provisioned secrets in it are not known and stay in it")
+                fi
             done < <(logs)
         fi
         while IFS= read -r -d '' f; do
@@ -637,6 +691,8 @@ main() {
             while IFS= read -r -d '' f; do
                 if printf '%s\0' "${pats[@]}" | holds "$f"; then seeded+=("$f"); fi
             done < <(find "${cloud_lib}seed" -xdev -type f -print0)
+        elif [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}seed" ]; then
+            echo "warning: ${cloud_lib}seed is a symbolic link; the seed files behind it are not looked into" >&2
         fi
     fi
     # A file that still holds a value, or whose error messages could not be

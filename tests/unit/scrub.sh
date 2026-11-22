@@ -213,11 +213,13 @@ expect "copies left from an earlier boot: the logs are scrubbed with the values 
     "$(found "$SB"/var/log/cloud-init*.log)|$(has "secret REDACTED and REDACTED in one line" "$(cat "$SB/var/log/cloud-init.log")")|$(has "run: REDACTED" "$(cat "$SB/var/log/cloud-init-output.log")")"
 
 # A copy of the cloud-config that cannot be read, but user-data.txt can: the
-# values are learned from it, the logs are scrubbed and kept (#46).
+# values are learned from it, the logs are scrubbed and kept (#46). No
+# user-data.txt.i, so that they can come from user-data.txt alone (#82).
 new_appliance
 booted iid-1
 rm -rf "$SB/run"
 printf 'kamerplanter: [unclosed\n' >"$SB/var/lib/cloud/instances/iid-1/cloud-config.txt"
+rm -f "$SB/var/lib/cloud/instances/iid-1/user-data.txt.i"
 cp "$SB/var/log/cloud-init.log" "$SB/var/log/cloud-init.log.1"
 echo "untouched" >"$SB/var/log/messages"
 rc=$(run_scrub)
@@ -225,6 +227,19 @@ expect "an unreadable cloud-config.txt, a readable user-data.txt: the logs are s
     "$rc|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(exists "$SB/var/log/cloud-init.log.1")|$(exists "$SB/var/log/messages")|$(found "$SB"/var/log/cloud-init*.log*)|$(exists "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
 expect "an unreadable cloud-config.txt, a readable user-data.txt: the instance's secrets count as known" no \
     "$(has "no copy of the cloud-config can be read" "$(out)")"
+
+# The same with user-data.txt compressed with gzip, as a source may supply it:
+# it is decompressed and the values are learned from it alone (#82).
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+rm -f "$i/user-data.txt.i"
+user_data | gzip -c >"$i/user-data.txt"
+rc=$(run_scrub)
+expect "an unreadable cloud-config.txt, a gzip user-data.txt: its values are learned, the logs are scrubbed and kept, the copy goes" "0|yes|none|yes|no|no" \
+    "$rc|$(exists "$SB/var/log/cloud-init.log")|$(found "$SB"/var/log/cloud-init*.log)|$(has "secret REDACTED and REDACTED in one line" "$(cat "$SB/var/log/cloud-init.log")")|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$i/user-data.txt")"
 
 # Only user-data.txt.i can be read, a MIME message as cloud-init writes it,
 # its cloud-config part base64-encoded: the values are learned from that part.
@@ -274,6 +289,21 @@ expect "no copy can be read: cloud-init's record of the instance is kept, the co
 expect "no copy can be read: the scrub names the instance and says why the logs go" "yes|yes" \
     "$(has "$i: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" "$(out)")|$(has "error messages replaced in $status" "$(out)")"
 
+# No copy can be read and a log cannot be deleted: it is named, the error
+# messages are still replaced, the copies stay and the unit fails (#93).
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
+mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+chmod 0500 "$SB/var/log"
+rc=$(run_scrub)
+chmod 0700 "$SB/var/log"
+expect "no copy can be read, a log cannot be deleted: the scrub fails, names it, replaces the error messages, keeps the copies" "1|yes|yes|yes|yes|yes" \
+    "$rc|$(has "$SB/var/log/cloud-init.log cannot be deleted; the provisioned secrets in it are not known" "$(out)")|$(has "error messages replaced in $SB/var/lib/cloud/data/status.json" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
+
 # A status that is not JSON is left alone and named; nothing fails for it.
 new_appliance
 booted iid-1
@@ -293,9 +323,15 @@ rm -rf "$SB/run"
 i=$SB/var/lib/cloud/instances/iid-1
 rm -f "$i/cloud-config.txt" "$i/user-data.txt.i"
 printf '#!/bin/sh\necho provisioned\n' >"$i/user-data.txt"
+# Nothing is learned, so nothing is replaced: a status or a log that quoted a
+# value would keep it, and the case would pin a secret left in place. Such a
+# user-data holds none, so neither do its status and logs here (#82).
+printf '{"v1": {"init": {"errors": ["a schema warning"]}}}\n' >"$SB/var/lib/cloud/data/status.json"
+printf '2026-11-16 10:00:00,000 - util.py[DEBUG]: Writing to /var/lib/cloud/instances/iid-1/user-data.txt - wb: [600] 30 bytes\n' >"$SB/var/log/cloud-init.log"
+printf 'Cloud-init v. 26.2 running\nprovisioned\n' >"$SB/var/log/cloud-init-output.log"
 status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
-expect "a shell script as user-data: not unknown, the logs and the status are kept, the copy goes" "0|yes|yes|$status_before|no|no" \
-    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$i/user-data.txt")"
+expect "a shell script as user-data: not unknown, the logs and the status are kept, the copy goes" "0|yes|yes|$status_before|no|no|none" \
+    "$(run_scrub)|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$i/user-data.txt")|$(found "$SB/var/lib/cloud" "$SB/var/log")"
 
 # cloud-config.txt cannot be read and the user-data gives no cloud-config of
 # its own, as an #include does: what cloud-config.txt holds is unknown, so the
@@ -496,20 +532,69 @@ expect "seed files: the warning names the file, the copies are gone" "yes|none" 
     "$(has "warning: the seed file $SB/var/lib/cloud/seed/nocloud/user-data holds provisioned secrets" "$(out)")|$(found "$SB/var/lib/cloud/instances" "$SB/run/cloud-init" "$SB"/var/log/cloud-init*.log)"
 
 # --- symbolic links are never followed ---
+# A link that is no copy and in no place the scrub enters: the file it points
+# to keeps its content, the scrub succeeds.
 new_appliance
 booted iid-1
 echo "outside $jwt" >"$SB/outside/target"
-mkdir -p "$SB/outside/dir"
-echo "outside $jwt" >"$SB/outside/dir/user-data.txt"
 ln -sfn "$SB/outside/target" "$SB/var/lib/cloud/instances/iid-1/vendor-cloud-config.txt"
-rm -f "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt"
-ln -sfn "$SB/outside/target" "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt"
-ln -sfn "$SB/outside/dir" "$SB/var/lib/cloud/instances/linked"
 ln -sfn "$SB/outside/target" "$SB/run/cloud-init/instance-data-sensitive.json.link"
 rc=$(run_scrub)
-expect "links into other places: the files they point to keep their content" "0|outside $jwt|outside $jwt" \
-    "$rc|$(cat "$SB/outside/target")|$(cat "$SB/outside/dir/user-data.txt")"
-expect "links: a directory linked into instances/ is not entered" yes "$(exists "$SB/outside/dir/user-data.txt")"
+expect "links into other places: the files they point to keep their content, the scrub succeeds" "0|outside $jwt|no" \
+    "$rc|$(cat "$SB/outside/target")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
+# An instance directory that is a link: the copies behind it are neither read
+# nor deleted, so it is named, the copies stay and the scrub fails (#93).
+new_appliance
+booted iid-1
+mkdir -p "$SB/outside/dir"
+echo "outside $jwt" >"$SB/outside/dir/user-data.txt"
+ln -sfn "$SB/outside/dir" "$SB/var/lib/cloud/instances/linked"
+rc=$(run_scrub)
+expect "links: an instance directory as a link is not entered, named, the copies are kept, the scrub fails" "1|outside $jwt|yes|$all_kept" \
+    "$rc|$(cat "$SB/outside/dir/user-data.txt")|$(has "$SB/var/lib/cloud/instances/linked is a symbolic link; the copies of the provisioning data in it are neither read nor deleted" "$(out)")|$(kept_copies)"
+# A copy that is a link, in an instance directory or in /run/cloud-init: not
+# read, deleted or rewritten through it; named, the copies stay (#93).
+new_appliance
+booted iid-1
+i=$SB/var/lib/cloud/instances/iid-1
+mv "$i/cloud-config.txt" "$SB/outside/cloud-config.txt"
+ln -sfn "$SB/outside/cloud-config.txt" "$i/cloud-config.txt"
+outside_before=$(md5sum <"$SB/outside/cloud-config.txt")
+rc=$(run_scrub)
+expect "links: a copy in an instance directory as a link is named, the file behind it untouched, the copies kept, the scrub fails" "1|$outside_before|yes|$all_kept" \
+    "$rc|$(md5sum <"$SB/outside/cloud-config.txt")|$(has "$i/cloud-config.txt is a symbolic link; the copy of the provisioning data behind it is neither read nor deleted" "$(out)")|$(kept_copies)"
+new_appliance
+booted iid-1
+mv "$SB/run/cloud-init/instance-data-sensitive.json" "$SB/outside/instance-data-sensitive.json"
+ln -sfn "$SB/outside/instance-data-sensitive.json" "$SB/run/cloud-init/instance-data-sensitive.json"
+rc=$(run_scrub)
+expect "links: a copy in /run/cloud-init as a link is named, the file behind it kept, the copies kept, the scrub fails" "1|yes|yes|$all_kept" \
+    "$rc|$(exists "$SB/outside/instance-data-sensitive.json")|$(has "$SB/run/cloud-init/instance-data-sensitive.json is a symbolic link; the copy of the provisioning data behind it is neither read nor deleted" "$(out)")|$(kept_copies)"
+# /var/lib/cloud/data as a link: cloud-init's status and result behind it are
+# not scrubbed, so when there is something to scrub the copies stay (#93).
+new_appliance
+booted iid-1
+mv "$SB/var/lib/cloud/data" "$SB/outside/data"
+ln -sfn "$SB/outside/data" "$SB/var/lib/cloud/data"
+status_before=$(md5sum <"$SB/outside/data/status.json")
+rc=$(run_scrub)
+expect "links: /var/lib/cloud/data as a link is named, the status behind it untouched, the copies kept, the scrub fails" "1|$status_before|yes|$all_kept" \
+    "$rc|$(md5sum <"$SB/outside/data/status.json")|$(has "$SB/var/lib/cloud/data is a symbolic link; the provisioned secrets in cloud-init's status and result behind it are not scrubbed" "$(out)")|$(kept_copies)"
+# The status in it as a link: the same.
+new_appliance
+booted iid-1
+mv "$SB/var/lib/cloud/data/status.json" "$SB/outside/status.json"
+ln -sfn "$SB/outside/status.json" "$SB/var/lib/cloud/data/status.json"
+status_before=$(md5sum <"$SB/outside/status.json")
+rc=$(run_scrub)
+expect "links: the status in /var/lib/cloud/data as a link is named, the file behind it untouched, the copies kept, the scrub fails" "1|$status_before|yes|$all_kept" \
+    "$rc|$(md5sum <"$SB/outside/status.json")|$(has "$SB/var/lib/cloud/data/status.json is a symbolic link; the provisioned secrets behind it are not scrubbed" "$(out)")|$(kept_copies)"
+# The same without provisioning data: nothing to scrub, the link is only named.
+new_appliance
+mkdir -p "$SB/outside/data"
+ln -sfn "$SB/outside/data" "$SB/var/lib/cloud/data"
+expect "links: /var/lib/cloud/data as a link, no provisioning data: the scrub succeeds and names it once" "0|1" \
+    "$(run_scrub)|$(grep -cF "$SB/var/lib/cloud/data is a symbolic link; it is not entered" "$SB/out")"
 new_appliance
 booted iid-1
 echo "outside $jwt" >"$SB/outside/log"
@@ -528,8 +613,8 @@ mkdir -p "$SB/run/cloud-init"
 combined_config >"$SB/run/cloud-init/combined-cloud-config.json"
 # What lies behind the link keeps the values, so the copies are kept and the
 # scrub fails (#76).
-expect "links: /var/lib/cloud as a link is not scrubbed, says so, keeps the combined cloud-config and fails" "1|yes|yes|yes|yes" \
-    "$(run_scrub)|$(exists "$SB/outside/cloud/instances/iid-1/user-data.txt")|$(has "$SB/var/lib/cloud is a symbolic link; it is not scrubbed" "$(out)")|$(has "$SB/var/lib/cloud is a symbolic link; the copies of the provisioning data in it are neither read nor deleted" "$(out)")|$(exists "$SB/run/cloud-init/combined-cloud-config.json")"
+expect "links: /var/lib/cloud as a link is not scrubbed, says so once, keeps the combined cloud-config and fails" "1|yes|1|yes|yes" \
+    "$(run_scrub)|$(exists "$SB/outside/cloud/instances/iid-1/user-data.txt")|$(grep -cF "$SB/var/lib/cloud is a symbolic link" "$SB/out")|$(has "$SB/var/lib/cloud is a symbolic link; the copies of the provisioning data in it are neither read nor deleted" "$(out)")|$(exists "$SB/run/cloud-init/combined-cloud-config.json")"
 # Without a combined cloud-config nothing is learned at all, yet copies with
 # values can lie behind the link: the scrub fails all the same.
 rm -f "$SB/run/cloud-init/combined-cloud-config.json"
@@ -554,6 +639,19 @@ jq -c '.kamerplanter.secrets += {"NUL_IN_VALUE": "nulpartone\u0000nulparttwo", "
 echo "a log line with nulparttwo and nulshiftedsecret in it" >>"$SB/var/log/cloud-init.log"
 expect "a NUL in a key or value: both parts and the next value are replaced, no value is named in the output" "0|no|no|no|no|no" \
     "$(run_scrub)|$(has nulparttwo "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(cat "$SB/var/log/cloud-init.log")")|$(has nulshiftedsecret "$(out)")|$(has nulpartone "$(out)")|$(has nulparttwo "$(out)")"
+
+# A single NUL in a value, followed by a short value: a NUL left in would
+# shift every later pair by one, the short value's key would be searched for
+# as a value, and the next setting's value would not be searched for (#82).
+new_appliance
+booted iid-1
+jq -c '.kamerplanter.secrets += {"NUL_ONCE": "nulsoloone\u0000nulsolotwo"} | .kamerplanter.secrets += {"SHORT_AFTER_NUL": "short3"}' \
+    "$SB/run/cloud-init/combined-cloud-config.json" >"$SB/c" &&
+    mv "$SB/c" "$SB/run/cloud-init/combined-cloud-config.json"
+echo "a log line with nulsoloone and nulsolotwo in it" >>"$SB/var/log/cloud-init.log"
+log=$SB/var/log/cloud-init.log
+expect "a single NUL in a value, then a short value: the pairs stay aligned, the short value's key is named, the next value is replaced" "0|no|no|yes|no|no|no|yes" \
+    "$(run_scrub)|$(has nulsoloone "$(cat "$log")")|$(has nulsolotwo "$(cat "$log")")|$(has "the provisioned value of SHORT_AFTER_NUL, or a line of it, is shorter than 8 characters" "$(out)")|$(has short3 "$(out)")|$(has nulsoloone "$(out)")|$(has nulsolotwo "$(out)")|$(has "LOG_PSEUDONYM_SALT=REDACTED" "$(cat "$log")")"
 
 # --- a copy that cannot be deleted: named, the unit fails (#76) ---
 # The copies are not rewritten, so one left behind still holds the values.
@@ -756,7 +854,7 @@ expect "host namespace: the rule finds each planted way in, and passes the harml
 
 # --- no provisioned value in anything the scrub printed (L12) ---
 leaked=none
-for m in "${markers[@]}" short1; do
+for m in "${markers[@]}" short1 short3 nulsoloone nulsolotwo; do
     if grep -qF -- "$m" "$all_output"; then leaked=$m; fi
 done
 expect "no provisioned value in anything the scrub printed" "none|yes" "$leaked|$([ -s "$all_output" ] && echo yes)"
