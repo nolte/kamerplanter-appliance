@@ -393,6 +393,50 @@ expect "keyed: and the check keeps the services stopped" "1|yes|no|no" \
 echo damaged >"$(pins_dir)/.key"
 expect "keyed: a damaged key is the same" "1|damaged" "$(run_configure)|$(pin_key)"
 
+# A pin that is a link leading nowhere is recorded, not missing: the
+# services stay stopped and the message names it, the value is not pinned
+# anew, and a missing value is not generated again.
+new_appliance
+run_configure >/dev/null
+run_pin FERNET_KEY >/dev/null
+keys+=("$(pin_key)")
+rm "$(pins_dir)/FERNET_KEY.hmac"
+ln -s "$work/nowhere" "$(pins_dir)/FERNET_KEY.hmac"
+reboot
+rc=$(run_configure)
+expect "keyed: a pin that is a link leading nowhere keeps the services stopped and names it" "1|yes|no" \
+    "$rc|$(has "the pin of FERNET_KEY is a link that leads nowhere, so the value Kamerplanter started with cannot be checked: restore the pin from your backup, or, when the value of FERNET_KEY is the one Kamerplanter started with, remove $(pins_dir)/FERNET_KEY.hmac and restart" "$(out)")|$(exists "$SB/run/kamerplanter/app.env")"
+expect "keyed: pinning leaves such a link as it is" "0|yes" \
+    "$(run_pin FERNET_KEY)|$([ -L "$(pins_dir)/FERNET_KEY.hmac" ] && [ ! -e "$(pins_dir)/FERNET_KEY.hmac" ] && echo yes)"
+sed -i '/^FERNET_KEY=/d' "$SB/etc/kamerplanter/secrets.env"
+expect "keyed: and a missing value pinned by such a link is not generated again" "1|yes|0" \
+    "$(run_configure)|$(has 'FERNET_KEY is missing from' "$(out)")|$(lines_of FERNET_KEY)"
+
+# Two runs that find a damaged key take turns: the one that waits for the
+# lock looks at the key again and pins with the key the other one made,
+# instead of replacing it under the pin that other one wrote.
+new_appliance
+run_configure >/dev/null
+echo damaged >"$(pins_dir)/.key"
+other_key=$(printf 'ab%.0s' {1..32})
+rm -f "$work/held" "$work/release"
+# shellcheck disable=SC2016 # expanded by the holder, from its arguments
+flock "$SB/run/kamerplanter-pins.lock" bash -c '
+    touch "$3/held"
+    while [ ! -e "$3/release" ]; do sleep 0.1; done
+    printf "%s\n" "$2" >"$1/var/lib/kamerplanter/pinned/.key"' _ "$SB" "$other_key" "$work" &
+holder=$!
+for _ in $(seq 100); do [ -e "$work/held" ] && break; sleep 0.1; done
+run_pin FERNET_KEY >"$work/pin-rc" &
+pinner=$!
+sleep 1
+touch "$work/release"
+wait "$holder"
+wait "$pinner"
+keys+=("$(pin_key)")
+expect "keyed: a run that waited for the lock pins with the key the other run made, and keeps it" "0|$other_key|yes" \
+    "$(cat "$work/pin-rc")|$(pin_key)|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$other_key" "$(secret FERNET_KEY)")" ] && echo yes)"
+
 # --- an upgraded installation: legacy pins are migrated, nothing stops ---
 new_appliance
 run_configure >/dev/null
@@ -424,6 +468,19 @@ rm "$SB/var/lib/kamerplanter/update/pending"
 reboot
 expect "migration: once the update is decided, the legacy pin is deleted, the keyed one stays" "0|no|yes" \
     "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)"
+# An empty record of the update being checked, as a write cut short leaves
+# it, is none, as for kamerplanter-update: the legacy pin goes.
+new_appliance
+run_configure >/dev/null
+rm "$(pins_dir)/.key"
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+mkdir -p "$SB/var/lib/kamerplanter/update"
+: >"$SB/var/lib/kamerplanter/update/pending"
+reboot
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "migration: an empty record of an update being checked is none: the legacy pin is deleted" "0|no|yes|yes" \
+    "$rc|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$(has "the pin of FERNET_KEY is now keyed" "$(out)")"
 
 # A later rollback to a release before: it reads only the legacy file, finds none,
 # and pins the value again in the old form when its service starts. Back on
@@ -482,7 +539,7 @@ leaked=none
 for k in "${keys[@]}"; do
     if [ -n "$k" ] && grep -qF -- "$k" "$all_output"; then leaked=$k; fi
 done
-expect "keyed: no key of the pins in anything the check printed" "none|5" "$leaked|${#keys[@]}"
+expect "keyed: no key of the pins in anything the check printed" "none|8" "$leaked|${#keys[@]}"
 
 # --- the step on unusual input ---
 new_appliance

@@ -104,8 +104,21 @@ replace() {
 # a release, it checks no migrated value and pins it again in the old form
 # when its service starts; the next run here checks both and migrates again.
 pin_key=$pins/.key
+pin_key_lock=/run/kamerplanter-pins.lock
 update_pending=/var/lib/kamerplanter/update/pending
 pin_key_hex=
+# update_checked: whether an update is being checked, read as
+# kamerplanter-update reads $update_pending: a record whose first word names
+# the release left. An empty file, which a write cut short leaves and which
+# kamerplanter-update takes for none, is none. A record that cannot be read
+# counts as one, so a legacy pin is kept rather than deleted too early.
+update_checked() {
+    local p from=
+    [ -e "$update_pending" ] || [ -L "$update_pending" ] || return 1
+    p=$(cat -- "$update_pending" 2>/dev/null) || return 0
+    read -r from _ <<<"$p" || true
+    [ -n "$from" ]
+}
 # pin_key_read: sets pin_key_hex from $pin_key; fails when it holds no key.
 pin_key_read() {
     local k
@@ -121,10 +134,29 @@ keyed_pins() { compgen -G "$pins/*.hmac" >/dev/null; }
 # A new key is renamed into place without replacing one that another run
 # made in the meantime (mv -n, whose exit status pin_key_read stands in
 # for), and never as a second link, which a data disk would refuse; only a
-# damaged key is replaced.
+# damaged key is replaced. The runs that make or replace the key (this one at
+# boot, and configure pin of each service, which may start side by side)
+# take $pin_key_lock for it and look at the key again under it, so that no
+# run replaces a key that another one has just made and pinned a value with.
+# The lock is taken only when the key cannot be read, nothing else is locked
+# while it is held, and a run waits for it at most 30 seconds, then fails as
+# when the key cannot be written.
 pin_key_make() {
-    local tmp
+    local fd rc=0
     [ -z "$pin_key_hex" ] || return 0
+    pin_key_read && return 0
+    exec {fd}>"$pin_key_lock" || return 1
+    if flock -w 30 "$fd"; then
+        pin_key_create || rc=$?
+    else
+        rc=1
+    fi
+    exec {fd}>&-
+    return "$rc"
+}
+# pin_key_create: pin_key_make under the lock.
+pin_key_create() {
+    local tmp
     pin_key_read && return 0
     ! keyed_pins || return 1
     if [ -d "$pin_key" ] && [ ! -L "$pin_key" ]; then
@@ -161,13 +193,26 @@ hmac() {
     [[ $x =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$x"
 }
+# pin_present FILE: whether the pin FILE is recorded, also as a link that
+# leads nowhere: such a pin cannot be read, so it is one that does not
+# match, never a missing one under which a value may be generated or pinned
+# anew.
+pin_present() { [ -e "$1" ] || [ -L "$1" ]; }
+# pin_dangling KEY: whether a pin of KEY is a link that leads nowhere.
+pin_dangling() {
+    local f
+    for f in "$pins/$1.hmac" "$pins/$1"; do
+        if [ -L "$f" ] && [ ! -e "$f" ]; then return 0; fi
+    done
+    return 1
+}
 # pinned_now KEY: whether a pin of KEY is recorded, keyed or legacy.
-pinned_now() { [ -e "$pins/$1.hmac" ] || [ -e "$pins/$1" ]; }
+pinned_now() { pin_present "$pins/$1.hmac" || pin_present "$pins/$1"; }
 # pin_files KEY: the pin files of KEY to delete to release it, for a message.
 pin_files() {
-    if [ -e "$pins/$1" ] && [ -e "$pins/$1.hmac" ]; then
+    if pin_present "$pins/$1" && pin_present "$pins/$1.hmac"; then
         printf '%s and %s' "$pins/$1.hmac" "$pins/$1"
-    elif [ -e "$pins/$1" ]; then
+    elif pin_present "$pins/$1"; then
         printf '%s' "$pins/$1"
     else
         printf '%s' "$pins/$1.hmac"
@@ -180,18 +225,19 @@ pin_files() {
 # (keyed_matches, below). Without a legacy pin the keyed one decides.
 pin_matches() {
     local h
-    if [ -e "$pins/$1" ]; then
+    if pin_present "$pins/$1"; then
+        [ -f "$pins/$1" ] || return 1
         h=$(printf '%s' "$2" | sha256sum) || return 1
         [ "$(<"$pins/$1")" = "${h%% *}" ] || return 1
         return 0
     fi
-    [ -e "$pins/$1.hmac" ] || return 0
+    pin_present "$pins/$1.hmac" || return 0
     keyed_matches "$1" "$2"
 }
 # keyed_matches KEY VALUE: whether the keyed pin of KEY is that of VALUE.
 keyed_matches() {
     local h
-    [ -e "$pins/$1.hmac" ] || return 1
+    [ -f "$pins/$1.hmac" ] || return 1
     h=$(hmac "$2") || return 1
     [ "$(<"$pins/$1.hmac")" = "$h" ]
 }
@@ -581,7 +627,9 @@ for key in "${!pinned[@]}"; do
     pinned_now "$key" || continue
     [ -n "${cfg[$key]+set}" ] || continue
     if pin_matches "$key" "$(get "$key")"; then
-        [ ! -e "$pins/$key" ] || legacy+=("$key")
+        ! pin_present "$pins/$key" || legacy+=("$key")
+    elif pin_dangling "$key"; then
+        fail_key "$key" "the pin of $key is a link that leads nowhere, so the value Kamerplanter started with cannot be checked: restore the pin from your backup, or, when the value of $key is the one Kamerplanter started with, remove $(pin_files "$key") and restart"
     else
         fail_key "$key" "$key differs from the value Kamerplanter started with: ${pinned[$key]} (then remove $(pin_files "$key"))"
     fi
@@ -598,7 +646,7 @@ pin_key_make || echo "warning: the key of the pins could not be written to $pin_
 for key in "${legacy[@]}"; do
     if ! keyed_matches "$key" "$(get "$key")"; then
         stale=no
-        [ ! -e "$pins/$key.hmac" ] || stale=yes
+        ! pin_present "$pins/$key.hmac" || stale=yes
         if ! pin_record "$key" "$(get "$key")"; then
             echo "warning: the pin of $key could not be migrated; $pins/$key is kept and checked as before" >&2
             continue
@@ -606,7 +654,7 @@ for key in "${legacy[@]}"; do
         [ "$stale" = no ] ||
             echo "the keyed pin of $key was older than $pins/$key, which a release before pinned after a rollback; $pins/$key.hmac is written anew"
     fi
-    if [ -e "$update_pending" ]; then
+    if update_checked; then
         echo "the pin of $key is keyed in $pins/$key.hmac; $pins/$key is kept until the update being checked is decided, for the release a rollback returns to"
     elif rm -f -- "$pins/$key"; then
         echo "the pin of $key is now keyed: $pins/$key.hmac replaces $pins/$key"
