@@ -205,6 +205,11 @@ expect "derived: a host name ending in .novalocal without an address is the fron
     "$(TEST_HOST=Host.NovaLocal TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
+expect "derived: a host name ending in .localhost is used like one without a dot" \
+    '0|http://10.0.2.15:8080|["http://10.0.2.15:8080","http://kp.localhost:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp.localhost TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
 expect "derived: the white space around the static host name is trimmed" \
     '0|http://kp.example.org:8080' \
     "$(TEST_HOST='  kp.example.org  ' TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)"
@@ -263,7 +268,8 @@ expect "derived: a FRONTEND_URL with a port that is no number adds no origin" \
 
 # A FRONTEND_URL whose host or port no browser sends adds no origin (#116).
 for url in 'http://a..b/' 'http://-x/' 'http://kp-/' 'http://kp:99999/' 'http://kp:65536/' 'http://kp:123456/' \
-    'http://[:::]/' 'http://[1::2::3]/' 'http://[1:2:3:4:5:6:7:8:9]/' 'http://[1:2:3]/' 'http://[::1.2.3.256]/'; do
+    'http://[:::]/' 'http://[1::2::3]/' 'http://[1:2:3:4:5:6:7:8:9]/' 'http://[1:2:3]/' 'http://[::1.2.3.256]/' \
+    'http://999.1.1.1/' 'http://1.2.3/' 'http://192.168.001.1/'; do
     configure_case
     user_file "FRONTEND_URL=$url"
     expect "derived: a FRONTEND_URL with a host or port no browser sends ($url) adds no origin, and the journal says so" \
@@ -289,7 +295,8 @@ expect "derived: a FRONTEND_URL with a trailing dot and the highest port gives i
     '0|["https://kp.example.org.:65535","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
-for url in 'http://[2001:db8::1]:8443/' 'http://[::]/' 'http://[1:2:3:4:5:6:7:8]/'; do
+# An IP address is taken as written (#126), an IPv4 one inside an IPv6 one too.
+for url in 'http://[2001:db8::1]:8443/' 'http://[::]/' 'http://[1:2:3:4:5:6:7:8]/' 'http://[::ffff:192.0.2.1]/'; do
     configure_case
     user_file "FRONTEND_URL=$url"
     origin=${url%/}
@@ -297,6 +304,12 @@ for url in 'http://[2001:db8::1]:8443/' 'http://[::]/' 'http://[1:2:3:4:5:6:7:8]
         "0|[\"$origin\",\"http://kp:8080\",\"http://kp.local:8080\",\"http://localhost:8080\"]" \
         "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 done
+
+configure_case
+user_file 'FRONTEND_URL=http://10.0.2.15.:8080/'
+expect "derived: a FRONTEND_URL with an IPv4 address gives its origin, without a trailing dot" \
+    '0|["http://10.0.2.15:8080","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file 'CORS_ORIGINS=["https://kp.example.org"]' 'FRONTEND_URL=not a url'

@@ -713,8 +713,11 @@ valid_ipv4() {
 valid_ipv6() {
     local a=$1 head tail groups=0 part colons hex='[0-9a-f]{1,4}'
     if [[ $a == *.* ]]; then
-        [[ $a =~ ^(.*:)([0-9.]+)$ ]] && valid_ipv4 "${BASH_REMATCH[2]}" || return 1
-        a=${BASH_REMATCH[1]}0:0
+        # valid_ipv4 runs a match of its own: the groups are taken first.
+        [[ $a =~ ^(.*:)([0-9.]+)$ ]] || return 1
+        head=${BASH_REMATCH[1]} tail=${BASH_REMATCH[2]}
+        valid_ipv4 "$tail" || return 1
+        a=${head}0:0
     fi
     case $a in *:::*) return 1 ;; esac
     if [[ $a == *::* ]]; then
@@ -732,7 +735,7 @@ valid_ipv6() {
     if [[ $a == *::* ]]; then [ "$groups" -le 7 ]; else [ "$groups" -eq 8 ]; fi
 }
 derive_address_defaults() {
-    local host named suffix dev addr rest origin set_url url_host port origins=() unique=() v4=() v6=() frontend json=
+    local host named suffix dev addr rest origin set_url scheme url_host port origins=() unique=() v4=() v6=() frontend json=
     host=
     if [ -r /etc/hostname ]; then
         # The first line that is neither blank nor a comment, without the
@@ -775,23 +778,29 @@ derive_address_defaults() {
     # The origin of a FRONTEND_URL that a layer sets comes first, as a browser
     # sends it (lower case, the port without leading zeros, no default or
     # empty port), when the URL has the form http[s]://host[:port][/?#...]
-    # with a DNS name (a trailing dot kept), an IPv4 address or an IPv6 one
-    # in brackets, and a port up to 65535. Anything else adds no origin, so
-    # the JSON list stays well-formed and holds no origin a browser never
-    # sends; when CORS_ORIGINS is derived, the journal says so. It is never
-    # a failure: the FRONTEND_URL itself is passed on as it is set.
+    # with a DNS name (a trailing dot kept), an IPv4 address in dotted
+    # decimal (a host whose last label is a number must be one) or an IPv6
+    # one in brackets, and a port up to 65535. Anything else adds no origin,
+    # so the JSON list stays well-formed; when CORS_ORIGINS is derived, the
+    # journal says so. An IP address is taken as written, not in the
+    # shortest form a browser may send (#126). It is never a failure: the
+    # FRONTEND_URL itself is passed on as it is set.
     set_url=${cfg[FRONTEND_URL]-}
     set_url=${set_url,,}
     origin=
     if [[ $set_url =~ ^(https?)://(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(:([0-9]*))?([/?#]|$) ]]; then
-        url_host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]}
-        origin=${BASH_REMATCH[1]}://$url_host
+        scheme=${BASH_REMATCH[1]} url_host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]}
         while [[ $port == 0?* ]]; do port=${port#0}; done
         if [[ $url_host == \[*\] ]]; then
-            valid_ipv6 "${url_host:1:${#url_host}-2}" || origin=
+            valid_ipv6 "${url_host:1:${#url_host}-2}" || url_host=
         elif [[ ! ${url_host%.} =~ $dns_name ]]; then
-            origin=
+            url_host=
+        elif [[ ${url_host%.} =~ (^|\.)[0-9]+$ ]]; then
+            # A browser reads it as an IPv4 address, without a trailing dot.
+            url_host=${url_host%.}
+            valid_ipv4 "$url_host" || url_host=
         fi
+        if [ -n "$url_host" ]; then origin=$scheme://$url_host; fi
         if [ ${#port} -gt 5 ] || { [ -n "$port" ] && [ "$port" -gt 65535 ]; }; then
             origin=
         fi
@@ -803,7 +812,7 @@ derive_address_defaults() {
     if [ -n "$origin" ]; then
         origins=("$origin" "${origins[@]}")
     elif [ -n "$set_url" ] && [ -z "${cfg[CORS_ORIGINS]+set}" ]; then
-        echo "warning: FRONTEND_URL is not of the form http[s]://host[:port][/...]; its origin is not added to CORS_ORIGINS" >&2
+        echo "warning: FRONTEND_URL is not of the form http[s]://host[:port][/...] with a valid host and a port up to 65535; its origin is not added to CORS_ORIGINS" >&2
     fi
     if [ -n "$host" ]; then
         origins+=("$(web_origin "$host")")
