@@ -616,9 +616,17 @@ for key in "${legacy[@]}"; do
 done
 
 # CORS_ORIGINS and FRONTEND_URL that no layer sets are derived from how the
-# device is reached at this run: its host name (uname -n) and its global
-# addresses (ip), after network-online.target (kamerplanter-config.service),
-# leaving out those of the container networks (podman*, veth*, cni*).
+# device is reached at this run: its static host name (/etc/hostname, as
+# provisioning or the operator set it) and its global addresses (ip), after
+# network-online.target (kamerplanter-config.service), leaving out those of
+# the container networks (podman*, veth*, cni*) and IPv6 ones that are
+# temporary, deprecated, tentative or failed duplicate address detection.
+# The transient host name (uname -n) is never used: without a static one,
+# NetworkManager takes it from DHCP, and a DHCP server on the network must
+# not choose the host of the links the application sends. Addresses are read
+# once per run: one that arrives later (an IPv6 address still tentative, a
+# new DHCP lease) is an origin from the next boot or restart of
+# kamerplanter.target on.
 # FRONTEND_URL is the host name when it has a dot, else the first IPv4
 # address, else the host name, else localhost. CORS_ORIGINS lists the origin
 # of the FRONTEND_URL in effect (set in a layer or derived), the host name,
@@ -629,7 +637,10 @@ done
 web_origin() { printf 'http://%s:8080' "$1"; }
 derive_address_defaults() {
     local host dev addr rest origin set_url origins=() unique=() v4=() v6=() frontend json=
-    host=$(uname -n 2>/dev/null) || host=
+    host=
+    if [ -r /etc/hostname ]; then
+        host=$(sed -n '/^[[:space:]]*#/d; /[^[:space:]]/{s/[[:space:]]//g; p; q}' /etc/hostname 2>/dev/null) || host=
+    fi
     host=${host,,}
     host=${host%.}
     if [[ ! $host =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] ||
@@ -643,7 +654,7 @@ derive_address_defaults() {
         done < <(ip -o -4 addr show scope global 2>/dev/null || true)
         while read -r _ dev _ addr rest; do
             case $dev in podman* | veth* | cni*) continue ;; esac
-            case " $rest " in *" temporary "* | *" deprecated "* | *" tentative "*) continue ;; esac
+            case " $rest " in *" temporary "* | *" deprecated "* | *" tentative "* | *" dadfailed "*) continue ;; esac
             if [ -n "$addr" ]; then v6+=("[${addr%/*}]"); fi
         done < <(ip -o -6 addr show scope global 2>/dev/null || true)
     fi
@@ -659,14 +670,17 @@ derive_address_defaults() {
     origins=("$frontend")
     # The origin of a FRONTEND_URL that a layer sets comes first, as a browser
     # sends it (lower case, no default port), when the URL has the form
-    # http[s]://host[:port][/...]; anything else adds no origin, so the JSON
-    # list stays well-formed.
+    # http[s]://host[:port][/?#...] with a host name, an IPv4 address or an
+    # IPv6 one in brackets; anything else adds no origin, so the JSON list
+    # stays well-formed, and is said in the journal.
     set_url=${cfg[FRONTEND_URL]-}
     set_url=${set_url,,}
-    if [[ $set_url =~ ^(https?)://([][a-z0-9.:-]+)(/|$) ]]; then
-        origin=${BASH_REMATCH[1]}://${BASH_REMATCH[2]}
+    if [[ $set_url =~ ^(https?)://(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(:[0-9]{1,5})?([/?#]|$) ]]; then
+        origin=${BASH_REMATCH[1]}://${BASH_REMATCH[2]}${BASH_REMATCH[3]}
         case $origin in https://*:443) origin=${origin%:443} ;; http://*:80) origin=${origin%:80} ;; esac
         origins=("$origin" "${origins[@]}")
+    elif [ -n "$set_url" ]; then
+        echo "warning: FRONTEND_URL is not of the form http[s]://host[:port][/...]; its origin is not added to CORS_ORIGINS" >&2
     fi
     if [ -n "$host" ]; then
         origins+=("$(web_origin "$host")")

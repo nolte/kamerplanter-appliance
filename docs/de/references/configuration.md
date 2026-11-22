@@ -27,14 +27,14 @@ systemctl restart kamerplanter.target
 
 ## Die Appliance über ihre Adresse erreichen
 
-`CORS_ORIGINS` nennt die Herkünfte, von denen aus die Web-UI die API aufrufen darf, `FRONTEND_URL` die Adresse der Web-UI in Links, etwa in E-Mails. Setzt keine Schicht sie, leitet die Appliance sie bei jedem Boot und bei jedem `systemctl restart kamerplanter.target` aus ihrem Hostnamen und ihren Adressen in diesem Moment ab, sobald das Netzwerk steht:
+`CORS_ORIGINS` nennt die Herkünfte, von denen aus die Web-UI die API aufrufen darf, `FRONTEND_URL` die Adresse der Web-UI in Links, etwa in E-Mails. Setzt keine Schicht sie, leitet die Appliance sie bei jedem Boot und bei jedem `systemctl restart kamerplanter.target` aus ihrem statischen Hostnamen (`/etc/hostname`, wie die Provisionierung oder du ihn gesetzt hast) und ihren Adressen in diesem Moment ab, sobald das Netzwerk steht:
 
 | Einstellung | Abgeleiteter Wert |
 |---|---|
 | `FRONTEND_URL` | `http://<Hostname>:8080`, wenn der Hostname einen Punkt enthält, etwa `kamerplanter.example.org`; sonst `http://<erste IPv4-Adresse>:8080`; ohne IPv4-Adresse `http://<Hostname>:8080`; ohne beides `http://localhost:8080` |
 | `CORS_ORIGINS` | die Herkunft des geltenden `FRONTEND_URL`, auch eines selbst gesetzten, `http://<Hostname>:8080`, `http://<Hostname>.local:8080` für einen Hostnamen ohne Punkt, `http://<Adresse>:8080` für jede globale IPv4- und IPv6-Adresse und `http://localhost:8080` |
 
-Ein Hostname `localhost` oder `localhost.localdomain` oder einer, der kein gültiger DNS-Name ist, zählt als keiner. Außen vor bleiben die Adressen der Container-Netzwerke sowie temporäre, veraltete oder vorläufige IPv6-Adressen. `journalctl -b -u kamerplanter-config` nennt die abgeleiteten Werte. Ein abgeleiteter Wert folgt dem Gerät: Ein neuer Hostname oder eine neue Adresse gilt ab dem nächsten Boot.
+Ein Hostname `localhost` oder `localhost.localdomain` oder einer, der kein gültiger DNS-Name ist, zählt als keiner. Den flüchtigen Hostnamen, den NetworkManager ohne statischen Hostnamen per DHCP bezieht, nutzt die Appliance nie; so kann ein DHCP-Server die Adresse in den Links nicht bestimmen. Außen vor bleiben die Adressen der Container-Netzwerke sowie temporäre, veraltete oder vorläufige IPv6-Adressen und solche, deren Duplikatprüfung fehlgeschlagen ist. `journalctl -b -u kamerplanter-config` nennt die abgeleiteten Werte und warnt, wenn ein selbst gesetzter `FRONTEND_URL` keine Herkunft ergibt. Ein abgeleiteter Wert folgt dem Gerät: Ein neuer Hostname oder eine neue Adresse gilt ab dem nächsten Boot oder `systemctl restart kamerplanter.target`. Eine Adresse, die erst nach dem Netzwerkstart dazukommt, etwa eine IPv6-Adresse, deren Prüfung noch läuft, oder eine neue DHCP-Lease, ist bis dahin keine Herkunft; erreichst du die Web-UI über eine solche Adresse, setze `CORS_ORIGINS` selbst.
 
 Um einen Wert festzulegen, etwa einen Namen hinter einem Reverse Proxy, trage ihn in deine Datei ein; einen Wert, den irgendeine Schicht setzt, auch einen leeren, übernimmt die Appliance unverändert und leitet für diesen Schlüssel nichts ab:
 

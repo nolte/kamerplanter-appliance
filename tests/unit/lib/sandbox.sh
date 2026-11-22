@@ -11,6 +11,7 @@ sandbox_paths=(
     /usr/libexec/kamerplanter/
     /usr/share/kamerplanter/
     /etc/kamerplanter
+    /etc/hostname
     /var/lib/kamerplanter
     /var/lib/containers
     /var/mnt/

@@ -27,14 +27,14 @@ systemctl restart kamerplanter.target
 
 ## Reaching the appliance by its address
 
-`CORS_ORIGINS` lists the origins the web UI may call the API from, `FRONTEND_URL` is the address of the web UI in links, for example in e-mails. When no layer sets them, the appliance derives them on every boot, and on every `systemctl restart kamerplanter.target`, from its host name and its addresses at that moment, after the network is up:
+`CORS_ORIGINS` lists the origins the web UI may call the API from, `FRONTEND_URL` is the address of the web UI in links, for example in e-mails. When no layer sets them, the appliance derives them on every boot, and on every `systemctl restart kamerplanter.target`, from its static host name (`/etc/hostname`, as provisioning or you set it) and its addresses at that moment, after the network is up:
 
 | Setting | Derived value |
 |---|---|
 | `FRONTEND_URL` | `http://<host name>:8080` when the host name has a dot, such as `kamerplanter.example.org`; otherwise `http://<first IPv4 address>:8080`; without an IPv4 address `http://<host name>:8080`; without either `http://localhost:8080` |
 | `CORS_ORIGINS` | the origin of the `FRONTEND_URL` in effect, also of one you set, `http://<host name>:8080`, `http://<host name>.local:8080` for a host name without a dot, `http://<address>:8080` for every global IPv4 and IPv6 address, and `http://localhost:8080` |
 
-A host name of `localhost` or `localhost.localdomain`, or one that is not a valid DNS name, counts as none. Left out are the addresses of the container networks and temporary, deprecated, or tentative IPv6 addresses. `journalctl -b -u kamerplanter-config` names the derived values. A derived value follows the device: a new host name or address applies at the next boot.
+A host name of `localhost` or `localhost.localdomain`, or one that is not a valid DNS name, counts as none. The transient host name that NetworkManager takes from DHCP when no static one is set is never used, so a DHCP server cannot choose the address in the links. Left out are the addresses of the container networks and temporary, deprecated, or tentative IPv6 addresses, and those that failed duplicate address detection. `journalctl -b -u kamerplanter-config` names the derived values, and warns when a `FRONTEND_URL` you set has no origin it can add. A derived value follows the device: a new host name or address applies at the next boot or `systemctl restart kamerplanter.target`. An address that arrives after the network is up, such as an IPv6 address still being checked or a new DHCP lease, is no origin until then; set `CORS_ORIGINS` yourself if the web UI is reached by such an address.
 
 To fix a value, for example a name behind a reverse proxy, set it in your file; a value that any layer sets, also an empty one, is used as it is and nothing is derived for that key:
 

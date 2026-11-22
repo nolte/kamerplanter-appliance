@@ -80,13 +80,16 @@ prov_file() { printf '%s\n' "$@" >"$SB/var/lib/kamerplanter/provisioning/provisi
 prov_map() { printf '%s\n' "$@" >"$SB/var/lib/kamerplanter/provisioning/settings.env"; }
 user_file() { printf '%s\n' "$@" >"$SB/etc/kamerplanter/kamerplanter.env"; }
 # address_stubs: uname and ip as configure reads the device's host name and
-# addresses from them: TEST_HOST is the host name; TEST_V4 and TEST_V6 hold
+# addresses from them: TEST_HOST is the static host name (/etc/hostname, none
+# when unset), TEST_TRANSIENT the one uname -n prints; TEST_V4 and TEST_V6 hold
 # one global address of eth0 each per word, an IPv6 one with +FLAG for a flag
 # such as temporary, and an address with @DEV one of the interface DEV;
 # TEST_NO_IP makes ip fail without output.
 address_stubs() {
     # shellcheck disable=SC2329 # called by the scripts it is exported to
-    uname() { printf '%s\n' "${TEST_HOST-}"; }
+    uname() { printf '%s\n' "${TEST_TRANSIENT-${TEST_HOST-}}"; }
+    rm -f -- "$SB/etc/hostname"
+    if [ -n "${TEST_HOST+set}" ]; then printf '# static host name\n%s\n' "$TEST_HOST" >"$SB/etc/hostname"; fi
     # shellcheck disable=SC2329 # called by the scripts it is exported to
     ip() {
         local family a words dev
@@ -102,7 +105,7 @@ address_stubs() {
             fi
         done
     }
-    export TEST_HOST TEST_V4 TEST_V6 TEST_NO_IP
+    export TEST_HOST TEST_TRANSIENT TEST_V4 TEST_V6 TEST_NO_IP
     export -f uname ip
 }
 run_configure() {  # prints the exit status; the output is in $SB/out
@@ -177,6 +180,16 @@ expect "derived: a bare host name gives the first IPv4 address as frontend URL; 
     "$(TEST_HOST=Kamerplanter TEST_V4='10.89.0.1@podman1 192.168.1.20 10.0.0.5' TEST_V6='2001:db8::5 2001:db8::99+temporary fd00::1@veth0@if2' run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
+expect "derived: a transient host name (DHCP) is never used, without a static one the IPv4 address is the frontend URL" \
+    '0|http://10.0.2.15:8080|["http://10.0.2.15:8080","http://localhost:8080"]' \
+    "$(TEST_TRANSIENT=kp.attacker.example TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+configure_case
+expect "derived: an IPv6 address that failed duplicate address detection is no origin" \
+    '0|["http://10.0.2.15:8080","http://[2001:db8::5]:8080","http://localhost:8080"]' \
+    "$(TEST_V4=10.0.2.15 TEST_V6='2001:db8::5 2001:db8::7+dadfailed' run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
 expect "derived: a bare host name without an address is the frontend URL" \
     '0|http://kp:8080|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
@@ -212,9 +225,21 @@ expect "derived: a FRONTEND_URL with user information adds no origin" \
 
 configure_case
 user_file 'FRONTEND_URL=not "a" url'
-expect "derived: a FRONTEND_URL that is no URL adds no origin" \
-    '0|not "a" url|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
-    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+expect "derived: a FRONTEND_URL that is no URL adds no origin, and the journal says so" \
+    '0|not "a" url|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]|yes' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has 'its origin is not added to CORS_ORIGINS' "$(cat "$SB/out")")"
+
+configure_case
+user_file 'FRONTEND_URL=https://kp.example.org?ref=mail'
+expect "derived: a FRONTEND_URL with a query and no path gives its origin" \
+    '0|["https://kp.example.org","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
+
+configure_case
+user_file 'FRONTEND_URL=http://kp:abc/'
+expect "derived: a FRONTEND_URL with a port that is no number adds no origin" \
+    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file CORS_ORIGINS=
