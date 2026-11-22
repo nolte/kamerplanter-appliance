@@ -131,7 +131,7 @@ wait_reboot() {
     local start=$SECONDS id
     [ -n "$1" ] || return 1
     while ((SECONDS - start < $2)); do
-        id=$(boot_id) && [ -n "$id" ] && [ "$id" != "$1" ] && { boot_id; return 0; }
+        id=$(boot_id) && [ -n "$id" ] && [ "$id" != "$1" ] && { echo "$id"; return 0; }
         vm_alive || return 2
         sleep 10
     done
