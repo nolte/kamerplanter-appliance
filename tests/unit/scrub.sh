@@ -803,7 +803,7 @@ expect "network: every network is a bridge, none macvlan or ipvlan, which bypass
 # spelling (-tv/proc is -t -v /proc), so that each takes its Quadlet key,
 # which this test reads; a containers.conf module could set them as
 # defaults, so no unit loads one, no global option brings defaults of its
-# own (--runtime, --conmon, --url, ...), and no unit names CONTAINERS_CONF,
+# own (--runtime, --conmon, --url, -r, -c, ...), and no unit names CONTAINERS_CONF,
 # CONTAINERS_CONF_OVERRIDE or CONTAINER_HOST, in any section (#83). The Volume=, Mount= and Device= sources are
 # checked as Podman reads them (%t is /run for a system unit); a named volume
 # has no leading slash and passes. A source spelled with // or a . or ..
@@ -817,6 +817,7 @@ escapes() {  # escapes < VIEW
     local host='(%t(/[^:,]*)?|/|/(var|var/lib)/?|/(proc|run|var/run|etc|var/lib/containers|root|var/roothome|sysroot|ostree|boot)(/[^:,]*)?)'
     grep -iE "$(key '(PodmanArgs|GlobalArgs)')(.*[[:space:]=])?[[:space:]]*(--privileged|--pid|--pod|--cap-add|--volume|--mount|--module|--rootfs|--hooks-dir|--security-opt|--device|--device-cgroup-rule|--runtime|--conmon|--network-config-dir|--cni-config-dir|--default-mounts-file|--root|--runroot|--url|--connection|--remote|--identity|--config)([=[:space:]]|$)
 $(key '(PodmanArgs|GlobalArgs)')(.*[[:space:]=])?[[:space:]]*-[[:alpha:]]*v
+$(key GlobalArgs)(.*[[:space:]=])?[[:space:]]*-[[:alpha:]]*[rc]
 $(key AddCapability)(.*[[:space:],])?[[:space:]]*(CAP_)?(ALL|SYS_ADMIN|NET_ADMIN|SYS_PTRACE|SYS_MODULE|DAC_READ_SEARCH)([[:space:],]|$)
 $(key Volume)[[:space:]]*${host}(:|[[:space:]]*$)
 $(key Mount)(.*,)?[[:space:]]*(source|src)=${host}(,|[[:space:]]*$)
@@ -870,12 +871,13 @@ plant pod-arg 'PodmanArgs=--pod=p'
 plant add-device 'AddDevice=/dev/mem'
 plant device-arg 'PodmanArgs=--device=/dev/mem'
 plant runtime 'GlobalArgs=--runtime=/usr/local/bin/wrap'
+plant remote-short 'GlobalArgs=-r'
 plant conf-override $'[Service]\nEnvironment=CONTAINERS_CONF_OVERRIDE=/etc/x.conf'
 printf '[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n' >"$planted/device.volume"
 plant harmless $'AddCapability=CHOWN NET_BIND_SERVICE\nVolume=arangodb.volume:/var/lib/arangodb3\nVolume=/var/lib/kamerplanter/x:/x:ro,z\nMount=type=volume,source=valkey_data,destination=/data\nPodmanArgs=--log-level=info'
 mapfile -t planted_files < <(find "$planted" -type f | LC_ALL=C sort)
 expect "host namespace: the rule finds each planted way in, and passes the harmless unit" \
-    "add-device;cap;cap-all;cluster;conf-override;device;device-arg;dots;etc;global;module;mount-first;netns;parent;pid;pod-arg;privileged;privileged-alone;proc;root;rootfs;runtime;security-opt;socket;specifier;sys-admin;sysroot;unmask;variable" \
+    "add-device;cap;cap-all;cluster;conf-override;device;device-arg;dots;etc;global;module;mount-first;netns;parent;pid;pod-arg;privileged;privileged-alone;proc;remote-short;root;rootfs;runtime;security-opt;socket;specifier;sys-admin;sysroot;unmask;variable" \
     "$(quadlet_view "${planted_files[@]}" | escapes | sed -E 's|^[^:]*/([^/:]*)\.[a-z]+: .*|\1|' | LC_ALL=C sort -u | paste -sd ';')"
 
 # --- no provisioned value in anything the scrub printed (L12) ---

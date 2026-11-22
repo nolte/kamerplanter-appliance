@@ -162,7 +162,7 @@ for unit, body in zip(units[1::2], units[2::2]):
 
         if any("$" in a for a in args):
             refuse("a $ that systemd expands, so what runs is not visible here")
-        for name, _ in options(args[:at], {}):
+        for name, _ in options(args[:at], {"r": "--remote", "c": "--connection"}):
             if name in global_refused:
                 refuse(f"{name}, which changes what every container gets")
         if verb in ("kube", "pod", "build"):
@@ -303,7 +303,9 @@ for path in confs:
     for table, keys in refused_keys.items():
         values = {k.lower(): v for k, v in tables.get(table, {}).items()}
         for key in keys:
-            if key in values and not (key == "runtimes" and not values[key]):
+            # an empty [engine.runtimes] table, as in Fedora's file, adds none
+            if key in values and not (isinstance(values[key], dict)
+                                      and not values[key]):
                 refuse(path, f"[{table}] {key} = {values[key]!r}, a default"
                        " for every container")
         if table == "engine" and str(values.get("runtime", "")) not in runtimes:
@@ -442,6 +444,7 @@ plant unmask Network=kamerplanter.network Unmask=ALL
 plant seccomp Network=kamerplanter.network PodmanArgs=--security-opt=seccomp=unconfined
 plant device Network=kamerplanter.network AddDevice=/dev/mem
 plant device-rule Network=kamerplanter.network "PodmanArgs=--device-cgroup-rule=a"
+plant remote Network=kamerplanter.network GlobalArgs=-r
 plant env Network=kamerplanter.network "[Service]" Environment=CONTAINERS_CONF_OVERRIDE=/etc/x.conf
 plant envfile Network=kamerplanter.network "[Service]" EnvironmentFile=-/etc/x.env
 # The container'"'"'s own environment ([Container]) is not podman'"'"'s and passes.
@@ -452,7 +455,7 @@ printf "[Network]\nDriver=macvlan\n" >"$planted/bad.network"
 printf "[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n" >"$planted/bad.volume"
 found=$(generated "$planted")
 expect "quadlets: the check refuses each planted way out, and passes the harmless unit" \
-    "exit 0|23|bad-network;bad-pod;bad-volume;cap;cluster;device;device-rule;env;envfile;etc;host;module;net2;netns;parent;pid;privileged;proc;rootfs;seccomp;socket;specifier;sys-admin;sysroot;unmask" \
+    "exit 0|24|bad-network;bad-pod;bad-volume;cap;cluster;device;device-rule;env;envfile;etc;host;module;net2;netns;parent;pid;privileged;proc;remote;rootfs;seccomp;socket;specifier;sys-admin;sysroot;unmask" \
     "$(grep "^exit " <<<"$found")|$(grep -c "^container " <<<"$found")|$(refused <<<"$found")"
 rm -rf "$planted"
 
