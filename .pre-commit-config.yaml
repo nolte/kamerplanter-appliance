@@ -39,7 +39,9 @@ repos:
       - id: fedora-base-from-mirror
         name: Fedora bases build from the base image mirror
         language: pygrep
-        # A FROM line, or an ARG default that a FROM ${...} would use.
-        entry: '^\s*(FROM\s+(--\S+\s+)*|ARG\s+\w+=)(quay\.io/fedora/|registry\.fedoraproject\.org/)'
+        # A FROM line, a COPY --from, or an ARG default (quoted or not) that a
+        # FROM ${...} would use; on quay.io/fedora, registry.fedoraproject.org,
+        # or a short name (fedora, fedora-bootc) that podman resolves there.
+        entry: '^\s*(FROM\s+(--\S+\s+)*|COPY\s+(--\S+\s+)*--from=|ARG\s+\w+=["'']?)(quay\.io/fedora/|registry\.fedoraproject\.org/|fedora(-bootc)?(:|@|\s|$))'
         args: [--ignore-case]
         files: '(^|/)([^/]*\.)?(Containerfile|Dockerfile)(\.[^/]*)?$'

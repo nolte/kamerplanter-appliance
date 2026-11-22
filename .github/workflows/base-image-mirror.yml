@@ -51,6 +51,9 @@ jobs:
         run: |
           set -euo pipefail
           skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN" >/dev/null
+          # Every source names a tag and no registry port: the tag is the
+          # text after the last colon of the last path segment.
+          [[ ${SOURCE##*/} == *:* ]] || { echo "$SOURCE names no tag" >&2; exit 1; }
           version=${SOURCE##*:}
           digest=$(skopeo inspect --raw "docker://$SOURCE" | sha256sum | cut -d' ' -f1)
           tag="$version-${digest::12}"
