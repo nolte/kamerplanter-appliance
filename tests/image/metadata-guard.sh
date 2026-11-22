@@ -19,9 +19,15 @@
 # container joins kamerplanter.network and nothing else, and none can enter
 # the host's network namespace (privileged, the host's PID namespace, a
 # capability to join or change namespaces, a mount of the host's /proc, /run,
-# /etc, /var or /, its /proc/sys made writable or its confinement lifted),
-# which would let it send as uid 0 past the output rule. The same check
-# runs on planted units, one way out each, so that it can fail.
+# /etc, /var or /, a device of the host's, its /proc/sys made writable or its
+# confinement lifted), which would let it send as uid 0 past the output rule.
+# Podman also takes defaults that never appear on that command line: from a
+# containers.conf in the image, from CONTAINERS_CONF or
+# CONTAINERS_CONF_OVERRIDE in the unit's or the service manager's
+# environment, and a service drop-in or a unit of the same name in /etc can
+# replace the generated podman line altogether (#83). None of these may
+# reach a container. The same checks run on planted units and a planted
+# tree, one way out each, so that they can fail.
 # tests/unit/scrub.sh checks the units' source on every pull request.
 #
 # Runs in the tool container, after `task image:build`:
@@ -39,6 +45,10 @@ image=${1:-${IMAGE_REF:-localhost/kamerplanter-appliance:poc}}
 # command, is read as one too, which can only refuse more. A $ is refused:
 # systemd would expand it from the unit's environment; so is a specifier but
 # %t in a host path (%E is /etc, %S /var/lib), which systemd expands too.
+# In the unit's [Service] section, which sets podman's own environment (the
+# [X-Container] copy of the unit's keys sets the container's), a CONTAINERS_*
+# variable is refused, and so is an EnvironmentFile=, whose variables are not
+# visible here.
 IFS= read -r -d '' quadlet_check <<'PY' || true
 import posixpath
 import re
@@ -52,7 +62,7 @@ verbs = {"run", "create", "kube", "pod", "build", "network", "volume",
          "rm", "stop", "start", "image", "pull", "secret"}
 valued = {"--network", "--net", "--pid", "--pod", "--cap-add", "--volume",
           "--mount", "--module", "--driver", "--opt", "--rootfs",
-          "--hooks-dir", "--security-opt"}
+          "--hooks-dir", "--security-opt", "--device", "--device-cgroup-rule"}
 # --security-opt values that make /proc/sys writable or lift the confinement
 unconfined = ("unmask=", "systempaths=unconfined", "seccomp=", "label=disable",
               "label=type:", "apparmor=unconfined")
@@ -106,7 +116,22 @@ def options(args, short):
 
 units = re.split(r"^---(.+)---$", sys.stdin.read(), flags=re.M)
 for unit, body in zip(units[1::2], units[2::2]):
+    section = ""
     for line in re.sub(r"\\\n", " ", body).splitlines():
+        s = re.match(r"\s*\[([^]]+)\]\s*$", line)
+        if s:
+            section = s.group(1)
+            continue
+        e = re.match(r"\s*(Environment|EnvironmentFile|PassEnvironment)\s*=(.*)",
+                     line)
+        if e and section == "Service":
+            if e.group(1) == "EnvironmentFile":
+                print(f"refused {unit}: EnvironmentFile={e.group(2).strip()},"
+                      " which podman's environment is read from")
+            elif "CONTAINERS_" in e.group(2):
+                print(f"refused {unit}: {line.strip()}, which gives podman"
+                      " defaults its command line does not show")
+            continue
         m = re.match(r"\s*Exec\w*=\s*[-@:+!|]*(\S+)(.*)", line)
         if not m or posixpath.basename(m.group(1)) != "podman":
             continue
@@ -142,7 +167,8 @@ for unit, body in zip(units[1::2], units[2::2]):
                     nets.append(value)
                 elif name == "--privileged" and value != "false":
                     refuse("privileged")
-                elif name in ("--pid", "--pod", "--rootfs"):
+                elif name in ("--pid", "--pod", "--rootfs", "--device",
+                              "--device-cgroup-rule"):
                     refuse(f"{name} {value}")
                 elif name == "--security-opt" and \
                         (value or "").lower().startswith(unconfined):
@@ -161,6 +187,154 @@ for unit, body in zip(units[1::2], units[2::2]):
                         refuse(f"a mount {value}")
             if nets != [network]:
                 refuse(f"the networks {nets}, not only {network}")
+PY
+
+# Reads what Podman and systemd take besides the generated units, below
+# argv[1] (/ for the image, a planted tree for the planted cases), and prints
+# "read FILE" for each containers.conf it read and "refused FILE: WHY" for
+# each default that would reach the generated services named in argv[2:]:
+# - a containers.conf (containers.conf, containers.rootful.conf and their .d
+#   directories, in /usr/share/containers and /etc/containers) that sets a
+#   namespace, capabilities, volumes, mounts, devices, OCI hooks or the
+#   confinement for every container, or that is no valid TOML, and a
+#   mounts.conf line that binds anything but the image's read-only /usr/share
+#   into every container (Fedora's binds /usr/share/rhel/secrets);
+# - a drop-in of such a service, or one for every service (service.d) or for
+#   a prefix of its name (kamerplanter-.service.d), that runs a command of
+#   its own, sets a CONTAINERS_* variable or reads an EnvironmentFile=, and a
+#   unit of the same name in a directory that outranks the generator's (a
+#   mask, a link to /dev/null, passes);
+# - a CONTAINERS_* variable in the service manager's DefaultEnvironment= or
+#   ManagerEnvironment=, or on the kernel command line of bootc's kargs.d.
+IFS= read -r -d '' conf_check <<'PY' || true
+import glob
+import os
+import re
+import sys
+import tomllib
+
+root = sys.argv[1]
+services = sys.argv[2:]
+refused_keys = {
+    "containers": ("netns", "pidns", "ipcns", "default_capabilities",
+                   "volumes", "mounts", "devices", "seccomp_profile",
+                   "apparmor_profile", "label"),
+    "engine": ("hooks_dir",),
+}
+# the unit directories of the system manager, highest priority first; those
+# before the generator's own replace a generated unit of the same name
+outranking = ("etc/systemd/system.control", "run/systemd/system.control",
+              "run/systemd/transient", "run/systemd/generator.early",
+              "etc/systemd/system", "etc/systemd/system.attached",
+              "run/systemd/system", "run/systemd/system.attached")
+unit_dirs = outranking + ("run/systemd/generator",
+                          "usr/local/lib/systemd/system",
+                          "usr/lib/systemd/system",
+                          "run/systemd/generator.late")
+
+
+def under(*parts):
+    return os.path.join(root, *parts)
+
+
+def shown(path):
+    return "/" + os.path.relpath(path, root)
+
+
+def refuse(path, why):
+    print(f"refused {shown(path)}: {why}")
+
+
+def lines(path):
+    # the logical lines of a systemd file: continuations joined, comments
+    # dropped
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = re.sub(r"\\\n", " ", f.read())
+    except OSError as err:
+        refuse(path, f"cannot be read ({err.strerror})")
+        return []
+    return [line.strip() for line in text.splitlines()
+            if line.strip() and line.strip()[0] not in "#;"]
+
+
+confs = []
+for base in ("usr/share/containers", "etc/containers"):
+    confs += sorted(glob.glob(under(base, "containers*.conf")))
+    confs += sorted(glob.glob(under(base, "containers*.conf.d", "**", "*.conf"),
+                              recursive=True))
+for path in confs:
+    print(f"read {shown(path)}")
+    try:
+        with open(path, "rb") as f:
+            conf = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError) as err:
+        refuse(path, f"not a containers.conf Podman reads as written ({err})")
+        continue
+    for table, keys in refused_keys.items():
+        values = conf.get(table)
+        if not isinstance(values, dict):
+            continue
+        for key in keys:
+            if key in values:
+                refuse(path, f"[{table}] {key} = {values[key]!r}, a default"
+                       " for every container")
+
+for base in ("usr/share/containers", "etc/containers"):
+    path = under(base, "mounts.conf")
+    if not os.path.exists(path):
+        continue
+    print(f"read {shown(path)}")
+    for line in lines(path):
+        src = line.split(":")[0]
+        if not os.path.normpath(src).startswith("/usr/share/") \
+                or src != os.path.normpath(src):
+            refuse(path, f"{line}, a mount in every container")
+
+dropins = set()
+for service in services:
+    stem = service.removesuffix(".service")
+    parts = stem.split("-")
+    names = [service + ".d", "service.d"] + [
+        "-".join(parts[:i]) + "-.service.d" for i in range(1, len(parts))]
+    for d in unit_dirs:
+        for name in names:
+            dropins.update(glob.glob(under(d, name, "*.conf")))
+    for d in outranking:
+        path = under(d, service)
+        if os.path.lexists(path) and not (
+                os.path.islink(path) and os.readlink(path) == "/dev/null"):
+            refuse(path, f"replaces the generated {service}")
+for path in sorted(dropins):
+    for line in lines(path):
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("Exec"):
+            refuse(path, f"{line}, a command beside or instead of the"
+                   " generated podman line")
+        elif key == "EnvironmentFile":
+            refuse(path, f"{line}, which podman's environment is read from")
+        elif key in ("Environment", "PassEnvironment") \
+                and "CONTAINERS_" in value:
+            refuse(path, f"{line}, which gives podman defaults its command"
+                   " line does not show")
+
+managers = [under("etc/systemd/system.conf")]
+for d in ("etc", "run", "usr/local/lib", "usr/lib"):
+    managers += sorted(glob.glob(under(d, "systemd/system.conf.d", "*.conf")))
+for path in managers:
+    if not os.path.exists(path):
+        continue
+    for line in lines(path):
+        key, _, value = line.partition("=")
+        if key.strip() in ("DefaultEnvironment", "ManagerEnvironment") \
+                and "CONTAINERS_" in value:
+            refuse(path, f"{line}, an environment every service inherits")
+for path in sorted(glob.glob(under("usr/lib/bootc/kargs.d", "*.toml"))):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        if "CONTAINERS_" in f.read():
+            refuse(path, "a CONTAINERS_* variable on the kernel command line,"
+                   " which systemd passes to every service")
 PY
 
 # shellcheck disable=SC2016 # expanded inside the container
@@ -227,14 +401,57 @@ plant parent Network=kamerplanter.network Volume=/var/lib:/l
 plant sysroot Network=kamerplanter.network Mount=type=bind,source=/sysroot,destination=/s
 plant unmask Network=kamerplanter.network Unmask=ALL
 plant seccomp Network=kamerplanter.network PodmanArgs=--security-opt=seccomp=unconfined
-plant harmless Network=kamerplanter.network "AddCapability=CHOWN NET_BIND_SERVICE" Volume=/var/lib/kamerplanter/x:/x:ro,z
+plant device Network=kamerplanter.network AddDevice=/dev/mem
+plant device-rule Network=kamerplanter.network "PodmanArgs=--device-cgroup-rule=a"
+plant env Network=kamerplanter.network "[Service]" Environment=CONTAINERS_CONF_OVERRIDE=/etc/x.conf
+plant envfile Network=kamerplanter.network "[Service]" EnvironmentFile=-/etc/x.env
+# The container'"'"'s own environment ([Container]) is not podman'"'"'s and passes.
+plant harmless Network=kamerplanter.network "AddCapability=CHOWN NET_BIND_SERVICE" Volume=/var/lib/kamerplanter/x:/x:ro,z \
+    Environment=CONTAINERS_CONF=/in-the-container EnvironmentFile=/run/kamerplanter/app.env
 printf "[Pod]\n" >"$planted/bad.pod"
 printf "[Network]\nDriver=macvlan\n" >"$planted/bad.network"
 printf "[Volume]\nDevice=/run/netns\nType=none\nOptions=bind\n" >"$planted/bad.volume"
 found=$(generated "$planted")
 expect "quadlets: the check refuses each planted way out, and passes the harmless unit" \
-    "exit 0|19|bad-network;bad-pod;bad-volume;cap;cluster;etc;host;module;net2;netns;parent;pid;privileged;proc;rootfs;seccomp;socket;specifier;sys-admin;sysroot;unmask" \
+    "exit 0|23|bad-network;bad-pod;bad-volume;cap;cluster;device;device-rule;env;envfile;etc;host;module;net2;netns;parent;pid;privileged;proc;rootfs;seccomp;socket;specifier;sys-admin;sysroot;unmask" \
     "$(grep "^exit " <<<"$found")|$(grep -c "^container " <<<"$found")|$(refused <<<"$found")"
+rm -rf "$planted"
+
+# --- what Podman and systemd take besides the generated units (#83) ---
+services=$("$generator" --dryrun 2>/dev/null | sed -n "s/^---\(.*\.service\)---$/\1/p")
+conf=$(python3 -c "$CONF_CHECK" / $services)
+grep "^read " <<<"$conf" | sed "s/^/      /"
+expect "defaults: the generated services are named, so their drop-ins are found" "yes|yes" \
+    "$(grep -qx kamerplanter-backend.service <<<"$services" && echo yes)|$(grep -qx kamerplanter-frontend.service <<<"$services" && echo yes)"
+expect "defaults: no containers.conf, mounts.conf, service drop-in, unit in /etc or manager environment gives a container a host namespace, device, capability or mount" none \
+    "$(grep "^refused " <<<"$conf" | sed "s/^refused //" | paste -sd ";" | grep . || echo none)"
+planted=$(mktemp -d)
+# put FILE LINE...: a file below the planted tree with these lines.
+put() { local f=$planted/$1; shift; mkdir -p "${f%/*}"; printf "%s\n" "$@" >"$f"; }
+put usr/share/containers/containers.conf.d/netns.conf "[containers]" "netns = \"host\""
+put usr/share/containers/containers.rootful.conf.d/pidns.conf "[containers]" "pidns = \"host\""
+put etc/containers/containers.conf "[containers]" "default_capabilities = [\"SYS_ADMIN\"]"
+put etc/containers/containers.conf.d/volumes.conf "[containers]" "volumes = [\"/proc:/hp\"]"
+put etc/containers/containers.conf.d/default-mounts.conf "[containers]" "mounts = [\"type=bind,source=/run/netns,destination=/n\"]"
+put etc/containers/containers.rootless.conf.d/0/devices.conf "[containers]" "devices = [\"/dev/mem\"]"
+put etc/containers/mounts.conf "/proc:/hp"
+put usr/share/containers/mounts.conf "/usr/share/rhel/secrets:/run/secrets"
+put etc/containers/containers.conf.d/hooks.conf "[engine]" "hooks_dir = [\"/etc/hooks\"]"
+put etc/containers/containers.conf.d/seccomp.conf "[containers]" "seccomp_profile = \"unconfined\""
+put etc/containers/containers.conf.d/broken.conf "[containers" "netns = "
+put etc/containers/containers.conf.d/harmless.conf "[containers]" "log_size_max = 1048576" "[engine]" "events_logger = \"journald\""
+put etc/systemd/system/kamerplanter-backend.service.d/exec.conf "[Service]" "ExecStart=" "ExecStart=/usr/bin/podman run --network host example.org/i:1"
+put usr/lib/systemd/system/kamerplanter-.service.d/override.conf "[Service]" "Environment=CONTAINERS_CONF_OVERRIDE=/etc/x.conf"
+put usr/lib/systemd/system/service.d/envfile.conf "[Service]" "EnvironmentFile=-/etc/x.env"
+put usr/lib/systemd/system/service.d/10-timeout-abort.conf "[Service]" "TimeoutStopFailureMode=abort"
+put etc/systemd/system/kamerplanter-frontend.service "[Service]" "ExecStart=/usr/bin/podman run --network host example.org/i:1"
+ln -s /dev/null "$planted/etc/systemd/system/kamerplanter-valkey.service"
+put etc/systemd/system.conf.d/manager.conf "[Manager]" "DefaultEnvironment=CONTAINERS_CONF=/etc/x.conf"
+put usr/lib/bootc/kargs.d/kargs.toml "kargs = [\"systemd.setenv=CONTAINERS_CONF_OVERRIDE=/etc/x.conf\"]"
+conf=$(python3 -c "$CONF_CHECK" "$planted" $services)
+expect "defaults: the check refuses each planted way out, and passes the harmless files and the mask" \
+    "broken;containers;default-mounts;devices;envfile;exec;hooks;kamerplanter-frontend;kargs;manager;mounts;netns;override;pidns;seccomp;volumes" \
+    "$(sed -nE "s|^refused [^:]*/([^/:]*): .*|\1|p" <<<"$conf" | sed -E "s/\.[a-z]+$//" | LC_ALL=C sort -u | paste -sd ";")"
 rm -rf "$planted"
 
 ip link set lo up
@@ -327,4 +544,4 @@ if [ "$failures" -gt 0 ]; then echo "$failures check(s) failed"; exit 1; fi
 echo "all checks passed"
 '
 
-exec podman run --rm --privileged --network none -e QUADLET_CHECK="$quadlet_check" "$image" bash -c "$inner"
+exec podman run --rm --privileged --network none -e QUADLET_CHECK="$quadlet_check" -e CONF_CHECK="$conf_check" "$image" bash -c "$inner"
