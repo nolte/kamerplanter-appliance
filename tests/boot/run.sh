@@ -759,8 +759,9 @@ late_evidence() {
     if secs=$(wait_ssh 900); then
         diagnose "$1"
         {
-            if [ "$secs" = 0 ]; then
-                echo "== SSH answers: the step failed on cloud-init or the scrub, or SSH answered only just after its timeout"
+            # wait_ssh polls every 5 s: an answer at once can read as 0 or 1 s.
+            if [ "$secs" -le 5 ]; then
+                echo "== SSH answers at once: the step failed on another of its conditions (boot id, cloud-init, the scrub), or SSH answered only just after its timeout"
             else
                 echo "== SSH answered ${secs}s after the step's timeout"
             fi
