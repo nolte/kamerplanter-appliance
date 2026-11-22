@@ -9,8 +9,17 @@
 # before it reuses files a draft already carries, so both paths pass the same
 # checks.
 #
+# Every check pins the signer to the exact identity below. `gh attestation
+# verify --signer-workflow` would not: it matches its value as an unanchored
+# regular expression, so a workflow whose path merely starts with
+# release-publish.yml, or any ref of it, would pass; --cert-identity compares
+# the certificate's whole SubjectAlternativeName instead. File arguments
+# follow `--`, so a file name cannot be read as an option.
+#
 # Usage: verify-release-assets.sh <system-image-ref@sha256:digest>
 # Environment: GH_REPO (owner/name), GH_TOKEN.
+# tests/unit/release-assets.sh runs it on every pull request, with cosign and
+# gh replaced by stubs.
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
@@ -23,8 +32,8 @@ image_ref=$1
 identity="https://github.com/$GH_REPO/.github/workflows/release-publish.yml@refs/heads/develop"
 issuer=https://token.actions.githubusercontent.com
 
-cosign verify "$image_ref" --certificate-identity "$identity" \
-  --certificate-oidc-issuer "$issuer" >/dev/null
+cosign verify --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" -- "$image_ref" >/dev/null
 shopt -s nullglob
 disks=(*.raw.xz)
 if [ ${#disks[@]} -eq 0 ]; then
@@ -35,10 +44,11 @@ for file in "${disks[@]}" SHA256SUMS; do
   cosign verify-blob --bundle "$file.sigstore.json" \
     --certificate-identity "$identity" \
     --certificate-oidc-issuer "$issuer" \
-    "$file"
-  gh attestation verify "$file" --repo "$GH_REPO" \
-    --signer-workflow "$GH_REPO/.github/workflows/release-publish.yml" \
-    --source-ref refs/heads/develop --deny-self-hosted-runners
+    -- "$file"
+  gh attestation verify --repo "$GH_REPO" \
+    --cert-identity "$identity" --cert-oidc-issuer "$issuer" \
+    --source-ref refs/heads/develop --deny-self-hosted-runners \
+    -- "$file"
 done
 # Only now that SHA256SUMS is known to be this workflow's own.
-sha256sum --check SHA256SUMS
+sha256sum --check -- SHA256SUMS

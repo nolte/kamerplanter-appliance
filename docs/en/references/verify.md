@@ -3,7 +3,7 @@ title: Verifying a download
 audience: [self-hoster, maintainer]
 content_mode: how-to
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-22
 ---
 
 # Verifying a download
@@ -33,9 +33,11 @@ The build provenance recorded at release time can be checked as well:
 ```bash
 gh attestation verify kamerplanter-appliance-v0.1.0-x86_64.raw.xz \
   --repo nolte/kamerplanter-appliance \
-  --signer-workflow nolte/kamerplanter-appliance/.github/workflows/release-publish.yml \
+  --cert-identity "https://github.com/nolte/kamerplanter-appliance/.github/workflows/release-publish.yml@refs/heads/develop" \
   --source-ref refs/heads/develop --deny-self-hosted-runners
 ```
+
+`--cert-identity` compares the whole signer identity, workflow and branch. `--signer-workflow` only checks that the identity starts with the given value, so it would also accept another workflow whose path begins the same way, and any ref of the workflow.
 
 ## With cosign, without a GitHub account
 

@@ -3,7 +3,7 @@ title: Einen Download prüfen
 audience: [self-hoster, maintainer]
 content_mode: how-to
 track: user-docs
-last_updated: 2026-11-13
+last_updated: 2026-11-22
 ---
 
 # Einen Download prüfen
@@ -33,9 +33,11 @@ Die beim Release festgehaltene Herkunftsbescheinigung lässt sich ebenfalls prü
 ```bash
 gh attestation verify kamerplanter-appliance-v0.1.0-x86_64.raw.xz \
   --repo nolte/kamerplanter-appliance \
-  --signer-workflow nolte/kamerplanter-appliance/.github/workflows/release-publish.yml \
+  --cert-identity "https://github.com/nolte/kamerplanter-appliance/.github/workflows/release-publish.yml@refs/heads/develop" \
   --source-ref refs/heads/develop --deny-self-hosted-runners
 ```
+
+`--cert-identity` vergleicht die ganze Signatur-Identität, Workflow und Branch. `--signer-workflow` prüft nur, ob die Identität mit dem angegebenen Wert beginnt, und nähme daher auch einen anderen Workflow an, dessen Pfad genauso anfängt, und jede Ref des Workflows.
 
 ## Mit cosign, ohne GitHub-Konto
 
