@@ -429,13 +429,19 @@ holder=$!
 for _ in $(seq 100); do [ -e "$work/held" ] && break; sleep 0.1; done
 run_pin FERNET_KEY >"$work/pin-rc" &
 pinner=$!
-sleep 1
+# Released only once the pinner waits for the lock (its flock is running),
+# so the case also fails where a run does not wait at all.
+waited=no
+for _ in $(seq 100); do
+    if pgrep -f "^flock -w 30 " >/dev/null; then waited=yes; break; fi
+    sleep 0.1
+done
 touch "$work/release"
 wait "$holder"
 wait "$pinner"
 keys+=("$(pin_key)")
-expect "keyed: a run that waited for the lock pins with the key the other run made, and keeps it" "0|$other_key|yes" \
-    "$(cat "$work/pin-rc")|$(pin_key)|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$other_key" "$(secret FERNET_KEY)")" ] && echo yes)"
+expect "keyed: a run that waited for the lock pins with the key the other run made, and keeps it" "yes|0|$other_key|yes" \
+    "$waited|$(cat "$work/pin-rc")|$(pin_key)|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$other_key" "$(secret FERNET_KEY)")" ] && echo yes)"
 
 # --- an upgraded installation: legacy pins are migrated, nothing stops ---
 new_appliance
