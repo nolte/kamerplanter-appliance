@@ -37,7 +37,10 @@ on:
 #            (enabled for this repository) and cascades at once to
 #            release-cd-refresh-master.yml and release-cd-deliver-docs.yml
 #   current  confirms develop has not moved while the image was built, so the
-#            tag the reusable creates on develop matches the attached image
+#            tag the reusable creates on develop matches the attached image,
+#            and that the draft carries exactly the assets prepare or assets
+#            verified, by name and digest, so nothing added or replaced on the
+#            draft since is published unverified
 #   publish  the reusable
 #   channel  moves the release channel `:stable`, which installed appliances
 #            update from, to the published system image; nothing reaches an
@@ -74,6 +77,8 @@ jobs:
     outputs:
       commit: ${{ steps.check.outputs.commit }}
       build: ${{ steps.check.outputs.build }}
+      # The reused assets as verified: `sha256sum` lines, one per asset.
+      verified: ${{ steps.verify.outputs.verified }}
     steps:
       # The checks shared with the build path, from the commit to release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -141,6 +146,7 @@ jobs:
       # signatures and provenance and match the signed SHA256SUMS, and the
       # draft must carry nothing else.
       - name: Verify the reused assets
+        id: verify
         if: steps.check.outputs.build == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -177,6 +183,13 @@ jobs:
             exit 1
           fi
           echo "The assets on $TAG verify against this workflow's signatures; reusing them."
+          # What current compares the draft with right before publishing.
+          delimiter=verified-$(openssl rand -hex 16)
+          {
+            echo "verified<<$delimiter"
+            sha256sum -- *
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
 
   disk:
     needs: prepare
@@ -210,6 +223,10 @@ jobs:
     concurrency:
       group: release-publish-assets-${{ inputs.tag }}
       cancel-in-progress: false
+    outputs:
+      # The attached assets as verified: `sha256sum` lines, one per asset;
+      # empty in a dry run, which attaches nothing.
+      verified: ${{ steps.attach.outputs.verified }}
     steps:
       # The verification shared with the reuse path in prepare.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -310,6 +327,7 @@ jobs:
       # has made sure the draft carries no assets, and the workflow-level
       # group keeps a second run of the same tag out, so nothing is replaced.
       - name: Attach to the draft release
+        id: attach
         if: ${{ !inputs.dry_run }}
         working-directory: dist
         env:
@@ -331,6 +349,13 @@ jobs:
           done
           echo "$TAG carries:"
           echo "$attached"
+          # What current compares the draft with right before publishing.
+          delimiter=verified-$(openssl rand -hex 16)
+          {
+            echo "verified<<$delimiter"
+            sha256sum -- *
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
 
   current:
     name: Check develop has not moved
@@ -341,6 +366,10 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.assets.result == 'success' || (needs.assets.result == 'skipped' && needs.prepare.outputs.build == 'false')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Draft releases are only visible to a token with write access; the job
+    # changes nothing.
+    permissions:
+      contents: write
     steps:
       - name: Compare develop with the built commit
         env:
@@ -357,6 +386,51 @@ jobs:
           # A merge between this check and the reusable creating the tag on
           # develop is not caught; the window is the start-up time of the
           # publish job.
+
+      # prepare or assets verified the files, then attached or reused them;
+      # until the release is published, anyone with write access can still
+      # add or replace an asset on the draft, and publishing makes the release
+      # immutable (spec/release-distribution/ B2, B3). The draft must carry
+      # exactly the verified files, each with the digest GitHub computed on
+      # upload; an asset without a digest fails too. As above, a change
+      # between this check and the reusable flipping the draft is not caught.
+      - name: Compare the draft's assets with the verified ones
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          BUILD: ${{ needs.prepare.outputs.build }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REUSED: ${{ needs.prepare.outputs.verified }}
+          ATTACHED: ${{ needs.assets.outputs.verified }}
+        run: |
+          set -euo pipefail
+          if [ "$BUILD" = false ]; then
+            verified=$REUSED
+          elif [ "$DRY_RUN" = true ]; then
+            # A dry run attaches nothing, and prepare found the draft empty.
+            verified=
+          else
+            verified=$ATTACHED
+          fi
+          if [ -z "$verified" ] && { [ "$BUILD" = false ] || [ "$DRY_RUN" != true ]; }; then
+            echo "::error::no record of the verified assets of $TAG; dispatch again"
+            exit 1
+          fi
+          expected=$(awk 'NF { if (NF != 2) exit 1; print $2 " sha256:" $1 }' <<<"$verified" | sort)
+          actual=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" |
+            jq -rs --arg tag "$TAG" '
+              [add[] | select(.draft and .tag_name == $tag)]
+              | if length == 1 then .[0].assets[] | "\(.name) \(.digest // "no-digest")"
+                else error("expected one draft for \($tag), found \(length)") end' |
+            sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::the assets on $TAG differ from the verified ones (< verified, > on the draft); delete the assets from the draft and dispatch again"
+            diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep '^[<>]' || true
+            exit 1
+          fi
+          echo "$TAG carries exactly the verified assets:"
+          printf '%s\n' "$actual"
 
   publish:
     needs: current
