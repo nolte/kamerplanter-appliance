@@ -424,7 +424,8 @@ jobs:
               [add[] | select(.draft and .tag_name == $tag)]
               | if length == 1 then .[0].assets[] | "\(.name) \(.digest // "no-digest")"
                 else error("expected one draft for \($tag), found \(length)") end' |
-            sort)
+            sort) ||
+            { echo "::error::exactly one draft release for $TAG is expected and could not be read; check the drafts and dispatch again"; exit 1; }
           if [ "$actual" != "$expected" ]; then
             echo "::error::the assets on $TAG differ from the verified ones (< verified, > on the draft); delete the assets from the draft and dispatch again"
             diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | grep '^[<>]' || true

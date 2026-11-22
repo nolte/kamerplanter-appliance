@@ -34,6 +34,7 @@ Die beim Release festgehaltene Herkunftsbescheinigung lässt sich ebenfalls prü
 gh attestation verify kamerplanter-appliance-v0.1.0-x86_64.raw.xz \
   --repo nolte/kamerplanter-appliance \
   --cert-identity "https://github.com/nolte/kamerplanter-appliance/.github/workflows/release-publish.yml@refs/heads/develop" \
+  --cert-oidc-issuer https://token.actions.githubusercontent.com \
   --source-ref refs/heads/develop --deny-self-hosted-runners
 ```
 
