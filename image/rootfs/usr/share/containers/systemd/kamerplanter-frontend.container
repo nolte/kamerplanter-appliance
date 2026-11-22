@@ -5,7 +5,7 @@ After=kamerplanter-backend.service
 
 [Container]
 ContainerName=frontend
-Image=ghcr.io/nolte/kamerplanter-frontend:0.4.2@sha256:ac650404305b229314882c501e6081dc19ae6f8e76b24d1a75446d6bf9b04136
+Image=ghcr.io/nolte/kamerplanter-frontend:0.5.0@sha256:919933849df80528ec0b7d129b20123d66aebecbf566cd5b36919d4afa43e6ce
 Network=kamerplanter.network
 PublishPort=8080:8080
 Environment=KAMERPLANTER_MODE=light

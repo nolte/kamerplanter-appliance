@@ -8,7 +8,7 @@ After=kamerplanter-backend.service
 
 [Container]
 ContainerName=celery-worker
-Image=ghcr.io/nolte/kamerplanter-backend:0.4.2@sha256:ba9dd4a150a0ad96e61ac190665285ec4ce9eaf7a745cc18b5a097045577cc4c
+Image=ghcr.io/nolte/kamerplanter-backend:0.5.0@sha256:b67dff5d595fa7a96745d0cb0b44e9b2ba6c62f5fdadbb291b2cc4b5219c7171
 Network=kamerplanter.network
 EnvironmentFile=/run/kamerplanter/app.env
 Exec=celery -A app.tasks worker --loglevel=info
