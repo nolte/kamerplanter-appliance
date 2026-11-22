@@ -87,8 +87,9 @@ for file in kamerplanter-appliance-v1.0.0-x86_64.raw.xz SHA256SUMS; do
     expect "$file: its provenance is verified against the exact identity, the file after --" yes \
         "$(has "gh attestation verify --repo $repo --cert-identity $identity --cert-oidc-issuer $issuer --source-ref refs/heads/develop --deny-self-hosted-runners -- $file" "$log")"
 done
-# --signer-workflow is an unanchored regular expression in gh: a workflow
-# release-publish.yml-other.yml, or any ref of it, would match it.
+# gh matches --signer-workflow as ^https://github.com/<value>, without an
+# end anchor: a workflow release-publish.yml-other.yml, or any ref of it,
+# would match it.
 expect "the provenance is never matched by --signer-workflow" no "$(has --signer-workflow "$log")"
 expect "the checksums are checked" yes "$(has ": OK" "$out")"
 

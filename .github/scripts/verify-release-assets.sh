@@ -10,8 +10,9 @@
 # checks.
 #
 # Every check pins the signer to the exact identity below. `gh attestation
-# verify --signer-workflow` would not: it matches its value as an unanchored
-# regular expression, so a workflow whose path merely starts with
+# verify --signer-workflow` would not: it matches its value as the regular
+# expression ^https://github.com/<value>, without an end anchor and with its
+# dots unescaped, so a workflow whose path merely starts with
 # release-publish.yml, or any ref of it, would pass; --cert-identity compares
 # the certificate's whole SubjectAlternativeName instead. File arguments
 # follow `--`, so a file name cannot be read as an option.

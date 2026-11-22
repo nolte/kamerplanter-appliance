@@ -417,7 +417,8 @@ jobs:
             echo "::error::no record of the verified assets of $TAG; dispatch again"
             exit 1
           fi
-          expected=$(awk 'NF { if (NF != 2) exit 1; print $2 " sha256:" $1 }' <<<"$verified" | sort)
+          expected=$(awk 'NF { if (NF != 2) exit 1; print $2 " sha256:" $1 }' <<<"$verified" | sort) ||
+            { echo "::error::the record of the verified assets of $TAG is malformed; dispatch again"; exit 1; }
           actual=$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" |
             jq -rs --arg tag "$TAG" '
               [add[] | select(.draft and .tag_name == $tag)]
