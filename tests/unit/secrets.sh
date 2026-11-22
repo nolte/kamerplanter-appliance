@@ -436,6 +436,17 @@ pin_of "$(fernet_of elsewhere)" >"$(pins_dir)/FERNET_KEY"
 reboot
 expect "migration: a legacy pin that differs, beside a matching keyed one, keeps the services stopped and names both" "1|yes|yes" \
     "$(run_configure)|$(has "(then remove $(pins_dir)/FERNET_KEY.hmac and $(pins_dir)/FERNET_KEY)" "$(out)")|$(exists "$(pins_dir)/FERNET_KEY")"
+# A value changed on a release before after a rollback, as its docs say
+# (delete the legacy pin, restart): that release pins the new value in the
+# old form, beside the keyed pin of the old one. Back on this release the
+# legacy pin decides; the stale keyed pin is written anew, nothing stops,
+# so the update does not fail its health check and roll back again.
+sed -i "s/^FERNET_KEY=.*/FERNET_KEY=$(fernet_of rotated)/" "$SB/etc/kamerplanter/secrets.env"
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+reboot
+rc=$(run_configure)
+expect "migration: a stale keyed pin beside a matching legacy one is written anew, the services start" "0|yes|no|yes|yes" \
+    "$rc|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$(hmac_of "$(pin_key)" "$(fernet_of rotated)")" ] && echo yes)|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$SB/run/kamerplanter/app.env")|$(has "the keyed pin of FERNET_KEY was older than $(pins_dir)/FERNET_KEY" "$(out)")"
 
 new_appliance
 run_configure >/dev/null

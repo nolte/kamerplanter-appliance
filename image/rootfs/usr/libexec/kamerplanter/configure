@@ -127,7 +127,9 @@ pin_key_make() {
     [ -z "$pin_key_hex" ] || return 0
     pin_key_read && return 0
     ! keyed_pins || return 1
-    if [ -e "$pin_key" ] || [ -L "$pin_key" ]; then
+    if [ -d "$pin_key" ] && [ ! -L "$pin_key" ]; then
+        return 1
+    elif [ -e "$pin_key" ] || [ -L "$pin_key" ]; then
         hex 32 | replace "$pin_key" || return 1
     else
         tmp=$(mktemp "$pins/.key.XXXXXX") || return 1
@@ -171,17 +173,27 @@ pin_files() {
         printf '%s' "$pins/$1.hmac"
     fi
 }
-# pin_matches KEY VALUE: whether every pin recorded for KEY is that of VALUE.
+# pin_matches KEY VALUE: whether VALUE is the one pinned for KEY. A legacy
+# pin, where there is one, decides: it is what a release before checks, and
+# pins anew when a value is changed there after a rollback; a keyed pin
+# beside it that differs is then older than it and is written anew
+# (keyed_matches, below). Without a legacy pin the keyed one decides.
 pin_matches() {
     local h
     if [ -e "$pins/$1" ]; then
         h=$(printf '%s' "$2" | sha256sum) || return 1
         [ "$(<"$pins/$1")" = "${h%% *}" ] || return 1
+        return 0
     fi
-    if [ -e "$pins/$1.hmac" ]; then
-        h=$(hmac "$2") || return 1
-        [ "$(<"$pins/$1.hmac")" = "$h" ] || return 1
-    fi
+    [ -e "$pins/$1.hmac" ] || return 0
+    keyed_matches "$1" "$2"
+}
+# keyed_matches KEY VALUE: whether the keyed pin of KEY is that of VALUE.
+keyed_matches() {
+    local h
+    [ -e "$pins/$1.hmac" ] || return 1
+    h=$(hmac "$2") || return 1
+    [ "$(<"$pins/$1.hmac")" = "$h" ]
 }
 # pin_record KEY VALUE: records the keyed pin of VALUE for KEY. Called in a
 # condition, so every step is checked.
@@ -584,9 +596,17 @@ done
 # and is migrated on a later run.
 pin_key_make || echo "warning: the key of the pins could not be written to $pin_key; the services pin their values when they start" >&2
 for key in "${legacy[@]}"; do
-    if [ ! -e "$pins/$key.hmac" ] && ! pin_record "$key" "$(get "$key")"; then
-        echo "warning: the pin of $key could not be migrated; $pins/$key is kept and checked as before" >&2
-    elif [ -e "$update_pending" ]; then
+    if ! keyed_matches "$key" "$(get "$key")"; then
+        stale=no
+        [ ! -e "$pins/$key.hmac" ] || stale=yes
+        if ! pin_record "$key" "$(get "$key")"; then
+            echo "warning: the pin of $key could not be migrated; $pins/$key is kept and checked as before" >&2
+            continue
+        fi
+        [ "$stale" = no ] ||
+            echo "the keyed pin of $key was older than $pins/$key, which a release before pinned after a rollback; $pins/$key.hmac is written anew"
+    fi
+    if [ -e "$update_pending" ]; then
         echo "the pin of $key is keyed in $pins/$key.hmac; $pins/$key is kept until the update being checked is decided, for the release a rollback returns to"
     elif rm -f -- "$pins/$key"; then
         echo "the pin of $key is now keyed: $pins/$key.hmac replaces $pins/$key"
