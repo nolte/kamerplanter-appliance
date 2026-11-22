@@ -7,7 +7,9 @@
 # listed there is a workflow that exists. The checks are set with
 # GITHUB_TOKEN, whose `status` and `check_suite` events start no workflow, so
 # a producer missing from the list leaves a pull request open with every
-# check green. Reads the YAML files only; needs PyYAML.
+# check green. Also checks that every file a failure of the VM tests names is
+# uploaded by the job of vm-tests.yml that runs the script (#110). Reads the
+# YAML files and the scripts only; needs PyYAML.
 #
 # Usage: tests/unit/workflows.sh
 set -uo pipefail
@@ -16,6 +18,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 
 # One line per finding: "ok <text>" or "FAIL <text>".
 output=$(python3 - "$root" <<'EOF'
+import fnmatch
 import pathlib
 import re
 import sys
@@ -88,6 +91,31 @@ for name in listened:
         print(f"ok automerge listens for the workflow {name}, which exists")
     else:
         print(f"FAIL automerge listens for the workflow {name}, which does not exist")
+
+# A file that a failure of the VM tests names ("see d0.disk.log") is one the
+# job running that script uploads with its results (#110: the disk build's
+# log was named but never uploaded). Each script is checked against the job
+# that runs it; a helper of run.sh that update.sh or data-disk.sh call is
+# checked against the boot job only.
+vm_doc = load(workflows / "vm-tests.yml")
+vm_jobs = vm_doc.get("jobs") or {}
+for job_id, script in (("boot", "run.sh"), ("update", "update.sh"), ("data-disk", "data-disk.sh")):
+    globs = []
+    for step in (vm_jobs.get(job_id) or {}).get("steps") or []:
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@") and \
+                str((step.get("with") or {}).get("name", "")).startswith("vm-results-"):
+            globs += str(step["with"].get("path", "")).split()
+    named = set()
+    for line in (root / "tests" / "boot" / script).read_text().splitlines():
+        _, see, rest = line.partition("see ")
+        if see:
+            named.update(re.findall(r"[\w${}-]+(?:\.[\w-]+)*\.(?:txt|log|ppm)\b", rest))
+    for f in sorted(named):
+        example = ".build/boot/" + re.sub(r"\$\{?\w+\}?", "x", f)
+        if any(fnmatch.fnmatch(example, g) for g in globs):
+            print(f"ok tests/boot/{script} names {f}, and the job {job_id} uploads it")
+        else:
+            print(f"FAIL tests/boot/{script} names {f} in a failure, but the job {job_id} of vm-tests.yml does not upload it")
 EOF
 ) || { echo "FAIL the workflow files could not be read"; exit 1; }
 

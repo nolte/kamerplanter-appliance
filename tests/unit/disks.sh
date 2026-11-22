@@ -459,6 +459,70 @@ expect "lock: a partition whose disk cannot be found stops the start" \
     )
 )"
 
+# The order of the steps in set_up that destroy what a disk holds (#96): the
+# lock is taken, the disk and its content are checked again under it, the
+# force is recorded before the wipe, each write follows a same_disk, and the
+# lock is let go only once the raw device is written. Everything that reaches
+# the disk or the system is a function here that writes its step to
+# setup_calls; set_up itself, role_vars and disk_path_ok run as they ship.
+setup_calls=$work/setup-calls
+set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the decision ACTION (wipe or format) on /dev/sdb, comma-separated
+    : >"$setup_calls"
+    (
+        sb=$(mktemp -d "$work/setup.XXXXXX")
+        records=$sb/records keys=$sb/keys setup_state=$sb/state setup_decision=$1
+        role_vars data
+        name=/dev/disk/by-id/virtio-a conflict='' other_name='' force=1 wait_seconds=0 supplied=()
+        if [ "${2-}" = keyed ]; then echo k >"$sb/key"; supplied=("$sb/key"); fi
+        step() { echo "$*" >>"$setup_calls"; }
+        # The named disk exists and is a block device; every other test runs
+        # as usual. Defined through eval: shellcheck cannot parse a function
+        # named [.
+        eval '[() { case "$1 ${2-}" in "-e $name" | "-b /dev/sdb") return 0 ;; esac; builtin [ "$@"; }'
+        readlink() { echo /dev/sdb; }
+        udevadm() { step settle; }
+        system_data() { :; }
+        lsblk_field() { printf 8:16; }
+        device_node() { printf 5:100; }
+        identity_of() { printf serial:A; }
+        not_local() { return 1; }
+        system_device() { return 1; }
+        mapping_on() { return 1; }
+        in_use() { step in_use; return 1; }
+        probe() {
+            case $(cat "$setup_state" 2>/dev/null) in
+                luks) fs_type=crypto_LUKS fs_label=$label fs_uuid=L ;;
+                ext4) fs_type=ext4 fs_label=$label fs_uuid=U ;;
+                *) fs_type=xfs fs_label='' fs_uuid=X ;;
+            esac
+        }
+        kept() { :; }
+        signatures() { step signatures; echo xfs; }
+        setup_action() { echo "$setup_decision"; }
+        lock_disk() { step lock; }
+        unlock_disk() { step unlock; }
+        same_disk() { step "same_disk${5:+ $5}"; }
+        tree() { printf '/dev/sdb\n/dev/sdb1\n'; }
+        wipefs() { step "wipefs ${!#}"; }
+        cryptsetup() { step "cryptsetup $1"; echo luks >"$setup_state"; }
+        open_disk() { step open; }
+        mkfs.ext4() { step "mkfs ${!#}"; echo ext4 >"$setup_state"; }
+        replace() { step "replace ${1##*/}"; cat >"$1"; }
+        log_event() { :; }
+        keep_key() { step keep_key; }
+        mount_disk() { step "mount $1"; }
+        die() { step "die: $1"; exit 1; }
+        set_up >/dev/null 2>&1
+    )
+    paste -sd, "$setup_calls"
+}
+expect "set_up order: a forced wipe is checked again under the lock, recorded first, and each write follows a same_disk" \
+    "settle,in_use,signatures,lock,same_disk named,in_use,signatures,replace forced,same_disk,wipefs /dev/sdb1,same_disk,wipefs /dev/sdb,same_disk,mkfs /dev/sdb,unlock,settle,replace data.env,mount /dev/sdb" \
+    "$(set_up_order wipe)"
+expect "set_up order: an encrypted format writes the container under the lock and checks the opened container's disk" \
+    "settle,in_use,signatures,lock,same_disk named,in_use,signatures,same_disk,cryptsetup luksFormat,unlock,settle,open,same_disk,mkfs /dev/mapper/kamerplanter-data,settle,replace data.env,keep_key,mount /dev/mapper/kamerplanter-data" \
+    "$(set_up_order format keyed)"
+
 # --- no key on the kernel command line (W5) ---
 cmd=$work/cmdline
 on_cmdline() { printf '%s\n' "$1" >"$cmd"; if cmdline_key "$cmd" "$2"; then echo refused; else echo fine; fi; }

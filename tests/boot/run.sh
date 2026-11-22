@@ -235,10 +235,12 @@ static_network() {
 marker() { printf '%s%s' "$1" "$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"; }
 
 # reboot_vm TIMEOUT: an orderly reboot of the running VM, the drives staying
-# attached; prints the seconds until the services answer again.
+# attached; prints the seconds until the services answer again. Fails without
+# rebooting when the boot id cannot be read: every id read later would differ
+# from an empty one, also that of the boot still running (#110).
 reboot_vm() {
-    local id now
-    id=$(guest cat /proc/sys/kernel/random/boot_id)
+    local id now=''
+    id=$(guest cat /proc/sys/kernel/random/boot_id) && [ -n "$id" ] || return 1
     guest systemctl reboot >/dev/null 2>&1
     for _ in $(seq 120); do
         sleep 5
@@ -579,12 +581,22 @@ echo "$user|$ctr|$([ "${out:-0}" -gt 0 ] && echo yes || echo "output counted ${o
         diagnose run9
     # Chains flushed by hand leave the table in place but empty: the check
     # loads the rules again all the same, the table as it was (counters
-    # aside), still without a restart.
-    local listing
+    # aside), still without a restart. A table that differs is recorded with
+    # the lines that differ (#110).
+    local listing flushed reloaded same
     listing=$(guest "nft list table inet kamerplanter_metadata | sed -E 's/ counter packets [0-9]+ bytes [0-9]+/ counter/'")
+    flushed=$(guest "nft flush chain inet kamerplanter_metadata output && nft flush chain inet kamerplanter_metadata forward && nft list table inet kamerplanter_metadata | grep -c reject")
+    reloaded=$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list table inet kamerplanter_metadata | sed -E 's/ counter packets [0-9]+ bytes [0-9]+/ counter/'")
+    if [ "$reloaded" = "$listing" ]; then
+        same=yes
+    else
+        # comm and sort (coreutils), which the tool container has for certain.
+        same="differs: $(comm -3 <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$listing" | sort) <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$reloaded" | sort) |
+            sed 's/^\t/> /; t; s/^/< /' | head -n 20 | tr -s '\t ' ' ' | paste -sd ';')"
+    fi
     expect_rec run9-guard-flush "yes|0|yes|$invocations" \
-        "$(grep -q reject <<<"$listing" && echo yes)|$(guest "nft flush chain inet kamerplanter_metadata output && nft flush chain inet kamerplanter_metadata forward && nft list table inet kamerplanter_metadata | grep -c reject")|$([ "$(guest "systemctl start kamerplanter-metadata-guard-check.service && nft list table inet kamerplanter_metadata | sed -E 's/ counter packets [0-9]+ bytes [0-9]+/ counter/'")" = "$listing" ] && echo yes)|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
-        "the metadata rules, their chains flushed, are loaded again by their check as they were, without a restart" ||
+        "$(grep -q reject <<<"$listing" && echo yes)|$flushed|$same|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \
+        "the metadata rules, their chains flushed, are loaded again by their check as they were (on a mismatch: < only before, > only after), without a restart" ||
         diagnose run9
     # A measurement, not a check: whether logrotate is installed and which
     # rule, if any, rotates cloud-init's logs.
@@ -714,10 +726,13 @@ scrubbed() {
 
 # reboot_to_ssh: an orderly reboot of the running VM; prints the seconds
 # until guest answers on the new boot and cloud-init has finished, whatever
-# status it reports.
+# status it reports: done (0), error (1) or degraded (2). Fails when the boot
+# id cannot be read before the reboot (as reboot_vm), when no new boot
+# answers, and when cloud-init does not finish: the wait timed out (124) or
+# SSH failed (255) (#110).
 reboot_to_ssh() {
-    local id now='' start=$SECONDS
-    id=$(guest cat /proc/sys/kernel/random/boot_id)
+    local id now='' start=$SECONDS rc
+    id=$(guest cat /proc/sys/kernel/random/boot_id) && [ -n "$id" ] || return 1
     guest systemctl reboot >/dev/null 2>&1
     for _ in $(seq 120); do
         sleep 5
@@ -726,6 +741,8 @@ reboot_to_ssh() {
     done
     [ -n "$now" ] && [ "$now" != "$id" ] || return 1
     guest_bounded "timeout 600 cloud-init status --wait" >/dev/null 2>&1
+    rc=$?
+    case $rc in 0 | 1 | 2) ;; *) return 3 ;; esac
     echo $((SECONDS - start))
 }
 
@@ -742,7 +759,11 @@ late_evidence() {
     if secs=$(wait_ssh 900); then
         diagnose "$1"
         {
-            echo "== SSH answered ${secs}s after the step's timeout"
+            if [ "$secs" = 0 ]; then
+                echo "== SSH answers: the step failed on cloud-init or the scrub, or SSH answered only just after its timeout"
+            else
+                echo "== SSH answered ${secs}s after the step's timeout"
+            fi
             echo "== boot timing"; guest "systemd-analyze; systemd-analyze critical-chain sshd.service"
             echo "== cloud-init"; guest "cloud-init status --long; cloud-init analyze blame | head -n 30"
             echo "== this boot: cloud-init and sshd"
@@ -769,7 +790,7 @@ late_evidence() {
 # the provisioned one, not that it was left untouched.
 run_12() {
     local VM_SMBIOS=("type=1,serial=ds=nocloud;s=http://10.0.2.2:8098/") VM_SSH_KEY=off VM_MONITOR=10046
-    local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys secs edited written
+    local seed=$OUT/run12-seed overlay=$OUT/run12.qcow2 server keys fallback_keys secs edited written
     local prov=/var/lib/kamerplanter/provisioning/provisioning.env sem=/var/lib/cloud/instances/run12/sem/config_write_files
     nocloud_seed "$seed" kp-run12 run12 <<EOF
 write_files:
@@ -822,13 +843,14 @@ EOF
     kill "$server"; wait "$server" 2>/dev/null
     if ! secs=$(reboot_to_ssh) || ! scrubbed; then
         late_evidence run12-fallback
-        record run12-fallback FAIL - "seed URL down: no SSH after the reboot, or the scrub did not finish"
+        record run12-fallback FAIL - "seed URL down: no SSH after the reboot, or cloud-init or the scrub did not finish"
         stop_vm; return
     fi
     record run12-reboot PASS "${secs}s" "reboot with the seed URL down"
     expect_rec run12-fallback iid-datasource-none "$(instance_id)" \
         "seed URL down: cloud-init fell back to the datasource None, a new instance" || diagnose run12-fallback
-    expect_rec run12-fallback-keys "$keys" "$(host_keys)" \
+    fallback_keys=$(host_keys)
+    expect_rec run12-fallback-keys "$keys" "$fallback_keys" \
         "seed URL down: the SSH host keys of the first boot stay"
     expect_rec run12-fallback-kept "$edited|kp-run12" \
         "$(guest sha256sum "$prov" | cut -d' ' -f1)|$(guest hostnamectl hostname)" \
@@ -845,15 +867,18 @@ EOF
         record run12-back PASS "${secs}s" "reboot with the seed URL answering again"
         expect_rec run12-back-instance run12 "$(instance_id)" \
             "seed URL back: cloud-init returned to instance run12" || diagnose run12-back
-        expect_rec run12-back-keys "$keys" "$(host_keys)" \
-            "seed URL back: the SSH host keys of the first boot stay"
+        # Compared with the keys the fallback boot left, so that this step
+        # says what the return boot did whatever the fallback did (#110);
+        # with run12-fallback-keys it says that the first boot's keys stay.
+        expect_rec run12-back-keys "${fallback_keys:-none read}" "$(host_keys)" \
+            "seed URL back: the return boot keeps the SSH host keys the boot before it had"
         expect_rec run12-back-kept "$edited|$written|kp-run12" \
             "$(guest sha256sum "$prov" | cut -d' ' -f1)|$(guest stat -c %Y "$sem")|$(guest hostnamectl hostname)" \
             "seed URL back: write_files did not run again, provisioning.env stays as edited, the hostname as provisioned" ||
             diagnose run12-back
     else
         diagnose run12-back
-        record run12-back FAIL - "seed URL back: no SSH after the reboot"
+        record run12-back FAIL - "seed URL back: no SSH after the reboot, or cloud-init did not finish"
     fi
     kill "$server" 2>/dev/null
     stop_vm

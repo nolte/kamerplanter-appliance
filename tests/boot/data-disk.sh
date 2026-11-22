@@ -84,15 +84,18 @@ boot_up() {
 }
 
 # reboot_guest: reboots and waits for the new boot to be up; prints seconds.
+# Fails without rebooting when the boot id cannot be read (every later id
+# would differ from an empty one), and when no new boot answers (#110).
 reboot_guest() {
-    local id start=$SECONDS new
-    id=$(guest cat /proc/sys/kernel/random/boot_id)
+    local id start=$SECONDS new=''
+    id=$(guest cat /proc/sys/kernel/random/boot_id) && [ -n "$id" ] || return 1
     guest systemctl reboot >/dev/null 2>&1
     while ((SECONDS - start < REBOOT_TIMEOUT)); do
         new=$(guest cat /proc/sys/kernel/random/boot_id 2>/dev/null) && [ -n "$new" ] && [ "$new" != "$id" ] && break
         vm_alive || return 2
         sleep 5
     done
+    [ -n "$new" ] && [ "$new" != "$id" ] || return 1
     wait_up "$REBOOT_TIMEOUT" >/dev/null || return 1
     echo $((SECONDS - start))
 }
@@ -104,9 +107,11 @@ stopped_services() {
 }
 
 # avc_records: the SELinux denials of this boot as the journal has them, with
-# the name of the file, the source context and the process.
+# the name of the file, the source context and the process. Fails when the
+# journal could not be read over SSH, so that no denials read is not taken
+# for none (#110).
 avc_records() {
-    guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null'
+    guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null; true'
 }
 
 # avc_signatures [FILE]: the SELinux denials of this boot (or those recorded
@@ -126,7 +131,10 @@ avc_signatures() {
 # Without the baseline every check would pass unseen: a run that leaves out
 # the step none (CI splits the steps into jobs) reports that as a denial.
 new_avcs() {
-    avc_records >"$OUT/$1.avc-records.txt"
+    if ! avc_records >"$OUT/$1.avc-records.txt"; then
+        echo "the SELinux denials of this boot could not be read over SSH" | tee "$OUT/$1.avc.txt"
+        return
+    fi
     if [ ! -f "$WORK/avc-baseline.txt" ]; then
         echo "no baseline of SELinux denials: run the step none before" | tee "$OUT/$1.avc.txt"
         return
@@ -268,7 +276,10 @@ step_none() {
     start_vm d1 bios virtio-scsi virtio off "$WORK/d1.qcow2" || { record d1 FAIL - "qemu did not start"; return 1; }
     local secs
     secs=$(boot_up d1 "$FIRST_BOOT_TIMEOUT") || return 1
-    avc_records >"$OUT/d1.avc-records.txt"
+    if ! avc_records >"$OUT/d1.avc-records.txt"; then
+        fail d1 "the SELinux denials of the boot without a data disk could not be read over SSH; no baseline"
+        return 1
+    fi
     avc_signatures "$OUT/d1.avc-records.txt" >"$WORK/avc-baseline.txt"
     cp "$WORK/avc-baseline.txt" "$OUT/d1.avc-baseline.txt"
     local status
@@ -279,6 +290,10 @@ step_none() {
         return 1
     fi
     record d1 PASS "${secs}s" "no data disk: first boot from the system disk, nothing mounted or bound ($(wc -l <"$WORK/avc-baseline.txt") baseline denial signatures)"
+    # A denial for the console messages on this boot would go into the
+    # baseline, and the later steps' new_avcs would no longer see it (#110):
+    # it is checked here on its own, as on every boot with a console message.
+    check_console d1-console 50-kamerplanter.issue
     # P8: the guard reads another deployment's features file; on composefs
     # the deployment trees under /sysroot are plain directories.
     local features

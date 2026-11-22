@@ -125,8 +125,11 @@ last_event() { guest "tail -n1 /var/lib/kamerplanter/update/log.jsonl"; }
 has_event() { guest "grep -F '\"event\":\"$1\"' /var/lib/kamerplanter/update/log.jsonl | grep -qF '$2'"; }
 
 # wait_reboot <boot id> <timeout>: until the guest runs with another boot id.
+# An empty boot id (it could not be read) fails at once: every id would
+# differ from it, also that of the boot still running (#110).
 wait_reboot() {
     local start=$SECONDS id
+    [ -n "$1" ] || return 1
     while ((SECONDS - start < $2)); do
         id=$(boot_id) && [ -n "$id" ] && [ "$id" != "$1" ] && { boot_id; return 0; }
         vm_alive || return 2
