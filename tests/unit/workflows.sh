@@ -95,14 +95,20 @@ for path in sorted(workflows.glob("*.y*ml")):
     sets = [c for c in contexts
             if any((job or {}).get("name", job_id) == c for job_id, job in jobs.items())
             or c in statuses]
+    if path.name in transitional and transitional[path.name] not in statuses:
+        print(f"FAIL {path.name} no longer posts {transitional[path.name]}: "
+              "remove its transitional entry")
     for c in statuses:
-        # A run on pull_request is the pull request's own workflow file: it
+        # Only pull_request_target and workflow_run run as develop has them.
+        # pull_request, push or workflow_dispatch on a branch, and a
+        # workflow_call from one of those run the branch's own file, which
         # could post the required status with whatever state it likes (#51).
+        foreign = sorted(set(on) - {"pull_request_target", "workflow_run"})
         if transitional.get(path.name) == c:
             print(f"ok {path.name} ({name}) posts {c} as the transitional writer of #51")
-        elif "pull_request" in on:
-            print(f"FAIL {path.name} ({name}) runs on pull_request, as the pull request "
-                  f"has it, and posts the required status {c}")
+        elif foreign:
+            print(f"FAIL {path.name} ({name}) posts the required status {c} and runs on "
+                  f"{', '.join(foreign)}, as the branch has it")
         else:
             print(f"ok {path.name} ({name}) posts the required status {c} and runs as develop has it")
     for c in sets:
@@ -112,10 +118,14 @@ for path in sorted(workflows.glob("*.y*ml")):
         if "workflow_run" in on:
             # Only a pull request's run of vm-tests.yml itself, not a push,
             # a run by hand or another file named like it, may set it.
+            watched = (on.get("workflow_run") or {}).get("workflows") or []
+            paths = [f".github/workflows/{p.name}" for p in workflows.glob("*.y*ml")
+                     if (yaml.safe_load(p.read_text()) or {}).get("name") in watched]
             guarded = [job_id for job_id, job in jobs.items()
-                       if "context" in str((job or {}).get("steps", ""))
+                       if re.search(r"context=" + re.escape(c) + r"(?![\w-])", str((job or {}).get("steps", "")))
                        and "github.event.workflow_run.event == 'pull_request'" in str(job.get("if", ""))
-                       and "github.event.workflow_run.path == '.github/workflows/" in str(job.get("if", ""))]
+                       and any(f"github.event.workflow_run.path == '{p}'" in str(job.get("if", ""))
+                               for p in paths)]
             if guarded:
                 print(f"ok {path.name} ({name}) sets {c} only for a pull request's run "
                       f"of a named workflow file ({guarded[0]})")
@@ -140,11 +150,17 @@ for path in sorted(workflows.glob("*.y*ml")):
     # event's fields reach its scripts through env only.
     if "pull_request_target" in on or "workflow_run" in on:
         steps = [s for job in jobs.values() for s in ((job or {}).get("steps") or [])]
-        if any(str(s.get("uses", "")).startswith("actions/checkout@") for s in steps):
-            print(f"FAIL {path.name} ({name}) runs as develop has it and checks out code")
+        # Code or artifacts of the pull request: a checkout, a fetch, or the
+        # artifacts of the triggering run (artifact poisoning).
+        fetches = [s for s in steps
+                   if str(s.get("uses", "")).startswith(("actions/checkout@", "actions/download-artifact@"))
+                   or re.search(r"\b(gh (run download|pr checkout)|git (clone|fetch))\b", str(s.get("run", "")))]
+        if fetches:
+            print(f"FAIL {path.name} ({name}) runs as develop has it and fetches code or artifacts")
         else:
-            print(f"ok {path.name} ({name}) runs as develop has it and checks out no code")
-        if any("${{" in str(s.get("run", "")) for s in steps):
+            print(f"ok {path.name} ({name}) runs as develop has it and fetches no code or artifacts")
+        if any("${{" in str(s.get("run", "")) or "${{" in str((s.get("with") or {}).get("script", ""))
+               for s in steps):
             print(f"FAIL {path.name} ({name}) runs as develop has it and expands an "
                   "expression inside a script")
         else:

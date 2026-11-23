@@ -8,10 +8,10 @@ name: vm-gate
 #            the vm-tests run of that commit has completed (#51). A fork's
 #            run that awaits approval has not completed, so vm-gate stays
 #            pending until a maintainer approves it.
-# The VM tests cover what vm-tests.yml runs on after a merge to develop: the
-# image, the build, the boot and image tests, and the three workflows. A
-# change to vm-gate.yml or vm-gate-finalize.yml takes effect only once it is
-# on develop; counting them keeps a change to the gate behind the label.
+# The VM tests cover the image, the build, the boot and image tests and
+# vm-tests.yml, and the two gate workflows count as well: a change to
+# vm-gate.yml or vm-gate-finalize.yml takes effect only once it is on
+# develop, and counting them keeps a change to the gate behind the label.
 #
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the

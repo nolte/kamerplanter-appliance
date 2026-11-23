@@ -131,6 +131,7 @@ jobs:
           }
           [ "$(result build)" != skipped ] || leave "the vm-tests run skipped the build and tested nothing"
 
+          number=$(awk '$2 == "true" { print $1; exit }' <<<"$prs")
           state=success description="the VM tests of this commit passed"
           for suite in build boot update data-disk; do
             outcome=$(result "$suite")
@@ -139,14 +140,25 @@ jobs:
               break
             fi
           done
+          # The label again, right before the write: a label removed since the
+          # lookup has made vm-gate.yml post failure, which success must not
+          # overwrite.
+          [ "$(gh api "repos/$REPO/issues/$number/labels" --jq '[.[].name] | index("vm-tests") != null')" = true ] ||
+            leave "the label vm-tests was removed from #$number meanwhile"
           gh api -X POST "repos/$REPO/statuses/$SHA" -f context=vm-gate \
             -f state="$state" -f description="$description" -f target_url="$RUN_URL" >/dev/null
           echo "vm-gate: $state ($description)"
           echo "state=$state" >>"$GITHUB_OUTPUT"
 
+  # Only for a run of this repository's own branch: for a fork's run the
+  # action finds no pull request by the run itself and would look up
+  # nolte:<head_branch>, which can be another pull request of the same branch
+  # name. A pull request from a fork is merged by hand.
   automerge:
     needs: finalize
-    if: needs.finalize.outputs.state == 'success'
+    if: >-
+      needs.finalize.outputs.state == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     uses: nolte/gh-plumbing/.github/workflows/reusable-automerge.yaml@d664e75afc4d57de958af926987f842c1fc1f420 # v2.3.1
     with:
       app-id: ${{ vars.PORTFOLIO_APP_ID }}
