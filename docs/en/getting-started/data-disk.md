@@ -68,6 +68,8 @@ What happens to the named disk:
 | carries another file system or a partition table | Refused; the message names what it found. `disks name data PATH force` (in the naming file `DATA_DISK_FORCE=1` or `BACKUP_DISK_FORCE=1`; credential `kamerplanter.data-disk-force`, `kamerplanter.backup-disk-force`) formats it anyway, once per device: another path to the same disk doesn't format it again. The device is recorded by its WWN or serial number; a disk that reports neither is recorded by its device number, which can change after a reboot |
 | holds the running system, is mounted or in use, or isn't a local disk | Always refused, also when forced |
 
+Before it wipes, encrypts, or formats, the appliance locks the disk and checks again that it's still the disk named and holds what it held. A card reader keeps its name, device number, and serial number when you swap its card, so the appliance tells two cards in it apart only by what they hold: don't swap the card while the disk is being set up. A forced format counts once per reader, not per card.
+
 A disk that appears late, such as a USB disk, gets 30 seconds. Once set up, the disk is recorded in `/var/lib/kamerplanter/disks/` on the system disk together with its UUID. On every boot it's found by its label and accepted only under that UUID. A second device with the same label, for example a cloned stick, keeps the services stopped until you remove it.
 
 A naming takes effect when the disk service starts: at the next boot, or at once with `systemctl restart kamerplanter-data-disk.service` for a data disk. For a data disk on an appliance that holds data already, read [Moving an appliance onto a data disk](#moving-an-appliance-onto-a-data-disk) first.

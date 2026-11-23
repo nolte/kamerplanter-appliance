@@ -397,6 +397,12 @@ expect "same disk: a naming that leads elsewhere stops the start before the writ
     "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: it leads to /dev/sdc now, not to /dev/sdb; nothing is written to it" \
     "$(same_disk_with /dev/sdc 8:16 serial:A 5:100 named)"
 expect "same disk: after the first write the naming is not looked at again" written "$(same_disk_with /dev/sdc 8:16 serial:A 5:100)"
+expect "same disk: once a write has begun, the message says so instead of nothing written (#112)" \
+    "die: /dev/disk/by-id/usb-a (/dev/sdb) is not formatted, as it is no longer the disk selected: /dev/sdb is serial:B now, not serial:A; the forced wipe of its signatures has begun; nothing more is written to it" \
+    "$(
+        disk_written='the forced wipe of its signatures has begun'
+        same_disk_with /dev/sdb 8:16 serial:B 5:100
+    )"
 expect "same disk: nothing recorded to compare with stops the start" \
     "die: /dev/disk/by-id/usb-a (/dev/sdb) cannot be identified: it had no device number or node when it was selected; nothing is written to it" \
     "$(
@@ -435,7 +441,7 @@ expect "lock: taken on the device, released by unlock_disk" "locked|free" "$(
     )
 )"
 expect "lock: held by another program, the start stops without writing" \
-    "die: $lockee, holding /dev/disk/by-id/usb-a, is locked by another program; it is not formatted" "$(
+    "die: $lockee, holding /dev/disk/by-id/usb-a, is locked by another program; it is not formatted; nothing is written to it" "$(
     (
         exec 8<"$lockee"
         flock -x 8
@@ -448,7 +454,7 @@ expect "lock: held by another program, the start stops without writing" \
 )"
 
 expect "lock: a partition whose disk cannot be found stops the start" \
-    "die: /dev/sdb1, holding /dev/disk/by-id/usb-a, is a partition whose disk cannot be found to lock it; it is not formatted" "$(
+    "die: /dev/sdb1, holding /dev/disk/by-id/usb-a, is a partition whose disk cannot be found to lock it; it is not formatted; nothing is written to it" "$(
     (
         name=/dev/disk/by-id/usb-a
         lsblk_field() { if [ "$2" = TYPE ]; then printf part; fi; }
@@ -462,11 +468,13 @@ expect "lock: a partition whose disk cannot be found stops the start" \
 # The order of the steps in set_up that destroy what a disk holds (#96): the
 # lock is taken, the disk and its content are checked again under it, the
 # force is recorded before the wipe, each write follows a same_disk, and the
-# lock is let go only once the raw device is written. Everything that reaches
+# lock is let go only once the raw device is written; a file system inside a
+# container is made under the lock as well, also in an empty container found
+# at the start (#112). Everything that reaches
 # the disk or the system is a function here that writes its step to
 # setup_calls; set_up itself, role_vars and disk_path_ok run as they ship.
 setup_calls=$work/setup-calls
-set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the decision ACTION (wipe or format) on /dev/sdb, comma-separated
+set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the decision ACTION (wipe, format or unlock) on /dev/sdb, comma-separated
     : >"$setup_calls"
     (
         sb=$(mktemp -d "$work/setup.XXXXXX")
@@ -474,6 +482,8 @@ set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the 
         role_vars data
         name=/dev/disk/by-id/virtio-a conflict='' other_name='' force=1 wait_seconds=0 supplied=()
         if [ "${2-}" = keyed ]; then echo k >"$sb/key"; supplied=("$sb/key"); fi
+        # unlock: the disk carries a LUKS2 container with nothing inside yet.
+        if [ "$1" = unlock ]; then echo luks >"$setup_state"; fi
         step() { echo "$*" >>"$setup_calls"; }
         # The named disk exists and is a block device; every other test runs
         # as usual. Defined through eval: shellcheck cannot parse a function
@@ -490,9 +500,10 @@ set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the 
         mapping_on() { return 1; }
         in_use() { step in_use; return 1; }
         probe() {
-            case $(cat "$setup_state" 2>/dev/null) in
-                luks) fs_type=crypto_LUKS fs_label=$label fs_uuid=L ;;
-                ext4) fs_type=ext4 fs_label=$label fs_uuid=U ;;
+            case $1/$(cat "$setup_state" 2>/dev/null) in
+                /dev/mapper/*/luks) fs_type='' fs_label='' fs_uuid='' ;;
+                */luks) fs_type=crypto_LUKS fs_label=$label fs_uuid=L ;;
+                */ext4) fs_type=ext4 fs_label=$label fs_uuid=U ;;
                 *) fs_type=xfs fs_label='' fs_uuid=X ;;
             esac
         }
@@ -519,9 +530,12 @@ set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the 
 expect "set_up order: a forced wipe is checked again under the lock, recorded first, and each write follows a same_disk" \
     "settle,in_use,signatures,lock,same_disk named,in_use,signatures,replace forced,same_disk,wipefs /dev/sdb1,same_disk,wipefs /dev/sdb,same_disk,mkfs /dev/sdb,unlock,settle,replace data.env,mount /dev/sdb" \
     "$(set_up_order wipe)"
-expect "set_up order: an encrypted format writes the container under the lock and checks the opened container's disk" \
-    "settle,in_use,signatures,lock,same_disk named,in_use,signatures,same_disk,cryptsetup luksFormat,unlock,settle,open,same_disk,mkfs /dev/mapper/kamerplanter-data,settle,replace data.env,keep_key,mount /dev/mapper/kamerplanter-data" \
+expect "set_up order: an encrypted format writes the container under the lock, and formats inside it under the lock again" \
+    "settle,in_use,signatures,lock,same_disk named,in_use,signatures,same_disk,cryptsetup luksFormat,unlock,settle,open,lock,same_disk,mkfs /dev/mapper/kamerplanter-data,unlock,settle,replace data.env,keep_key,mount /dev/mapper/kamerplanter-data" \
     "$(set_up_order format keyed)"
+expect "set_up order: an empty container is looked into and formatted under the lock, the disk checked again, naming included (#112)" \
+    "settle,in_use,signatures,open,lock,wipefs /dev/mapper/kamerplanter-data,same_disk named,mkfs /dev/mapper/kamerplanter-data,unlock,settle,replace data.env,keep_key,mount /dev/mapper/kamerplanter-data" \
+    "$(set_up_order unlock keyed)"
 
 # --- no key on the kernel command line (W5) ---
 cmd=$work/cmdline
