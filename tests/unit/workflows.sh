@@ -69,11 +69,6 @@ for event in ("pull_request", "pull_request_target"):
 
 automerge_uses = str(automerge_doc["jobs"]["automerge"].get("uses", ""))
 
-# Transition (#51): vm-tests.yml still posts vm-gate from its report job
-# until vm-gate-finalize.yml is on develop; the follow-up of #51 removes
-# that step and this entry.
-transitional = {"vm-tests.yml": "vm-gate"}
-
 names = set()
 produced = set()
 for path in sorted(workflows.glob("*.y*ml")):
@@ -95,26 +90,19 @@ for path in sorted(workflows.glob("*.y*ml")):
     sets = [c for c in contexts
             if any((job or {}).get("name", job_id) == c for job_id, job in jobs.items())
             or c in statuses]
-    if path.name in transitional and transitional[path.name] not in statuses:
-        print(f"FAIL {path.name} no longer posts {transitional[path.name]}: "
-              "remove its transitional entry")
     for c in statuses:
         # Only pull_request_target and workflow_run run as develop has them.
         # pull_request, push or workflow_dispatch on a branch, and a
         # workflow_call from one of those run the branch's own file, which
         # could post the required status with whatever state it likes (#51).
         foreign = sorted(set(on) - {"pull_request_target", "workflow_run"})
-        if transitional.get(path.name) == c:
-            print(f"ok {path.name} ({name}) posts {c} as the transitional writer of #51")
-        elif foreign:
+        if foreign:
             print(f"FAIL {path.name} ({name}) posts the required status {c} and runs on "
                   f"{', '.join(foreign)}, as the branch has it")
         else:
             print(f"ok {path.name} ({name}) posts the required status {c} and runs as develop has it")
     for c in sets:
         produced.add(c)
-        if transitional.get(path.name) == c:
-            continue
         if "workflow_run" in on:
             # Only a pull request's run of vm-tests.yml itself, not a push,
             # a run by hand or another file named like it, may set it.
