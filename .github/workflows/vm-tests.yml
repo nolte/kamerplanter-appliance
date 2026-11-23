@@ -15,7 +15,12 @@ name: vm-tests
 # only with the label `vm-tests`, after a merge to develop when the image, the
 # build or the tests change, and by hand. What a pull request must pass is the
 # commit status vm-gate (.github/workflows/vm-gate.yml): a change to what
-# these tests cover needs the label and their green result (#43).
+# these tests cover needs the label and their green result (#43). The result
+# goes into vm-gate from .github/workflows/vm-gate-finalize.yml, which reads
+# the jobs of this run once it has completed and runs as develop has it (#51).
+# Until that workflow is on develop, the report job below still writes the
+# status as well: a transition, removed by the follow-up of #51, since this
+# workflow runs as the pull request has it.
 
 on:
   workflow_dispatch:
@@ -430,6 +435,8 @@ jobs:
     timeout-minutes: 10
     # statuses: the result of a pull request's VM tests goes into its commit
     # status vm-gate, a required check (.github/workflows/vm-gate.yml, #43).
+    # Transition (#51): vm-gate-finalize.yml writes the same result after
+    # this run has completed; this step goes with the follow-up of #51.
     permissions:
       contents: read
       statuses: write

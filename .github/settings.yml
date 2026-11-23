@@ -34,8 +34,12 @@ branches:
           - docs-build
           - pre-commit
           - unit-tests
-          # A commit status, not a job: .github/workflows/vm-gate.yml and the
-          # report job of vm-tests.yml set it (#43).
+          # A commit status, not a job: .github/workflows/vm-gate.yml sets it
+          # on every pull request, .github/workflows/vm-gate-finalize.yml the
+          # result of its VM tests (#43, #51). The live protection binds
+          # every context here to the GitHub Actions app (app_id 15368,
+          # measured 2026-11-23 on branches/develop/protection), so a status
+          # that a person sets through the API does not count.
           - vm-gate
       enforce_admins: true
       restrictions: null

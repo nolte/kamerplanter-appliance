@@ -1,0 +1,158 @@
+name: vm-gate-finalize
+
+# Sets the final value of the commit status vm-gate, a required check on
+# develop (.github/settings.yml), once the VM tests of a pull request are
+# through (#51). .github/workflows/vm-gate.yml sets it to pending on a head
+# that needs them; this workflow turns that into the result of the run:
+#   success  the build, boot, update and data-disk jobs of the vm-tests run
+#            each ran at least once, and every one of them succeeded;
+#   failure  anything else (failed, cancelled, timed out, missing), with the
+#            first suite that did not pass in the description.
+# The target URL is the attempt of the vm-tests run that was read; its
+# summary lists every result. If this workflow fails itself (an API error),
+# vm-gate stays pending: re-run this workflow's run.
+#
+# No status is written, and vm-gate stays as it is, when:
+#   - the run was not one of a pull request (a push to develop, by hand);
+#   - no open pull request on develop has the run's commit as its head, from
+#     the run's repository and branch, anymore: a newer push superseded it
+#     (and cancelled the run), or the pull request was closed. The status
+#     belongs to that commit only, so the current head is not touched;
+#   - the pull request lacks the label vm-tests: vm-gate.yml has decided it
+#     already, and a run without the label must not turn it green;
+#   - the run tested nothing: it awaits approval (action_required, a fork's
+#     first contribution: vm-gate stays pending until a maintainer approves
+#     the run and it completes), or it skipped the build (a label other than
+#     vm-tests was added).
+#
+# workflow_run: the workflow runs as develop has it, with the base
+# repository's token, also for a pull request from a fork whose own token is
+# read only (#129). Before #51 the report job of vm-tests.yml wrote the
+# result; that job runs as the pull request has it, so a pull request could
+# rewrite it to report success. Here only the GitHub API is read: the pull
+# request's code is never checked out or run, and the event's fields reach
+# the script through env only.
+#
+# What stays with the pull request: the run executes the pull request's own
+# code. Its jobs come from its vm-tests.yml, and the scripts they run
+# (build/, tests/boot/) are its own, so a pull request that rewrites either
+# still decides what the jobs test and whether they pass. The label
+# vm-tests, which only someone with triage access sets, is the consent to
+# that; it stays on the pull request across later pushes, so it covers
+# those too, and no review is required on develop. Only runs of
+# .github/workflows/vm-tests.yml count, not another file that calls itself
+# vm-tests. Tightening the consent: #130.
+#
+# Statuses set with GITHUB_TOKEN start no workflow, so automerge.yaml would
+# not see this result; the automerge job below evaluates the pull request
+# once vm-gate is green, with the vm-tests run as its event (#70).
+# pascalgn/automerge-action acts on that event only when the whole vm-tests
+# run succeeded (a red report job stops it although vm-gate is green), and
+# it finds a pull request by the run's pull_requests or by a branch of this
+# repository, so a pull request from a fork is merged by hand.
+
+on:
+  workflow_run:
+    workflows: [vm-tests]
+    types: [completed]
+
+permissions: {}
+
+# One group per completed attempt: GitHub keeps one pending run per group,
+# so a group per commit would let the completion of a run that tested
+# nothing drop the pending finalization of one that did.
+concurrency:
+  group: vm-gate-finalize-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: vm-gate-finalize
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.path == '.github/workflows/vm-tests.yml' &&
+      github.event.workflow_run.conclusion != 'skipped' &&
+      github.event.workflow_run.conclusion != 'action_required'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      state: ${{ steps.finalize.outputs.state }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}/attempts/${{ github.event.workflow_run.run_attempt }}
+    steps:
+      - name: Set vm-gate from the jobs of the vm-tests run
+        id: finalize
+        run: |
+          set -euo pipefail
+          leave() {
+            echo "vm-gate: unchanged ($1)"
+            echo "state=" >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$CONCLUSION" in
+            action_required | skipped) leave "the vm-tests run concluded $CONCLUSION and tested nothing" ;;
+          esac
+
+          # The open pull request on develop whose head is this commit on the
+          # run's repository and branch. The list holds a fork's pull
+          # requests as well, which commits/{sha}/pulls does not.
+          prs=$(gh api --paginate "repos/$REPO/pulls?state=open&base=develop&per_page=100" |
+            jq -r --arg sha "$SHA" --arg repo "$HEAD_REPO" --arg branch "$HEAD_BRANCH" \
+              '.[] | select(.head.sha == $sha and .head.repo.full_name == $repo and .head.ref == $branch)
+                | "\(.number) \([.labels[].name] | index("vm-tests") != null)"')
+          [ -n "$prs" ] || leave "no open pull request has the head $SHA: superseded or closed"
+          grep -q ' true$' <<<"$prs" || leave "the pull request lacks the label vm-tests"
+
+          # The jobs of exactly the attempt that completed, as name<TAB>result.
+          jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" |
+            jq -r '.jobs[] | "\(.name)\t\(.conclusion // .status)"')
+          # The result of one suite: its jobs are named "<suite>" or
+          # "<suite> (<matrix entry>)". missing if none ran, else the first
+          # result that is not success, else success.
+          result() {
+            awk -F '\t' -v suite="$1" '
+              $1 == suite || index($1, suite " (") == 1 {
+                n++
+                if ($2 != "success" && bad == "") bad = $2
+              }
+              END { print (n == 0 ? "missing" : (bad == "" ? "success" : bad)) }' <<<"$jobs"
+          }
+          [ "$(result build)" != skipped ] || leave "the vm-tests run skipped the build and tested nothing"
+
+          state=success description="the VM tests of this commit passed"
+          for suite in build boot update data-disk; do
+            outcome=$(result "$suite")
+            if [ "$outcome" != success ]; then
+              state=failure description="the VM tests of this commit did not pass ($suite: $outcome)"
+              break
+            fi
+          done
+          gh api -X POST "repos/$REPO/statuses/$SHA" -f context=vm-gate \
+            -f state="$state" -f description="$description" -f target_url="$RUN_URL" >/dev/null
+          echo "vm-gate: $state ($description)"
+          echo "state=$state" >>"$GITHUB_OUTPUT"
+
+  automerge:
+    needs: finalize
+    if: needs.finalize.outputs.state == 'success'
+    uses: nolte/gh-plumbing/.github/workflows/reusable-automerge.yaml@d664e75afc4d57de958af926987f842c1fc1f420 # v2.3.1
+    with:
+      app-id: ${{ vars.PORTFOLIO_APP_ID }}
+    secrets:
+      token: ${{ secrets.GITHUB_TOKEN }}
+      app-private-key: ${{ secrets.PORTFOLIO_APP_PRIVATE_KEY }}
+    permissions:
+      contents: write
+      pull-requests: write

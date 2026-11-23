@@ -4,10 +4,14 @@ name: vm-gate
 # (.github/settings.yml), on the head of every pull request (#43):
 #   success  the pull request changes nothing the VM tests cover;
 #   failure  it changes what they cover but lacks the label `vm-tests`;
-#   pending  it has the label: the report job of vm-tests.yml sets the
-#            result once the VM suites of that commit are through.
+#   pending  it has the label: vm-gate-finalize.yml sets the result once
+#            the vm-tests run of that commit has completed (#51). A fork's
+#            run that awaits approval has not completed, so vm-gate stays
+#            pending until a maintainer approves it.
 # The VM tests cover what vm-tests.yml runs on after a merge to develop: the
-# image, the build, the boot and image tests, and the two workflows.
+# image, the build, the boot and image tests, and the three workflows. A
+# change to vm-gate.yml or vm-gate-finalize.yml takes effect only once it is
+# on develop; counting them keeps a change to the gate behind the label.
 #
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the
@@ -56,7 +60,7 @@ jobs:
           # change counts as covered.
           files=$(gh api "repos/$REPO/compare/$BASE...$SHA" --jq '.files | length, (.[].filename)')
           covered=$(tail -n +2 <<<"$files" |
-            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-(tests|gate)\.yml$)' || true)
+            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-(tests|gate|gate-finalize)\.yml$)' || true)
           [ "$(head -n1 <<<"$files")" -lt 300 ] || covered=many
           if [ "$covered" = 0 ]; then
             status success "no change the VM tests cover"
@@ -64,13 +68,14 @@ jobs:
             status failure "changes the image, build or boot tests: add the label vm-tests"
           elif [ "$ACTION" = opened ] || [ "$ACTION" = synchronize ] ||
             { [ "$ACTION" = labeled ] && [ "$LABEL" = vm-tests ]; }; then
-            # A new head or the label just set: the VM tests start now.
-            status pending "waiting for the VM tests of this commit"
+            # A new head or the label just set: the VM tests start now, and
+            # vm-gate-finalize.yml sets the result when they have completed.
+            status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
           elif [ -z "$(gh api "repos/$REPO/commits/$SHA/statuses" --jq '[.[] | select(.context == "vm-gate")] | first | .state // empty')" ]; then
             # No result for this head, and nothing starts the VM tests now.
             status failure "no VM test result for this commit: remove and add the label vm-tests"
           else
-            # Reopened, or another label changed: vm-tests.yml does not run
-            # again, so the result of its last run for this head stands.
+            # Reopened, or another label changed: vm-tests.yml tests nothing
+            # new, so the result vm-gate-finalize.yml set for this head stands.
             echo "vm-gate: unchanged"
           fi

@@ -17,16 +17,19 @@ on:
       - completed
   status: {}
   # The workflows that set the required checks of develop
-  # (.github/settings.yml): ci (docs-build, pre-commit, unit-tests), vm-gate
-  # and vm-tests (the commit status vm-gate). They set them with
-  # GITHUB_TOKEN, whose events (the `status` of vm-gate, the `check_suite` of
-  # the run) start no workflow, so a pull request whose last check turned
-  # green after the last automerge run stayed open (#70). A `workflow_run`
-  # event starts a run even then, and pascalgn/automerge-action finds the
-  # pull request from its payload. tests/unit/workflows.sh keeps this list in
-  # step with the workflows that set a required check.
+  # (.github/settings.yml): ci (docs-build, pre-commit, unit-tests) and
+  # vm-gate (the commit status vm-gate). They set them with GITHUB_TOKEN,
+  # whose events (the `status` of vm-gate, the `check_suite` of the run)
+  # start no workflow, so a pull request whose last check turned green after
+  # the last automerge run stayed open (#70). A `workflow_run` event starts a
+  # run even then, and pascalgn/automerge-action finds the pull request from
+  # its payload. vm-gate-finalize sets the result of the VM tests into
+  # vm-gate; it runs on workflow_run itself, so its own run names no pull
+  # request, and it calls the same reusable workflow after setting a green
+  # vm-gate instead of being listed here (#51). tests/unit/workflows.sh keeps
+  # this list in step with the workflows that set a required check.
   workflow_run:
-    workflows: [ci, vm-gate, vm-tests]
+    workflows: [ci, vm-gate]
     types: [completed]
 
 # No concurrency group: GitHub keeps one pending run per group, so a newer

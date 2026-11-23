@@ -17,7 +17,7 @@ Everything else runs on GitHub:
 
 - `ci.yml` on every pull request: `pre-commit`, `docs-build`, `unit-tests` (all three required on `develop`);
 - `vm-tests.yml` (build, boot, update and data-disk suites): on a pull request with the label `vm-tests`, after a merge to `develop` that touches what it covers, or by hand on a pushed branch with `gh workflow run vm-tests.yml --ref <branch> -f suites=<all|boot|update|data-disk>`;
-- `vm-gate` (required): a commit status that is green only when a pull request changes nothing the VM tests cover, or carries `vm-tests` and its VM suites passed (`.github/workflows/vm-gate.yml`).
+- `vm-gate` (required): a commit status that is green only when a pull request changes nothing the VM tests cover, or carries `vm-tests` and its VM suites passed (`.github/workflows/vm-gate.yml` decides on every pull request; `.github/workflows/vm-gate-finalize.yml`, a `workflow_run` on `develop`, sets the result of the VM tests, also for a pull request from a fork).
 
 A failing VM job is evidence, also when it is not required: compare it with the last runs on `develop` (`gh run list --workflow vm-tests.yml --branch develop`) before calling it a flake. The failure artifacts (`vm-results-*`) hold `*.diagnose.txt` with the journal of the previous boot.
 
