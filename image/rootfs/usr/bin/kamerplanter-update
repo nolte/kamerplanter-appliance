@@ -476,7 +476,10 @@ restore_refused() {
     message="the data backup from before the update to $(short "$2") cannot be restored: $3; the services stay stopped, so that $(slot booted version) does not run on data the newer release may have changed"
     case $3 in
         "what was copied cannot be read completely")
-            hint="the backup passed its check, but the restored data cannot be read completely on the disk with the data; the data of the newer release is already replaced; the next boot copies again; if this repeats, check the disk with the data (see: kamerplanter-update status)"
+            # The backup passed its check before the copy; reading the copy
+            # back failed, most likely a read error on the disk it was copied
+            # to, not a mismatch: the backup is not to be replaced by hand.
+            hint="the backup passed its check, but the restored data cannot be read completely: the disk with the data (or the system disk, which holds the copy of the release marker) most likely returned a read error; the data of the newer release is already replaced; the next boot copies again; if this repeats, check the disk with the data and the system disk (see: kamerplanter-update status)"
             ;;
         "what was copied"*)
             # The backup passed its check before the copy: the copy is
