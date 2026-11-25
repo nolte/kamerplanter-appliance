@@ -336,6 +336,9 @@ rm "$cred_dir/kamerplanter.data-disk"
 printf 'DATA_DISK=%s\n' "$(printf '/dev/disk/by-id/x\033[2J')" >"$nrec/naming.env"
 expect "naming: a conflict is shown without control characters" \
     "DATA_DISK in $nrec/naming.env=/dev/disk/by-id/x?[2J and the setting DATA_DISK=$B name different disks" "$(names | cut -d'|' -f4)"
+# A console message cannot start an agetty escape (#117).
+expect "console message: backslashes doubled, control characters masked" \
+    'kp\\e{red}x\\\\y?z' "$(issue_text 'kp\e{red}x\\y'$'\033''z')"
 rm "$nrec/naming.env" "$nrec/user.env"
 expect "naming: nothing named" "|0||" "$(names)"
 
