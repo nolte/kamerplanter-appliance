@@ -723,7 +723,14 @@ write_issue() {
         echo
     } >"$issue.tmp"
     chmod 0644 "$issue.tmp"
+    # agetty shows a changed message only on --reload, which redraws every
+    # login prompt not yet in use: only when the message changed (#117).
+    if cmp -s -- "$issue.tmp" "$issue"; then
+        rm -f -- "$issue.tmp"
+        return 0
+    fi
     mv "$issue.tmp" "$issue"
+    agetty --reload >/dev/null 2>&1 || true
 }
 
 next_window() {

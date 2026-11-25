@@ -585,14 +585,26 @@ role_vars() {
     mapper=/dev/mapper/$mapper_name
 }
 
+# issue_text TEXT: TEXT as shown (shown), with each backslash doubled, for a
+# console message. agetty reads a backslash in /run/issue.d as the start of
+# an escape (\e alone writes an ESC to the terminal, \e{NAME} a color, \S, \4
+# and the others system data) and shows one backslash for two (#117).
+issue_text() {
+    local text
+    text=$(shown "$1")
+    printf '%s' "${text//\\/\\\\}"
+}
+
 # report MESSAGE HINT: on the console until the unit succeeds again. A name
 # from a disk or a naming in it is shown with its unprintable characters
-# replaced (shown), so it cannot write to the console or the journal.
+# replaced (shown), so it cannot write to the console or the journal, and,
+# on the console, with its backslashes doubled (issue_text), so it cannot
+# start an agetty escape.
 report() {
     install -d -m 0755 /run/issue.d
     {
-        echo "Kamerplanter: $(shown "$1")"
-        if [ -n "${2-}" ]; then echo "  $(shown "$2")"; fi
+        echo "Kamerplanter: $(issue_text "$1")"
+        if [ -n "${2-}" ]; then echo "  $(issue_text "$2")"; fi
         echo "  details: systemctl status $unit"
         echo
     } >"$issue.tmp"
