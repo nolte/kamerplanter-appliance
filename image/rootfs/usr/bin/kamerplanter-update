@@ -475,6 +475,9 @@ restore_refused() {
     local message hint
     message="the data backup from before the update to $(short "$2") cannot be restored: $3; the services stay stopped, so that $(slot booted version) does not run on data the newer release may have changed"
     case $3 in
+        "what was copied cannot be read completely")
+            hint="the backup passed its check, but the restored data cannot be read completely on the disk with the data; the data of the newer release is already replaced; the next boot copies again; if this repeats, check the disk with the data (see: kamerplanter-update status)"
+            ;;
         "what was copied"*)
             # The backup passed its check before the copy: the copy is
             # what differs, so the backup is not to be replaced by hand.
@@ -1120,8 +1123,8 @@ cmd_guard() {
             if ! restore_data "$source" "$format" "$want"; then
                 case $restore_failure in
                     "what was copied"*)
-                        # The backup or its disk is not to be trusted: told
-                        # on the console as well.
+                        # The backup passed its check; the restored copy did not,
+                        # as the console explains.
                         restore_refused "$from" "$to" "$restore_failure"
                         write_issue || true
                         ;;
