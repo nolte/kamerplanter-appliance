@@ -5,7 +5,7 @@
 # day, so the base comes from the project's mirror of it
 # (.github/workflows/base-image-mirror.yml), which keeps every digest it has
 # seen; the digest is the upstream one (#48).
-FROM ghcr.io/nolte/kamerplanter-appliance-tools-base:46@sha256:301c729f479016f2cddd1e62b7e809cdf6ecd42c6c6e7ba2a85d82ead4a9671f
+FROM ghcr.io/nolte/kamerplanter-appliance-tools-base:46@sha256:e6a12a27a823ca838a401a6820ced64ee508db3f4c0323cc2bc0042ff1829b85
 
 RUN dnf -y install \
         podman skopeo image-builder \
