@@ -536,6 +536,22 @@ expect "guard: the failure names the checksum of what was copied" yes \
 expect "guard: no rollback is recorded as done" "" "$(grep -o '"result":"done"' "$st/log.jsonl")"
 expect "guard: the console says why" yes "$(grep -q 'what was copied does not match' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && echo yes)"
 expect "guard: the console does not call the checked backup damaged" yes "$(grep -q 'the backup passed its check' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && ! grep -q 'damaged or gone' "$SB/run/issue.d/45-kamerplanter-restore.issue" && echo yes)"
+# A read error on the disk with the data when the copy is read back: named
+# as a read error, not as a mismatch, and not as a damaged backup.
+restore_sandbox both
+# shellcheck disable=SC2329 # called by the tool it is exported to
+find() {
+    case $PWD:${1-} in */volumes:./*) return 1 ;; esac
+    command find "$@"
+}
+rc=$(export -f find; tool guard)
+unset -f find
+expect "guard: the copy cannot be read back: the services stay stopped, the restore is tried again" "1|$NEW $OLD checking" \
+    "$rc|$(cat "$st/pending")"
+expect "guard: the failure names the read of what was copied" yes \
+    "$(grep -q 'what was copied cannot be read completely' "$st/log.jsonl" && echo yes)"
+expect "guard: the console names a read error, not a mismatch or a damaged backup" yes \
+    "$(grep -q 'returned a read error' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && ! grep -q 'second read\|damaged or gone' "$SB/run/issue.d/45-kamerplanter-restore.issue" && echo yes)"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
