@@ -44,7 +44,9 @@
 # kamerplanter: -> settings: (L11). Each is searched for as it stands, inside
 # a JSON text, and in the forms Python prints it in: inside its repr or
 # ascii, the repr of its UTF-8 bytes and json.dumps, with an apostrophe both
-# bare and escaped. They are learned from this boot's combined
+# bare and escaped, and each of those as it stands inside a JSON text, as in
+# an error message in cloud-init's status. They are learned from this boot's
+# combined
 # cloud-config and from every copy of the user-data that cloud-init keeps per
 # instance: cloud-config.txt (YAML), user-data.txt.i (MIME, its
 # text/cloud-config parts) and user-data.txt (as the source supplied it:
@@ -243,7 +245,8 @@ linked_copies() {
 # as_json FILE: the cloud-config documents in FILE, a copy of the user-data,
 # as JSON, one mapping per line, every scalar as text (BaseLoader), so a date
 # or a tag that JSON does not know reads all the same; merge keys (<<) are
-# resolved, as cloud-init resolves them (SafeLoader). cloud-config.txt is
+# resolved, as cloud-init resolves them (SafeLoader), and a plain << that is
+# no key stays text. cloud-config.txt is
 # read whole as YAML, whatever its first line. Of user-data.txt and
 # user-data.txt.i, a gzip copy is decompressed; a copy whose first line is
 # #cloud-config is one document; a MIME message gives one for each of its
@@ -376,6 +379,8 @@ status_files() {
 # its UTF-8 bytes, and json.dumps with and without ensure_ascii. repr picks
 # its quote by the whole string it is given, and a value can be printed alone
 # or inside a longer string: an apostrophe is taken both bare and escaped.
+# Each of the first three is given as json.dumps prints it as well: a message
+# that quotes a value by its repr can itself be written as JSON.
 # Fails, printing nothing, on a line that is not UTF-8 or on another error.
 forms() {
     python3 -I -c '
@@ -390,11 +395,13 @@ try:
         if not raw:
             continue
         s = raw.decode("utf-8")
-        got.add(json.dumps(s)[1:-1])
-        got.add(json.dumps(s, ensure_ascii=False)[1:-1])
-        got |= spellings(s, lambda p: repr(p)[1:-1])
-        got |= spellings(s, lambda p: ascii(p)[1:-1])
-        got |= spellings(s, lambda p: repr(p.encode("utf-8"))[2:-1])
+        quoted = spellings(s, lambda p: repr(p)[1:-1])
+        quoted |= spellings(s, lambda p: ascii(p)[1:-1])
+        quoted |= spellings(s, lambda p: repr(p.encode("utf-8"))[2:-1])
+        for f in quoted | {s}:
+            got.add(json.dumps(f)[1:-1])
+            got.add(json.dumps(f, ensure_ascii=False)[1:-1])
+        got |= quoted
     data = b"".join(f.encode("utf-8") + b"\0" for f in got if f)
 except Exception:
     sys.exit(1)

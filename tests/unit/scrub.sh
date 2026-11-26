@@ -815,7 +815,8 @@ form_one="$form_one_head-\"a'ss\\wörd😀-$form_one_tail"
 form_two="$form_two_head-it's-$form_two_tail"
 # plant_forms < VALUES (NUL-separated): one log line per form of each value:
 # repr alone, in a dict, in a longer string, in one that holds a quote too,
-# ascii, the repr of its UTF-8 bytes, json.dumps with and without ensure_ascii.
+# ascii, the repr of its UTF-8 bytes, json.dumps with and without
+# ensure_ascii, and a JSON text that quotes it by its repr or ascii.
 plant_forms() {
     python3 -I -c '
 import json, sys
@@ -823,7 +824,8 @@ for v in sys.stdin.buffer.read().decode("utf-8").split("\0"):
     if not v:
         continue
     for f in (repr(v), repr({"KEY": v}), repr("text " + v + " text"), repr("say \"" + v + "\""),
-              ascii(v), repr(v.encode("utf-8")), json.dumps(v), json.dumps(v, ensure_ascii=False)):
+              ascii(v), repr(v.encode("utf-8")), json.dumps(v), json.dumps(v, ensure_ascii=False),
+              json.dumps({"errors": ["rejected: %r" % v]}), json.dumps("say \"%a\"" % v, ensure_ascii=False)):
         sys.stdout.buffer.write(("2026-11-16 10:00:03,000 - planted[DEBUG]: " + f + "\n").encode("utf-8"))
 '
 }
@@ -841,7 +843,7 @@ form_config
 log=$SB/var/log/cloud-init.log
 printf '%s\0' "$form_one" "$form_two" | plant_forms >>"$log"
 planted=$(grep -c 'planted\[DEBUG\]' "$log")
-expect "the forms: every planted line holds a head and a tail before the scrub (the test can fail)" "16|16" \
+expect "the forms: every planted line holds a head and a tail before the scrub (the test can fail)" "20|20" \
     "$planted|$(grep 'planted\[DEBUG\]' "$log" | grep -F -e "$form_one_head" -e "$form_two_head" | grep -cF -e "$form_one_tail" -e "$form_two_tail")"
 rc=$(run_scrub)
 expect "the forms: the scrub succeeds, no head or tail is left in the log, every planted line is redacted" "0|0|$planted" \
