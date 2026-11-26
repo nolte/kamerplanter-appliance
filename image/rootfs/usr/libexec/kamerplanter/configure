@@ -850,10 +850,11 @@ derive_address_defaults() {
     # sends it (lower case, the port without leading zeros, no default or
     # empty port), when the URL has the form http[s]://host[:port][/?#...]
     # with a DNS name (a trailing dot kept), an IPv4 address (a host whose
-    # last label is a decimal number or 0x with hex digits must be one) or an
-    # IPv6 one in brackets, and a port up to 65535. An IP address is written
-    # as a browser writes it (#126): IPv4 in four decimal octets also when
-    # given in hex, octal or fewer parts, IPv6 in its shortest form. Anything
+    # last label is a decimal number or 0x with or without hex digits must be
+    # one) or an IPv6 one in brackets, and a port up to 65535. An IP address
+    # is written as a browser writes it (#126): IPv4 in four decimal octets
+    # also when given in hex, octal or fewer parts, IPv6 shortened as a
+    # browser shortens it, such as [2001:db8::1]. Anything
     # else, also an address a browser refuses, adds no origin, so the JSON
     # list stays well-formed; when CORS_ORIGINS is derived, the journal says
     # so. It is never a failure: the FRONTEND_URL itself is passed on as it
@@ -866,7 +867,11 @@ derive_address_defaults() {
         while [[ $port == 0?* ]]; do port=${port#0}; done
         if [[ $url_host == \[*\] ]]; then
             url_host=${url_host:1:${#url_host}-2}
-            if valid_ipv6 "$url_host"; then url_host=[$(ipv6_host "$url_host")]; else url_host=; fi
+            if valid_ipv6 "$url_host" && url_host=$(ipv6_host "$url_host"); then
+                url_host=[$url_host]
+            else
+                url_host=
+            fi
         elif [[ ! ${url_host%.} =~ $dns_name ]]; then
             url_host=
         elif [[ ${url_host%.} =~ (^|\.)([0-9]+|0x[0-9a-f]*)$ ]]; then

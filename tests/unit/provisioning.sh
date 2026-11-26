@@ -271,7 +271,7 @@ for url in 'http://a..b/' 'http://-x/' 'http://kp-/' 'http://kp:99999/' 'http://
     'http://[:::]/' 'http://[1::2::3]/' 'http://[1:2:3:4:5:6:7:8:9]/' 'http://[1:2:3]/' 'http://[::1.2.3.256]/' \
     'http://[::1.2.3.04]/' 'http://999.1.1.1/' 'http://1.2.3.4.5/' 'http://08.1.1.1/' 'http://256.1/' \
     'http://1.2.3.256/' 'http://1.2.65536/' 'http://4294967296/' 'http://0x100000000/' 'http://kp.0x10/' \
-    'http://99999999999999999999/'; do
+    'http://99999999999999999999/' 'http://0x10000000000000000ff/'; do
     configure_case
     user_file "FRONTEND_URL=$url"
     expect "derived: a FRONTEND_URL with a host or port no browser sends ($url) adds no origin, and the journal says so" \
@@ -297,16 +297,17 @@ expect "derived: a FRONTEND_URL with a trailing dot and the highest port gives i
     '0|["https://kp.example.org.:65535","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
-# An IP address gives the origin a browser sends (#126): IPv6 in its shortest
-# form, an IPv4 address inside it as two groups, IPv4 in four decimal octets
-# also when written in hex, octal or fewer parts.
-while read -r url origin; do
+# An IP address gives the origin a browser sends (#126): IPv6 shortened as a
+# browser shortens it, an IPv4 address inside it as two groups, IPv4 in four
+# decimal octets also when written in hex, octal or fewer parts. The table is
+# read from its own descriptor, so nothing in the loop can take its lines.
+while read -r url origin <&3; do
     configure_case
     user_file "FRONTEND_URL=$url"
     expect "derived: a FRONTEND_URL with an IP address ($url) gives the origin a browser sends ($origin)" \
         "0|[\"$origin\",\"http://kp:8080\",\"http://kp.local:8080\",\"http://localhost:8080\"]" \
         "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
-done <<'CASES'
+done 3<<'CASES'
 http://[2001:0db8:0:0::1]:8080/ http://[2001:db8::1]:8080
 http://[1:2:3:4:5:6:7::]/ http://[1:2:3:4:5:6:7:0]
 http://[::ffff:192.0.2.1]/ http://[::ffff:c000:201]
@@ -319,6 +320,11 @@ http://[::1.2.3.4]:8443/ http://[::102:304]:8443
 http://[2001:db8::1]:8443/ http://[2001:db8::1]:8443
 http://[::]/ http://[::]
 http://[1:2:3:4:5:6:7:8]/ http://[1:2:3:4:5:6:7:8]
+http://[::1:2:3:4:5:6:7]/ http://[0:1:2:3:4:5:6:7]
+http://[1:2:3:4:5::1.2.3.4]/ http://[1:2:3:4:5:0:102:304]
+http://0/ http://0.0.0.0
+http://0x/ http://0.0.0.0
+http://0X7F.1./ http://127.0.0.1
 http://192.168.001.1/ http://192.168.1.1
 http://0x7f.1/ http://127.0.0.1
 http://1.2.3/ http://1.2.0.3
