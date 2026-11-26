@@ -105,6 +105,9 @@ case "$method $path" in
         answer <"$file" ;;
     "GET pulls")
         answer <"$STATE/pulls" ;;
+    "GET pulls/7")
+        # The head of #7 right now: `new`, unless a test moved it on.
+        jq -n --arg sha "$(cat "$STATE/head" 2>/dev/null || echo new)" '{head: {sha: $sha}}' | answer ;;
     "GET actions/runs/"*)
         answer <"$STATE/jobs" ;;
     *)
@@ -273,6 +276,22 @@ had old failure "changes the image, build or boot tests: add the label vm-tests"
 gate synchronize LABEL_AT_EVENT=false HEAD_REPO=someone/appliance
 expect "the label set after the push arrived: it stays" set "$(label)"
 expect "the label set after the push arrived: pending" "$pending" "$(last new)"
+
+# The run of a push waited while the head moved on, and the label was set on
+# the commit that is the head now: this commit is not accepted.
+moved='failure no VM test result for this commit: it is not the head of the pull request any more'
+reset vm-tests
+compare base new image/Containerfile=a1
+echo newer >"$work/state/head"
+gate synchronize
+expect "a push that is not the head any more, the label set since: it stays" set "$(label)"
+expect "a push that is not the head any more, the label set since: no pending" "$moved" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+echo newer >"$work/state/head"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label's event on a commit that is not the head any more: no pending" "$moved" "$(last new)"
 
 reset
 compare base new tests/boot/run.sh=t2

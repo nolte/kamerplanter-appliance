@@ -186,7 +186,14 @@ jobs:
             { [ "$ACTION" = labeled ] && [ "$LABEL" = vm-tests ]; }; then
             # A new head or the label just set: the VM tests start now, and
             # vm-gate-finalize.yml sets the result when they have completed.
-            status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
+            # Only for the commit that is the head right now: a run that
+            # waited while the head moved on reads a label that was set on
+            # another commit, and pending here would accept this one.
+            if [ "$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)" = "$SHA" ]; then
+              status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
+            else
+              status failure "no VM test result for this commit: it is not the head of the pull request any more"
+            fi
           else
             # Reopened, or another label changed: nothing starts the VM tests
             # now, and this event says nothing about which head the label
