@@ -734,6 +734,77 @@ valid_ipv6() {
     done
     if [[ $a == *::* ]]; then [ "$groups" -le 7 ]; else [ "$groups" -eq 8 ]; fi
 }
+# ipv4_host HOST: a host whose last label is a number as a browser reads it
+# (WHATWG URL, IPv4 parser), in four decimal octets: one to four parts, each
+# hexadecimal after 0x (a bare 0x is 0), octal after a leading 0, else
+# decimal; all but the last up to 255, the last filling the octets left.
+# Fails for a host a browser refuses. The digits are bounded before the
+# arithmetic, so bash neither overflows nor reads 08 as octal.
+ipv4_host() {
+    local part digits radix max re ip=0 i n octets=() parts=() nums=()
+    IFS=. read -r -a parts <<<"$1"
+    n=${#parts[@]}
+    [ "$n" -ge 1 ] && [ "$n" -le 4 ] || return 1
+    for part in "${parts[@]}"; do
+        if [[ $part == 0x* ]]; then
+            digits=${part#0x} radix=16 max=8 re='^[0-9a-f]*$'
+        elif [[ $part == 0?* ]]; then
+            digits=${part#0} radix=8 max=11 re='^[0-7]+$'
+        else
+            digits=$part radix=10 max=10 re='^[0-9]+$'
+        fi
+        [[ $digits =~ $re ]] || return 1
+        [[ $digits =~ ^0*(.*)$ ]]
+        digits=${BASH_REMATCH[1]}
+        [ ${#digits} -le "$max" ] || return 1
+        nums+=("$((${radix}#${digits:-0}))")
+    done
+    for ((i = 0; i < n - 1; i++)); do
+        [ "${nums[i]}" -le 255 ] || return 1
+        ip=$((ip + nums[i] * 256 ** (3 - i)))
+    done
+    [ "${nums[n - 1]}" -lt $((256 ** (5 - n))) ] || return 1
+    ip=$((ip + nums[n - 1]))
+    for i in 24 16 8 0; do octets+=("$((ip >> i & 255))"); done
+    printf '%s.%s.%s.%s' "${octets[@]}"
+}
+# ipv6_host ADDR: an address that valid_ipv6 accepts as a browser writes it
+# (WHATWG URL, IPv6 serializer): an IPv4 address in it as two groups, each
+# group in hex without leading zeros, the first longest run of two zero
+# groups or more as ::.
+ipv6_host() {
+    local a=$1 tail o1 o2 o3 o4 g i best=-1 len=1 run=0 head=() rest=() groups=() out=
+    if [[ $a == *.* ]]; then
+        tail=${a##*:}
+        IFS=. read -r o1 o2 o3 o4 <<<"$tail"
+        printf -v tail '%x:%x' $((10#$o1 * 256 + 10#$o2)) $((10#$o3 * 256 + 10#$o4))
+        a=${a%:*}:$tail
+    fi
+    if [[ $a == *::* ]]; then
+        if [ -n "${a%%::*}" ]; then IFS=: read -r -a head <<<"${a%%::*}"; fi
+        if [ -n "${a#*::}" ]; then IFS=: read -r -a rest <<<"${a#*::}"; fi
+    else
+        IFS=: read -r -a head <<<"$a"
+    fi
+    for g in "${head[@]}"; do groups+=("$((16#$g))"); done
+    for ((i = ${#head[@]} + ${#rest[@]}; i < 8; i++)); do groups+=(0); done
+    for g in "${rest[@]}"; do groups+=("$((16#$g))"); done
+    for ((i = 0; i < 8; i++)); do
+        if [ "${groups[i]}" -eq 0 ]; then run=$((run + 1)); else run=0; fi
+        if [ "$run" -gt "$len" ]; then best=$((i - run + 1)) len=$run; fi
+    done
+    for ((i = 0; i < 8; i++)); do
+        if [ "$i" -eq "$best" ]; then
+            out+=::
+            i=$((i + len - 1))
+            continue
+        fi
+        if [ -n "$out" ] && [[ $out != *: ]]; then out+=:; fi
+        printf -v g %x "${groups[i]}"
+        out+=$g
+    done
+    printf '%s' "$out"
+}
 derive_address_defaults() {
     local host named suffix dev addr rest origin set_url scheme url_host port origins=() unique=() v4=() v6=() frontend json=
     host=
@@ -778,13 +849,16 @@ derive_address_defaults() {
     # The origin of a FRONTEND_URL that a layer sets comes first, as a browser
     # sends it (lower case, the port without leading zeros, no default or
     # empty port), when the URL has the form http[s]://host[:port][/?#...]
-    # with a DNS name (a trailing dot kept), an IPv4 address in dotted
-    # decimal (a host whose last label is a number must be one) or an IPv6
-    # one in brackets, and a port up to 65535. Anything else adds no origin,
-    # so the JSON list stays well-formed; when CORS_ORIGINS is derived, the
-    # journal says so. An IP address is taken as written, not in the
-    # shortest form a browser may send (#126). It is never a failure: the
-    # FRONTEND_URL itself is passed on as it is set.
+    # with a DNS name (a trailing dot kept), an IPv4 address (a host whose
+    # last label is a decimal number or 0x with or without hex digits must be
+    # one) or an IPv6 one in brackets, and a port up to 65535. An IP address
+    # is written as a browser writes it (#126): IPv4 in four decimal octets
+    # also when given in hex, octal or fewer parts, IPv6 shortened as a
+    # browser shortens it, such as [2001:db8::1]. Anything
+    # else, also an address a browser refuses, adds no origin, so the JSON
+    # list stays well-formed; when CORS_ORIGINS is derived, the journal says
+    # so. It is never a failure: the FRONTEND_URL itself is passed on as it
+    # is set.
     set_url=${cfg[FRONTEND_URL]-}
     set_url=${set_url,,}
     origin=
@@ -792,13 +866,17 @@ derive_address_defaults() {
         scheme=${BASH_REMATCH[1]} url_host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]}
         while [[ $port == 0?* ]]; do port=${port#0}; done
         if [[ $url_host == \[*\] ]]; then
-            valid_ipv6 "${url_host:1:${#url_host}-2}" || url_host=
+            url_host=${url_host:1:${#url_host}-2}
+            if valid_ipv6 "$url_host" && url_host=$(ipv6_host "$url_host"); then
+                url_host=[$url_host]
+            else
+                url_host=
+            fi
         elif [[ ! ${url_host%.} =~ $dns_name ]]; then
             url_host=
-        elif [[ ${url_host%.} =~ (^|\.)[0-9]+$ ]]; then
+        elif [[ ${url_host%.} =~ (^|\.)([0-9]+|0x[0-9a-f]*)$ ]]; then
             # A browser reads it as an IPv4 address, without a trailing dot.
-            url_host=${url_host%.}
-            valid_ipv4 "$url_host" || url_host=
+            url_host=$(ipv4_host "${url_host%.}") || url_host=
         fi
         if [ -n "$url_host" ]; then origin=$scheme://$url_host; fi
         if [ ${#port} -gt 5 ] || { [ -n "$port" ] && [ "$port" -gt 65535 ]; }; then
