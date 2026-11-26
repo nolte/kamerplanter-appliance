@@ -31,7 +31,11 @@ Wants=network-online.target
 After=network-online.target
 # configure asks Avahi, when the device has it, whether it announces the
 # host name with .local (#148). Ordering only: the image installs no Avahi,
-# and this pulls none in; with one, its bus name is there before the check.
+# and this pulls none in. With an avahi-daemon.service that is enabled or
+# running, its bus name is there before the check, which then also waits
+# for a start of it that hangs, as it does for the network; one that only
+# bus or socket activation would start is not started, and its name counts
+# as not announced.
 After=avahi-daemon.service
 
 [Service]

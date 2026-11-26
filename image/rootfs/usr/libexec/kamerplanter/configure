@@ -824,7 +824,8 @@ ipv6_host() {
 # name counts as not announced, as it does when a conflict made Avahi take
 # another name. Each call waits at most 5 seconds: no time without Avahi on
 # the bus, about 4 seconds while it keeps registering, 34 seconds at the
-# most when every call runs into its limit. The answer is compared, never
+# most when every call answers just within its limit (one that runs into
+# it fails, which ends the probe). The answer is compared, never
 # passed on. systemd-resolved is not asked: it has no property with
 # the mDNS name it announces, and after a conflict it announces another one,
 # so that it announces NAME cannot be seen.
