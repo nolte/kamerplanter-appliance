@@ -633,6 +633,120 @@ rm -f "$SB/run/cloud-init/combined-cloud-config.json"
 expect "links: /var/lib/cloud as a link, nothing learned: the scrub still fails and names it" "1|yes" \
     "$(run_scrub)|$(has "$SB/var/lib/cloud is a symbolic link; the copies of the provisioning data in it are neither read nor deleted" "$(out)")"
 
+# --- a place that could not be read is not taken for an empty one (#119) ---
+# An instance directory that cannot be searched: find fails on it, and its
+# exit status is not lost. The place is named (find names the directory
+# itself), the copies stay, the logs are still scrubbed, the scrub fails.
+new_appliance
+booted iid-1
+locked=$SB/var/lib/cloud/instances/iid-locked
+mkdir -p "$locked"
+user_data >"$locked/user-data.txt"
+chmod 0000 "$locked"
+rc=$(run_scrub)
+chmod 0700 "$locked"
+expect "a search that fails: an instance directory that cannot be read is named, the copies are kept, the scrub fails" "1|yes|yes|$all_kept|yes" \
+    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted" "$(out)")|$(has "iid-locked" "$(out)")|$(kept_copies)|$(exists "$locked/user-data.txt")"
+expect "a search that fails: each place is named once, the logs are scrubbed all the same" "1|none" \
+    "$(grep -cF "$SB/var/lib/cloud/instances cannot be searched" "$SB/out")|$(found "$SB"/var/log/cloud-init*.log)"
+# The same without anything learned: the directory may hold copies, so the
+# scrub fails all the same.
+new_appliance
+locked=$SB/var/lib/cloud/instances/iid-locked
+mkdir -p "$locked"
+user_data >"$locked/user-data.txt"
+chmod 0000 "$locked"
+rc=$(run_scrub)
+chmod 0700 "$locked"
+expect "a search that fails, nothing learned: the scrub still fails, names the place and keeps the copy" "1|yes|yes" \
+    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched" "$(out)")|$(exists "$locked/user-data.txt")"
+# A directory on another file system is not entered (find -xdev). A mount
+# needs root, so the other file system is planted in what stat says of the
+# directory: the scrub tells the file system by it. What is checked is that
+# such a directory is named and keeps the copies; that find does not enter a
+# real one is find's own.
+# stub_stat PATTERN: a stat in $SB/stub that gives a device number of its own
+# for a file that matches PATTERN (a case pattern) and runs the real one
+# otherwise.
+stub_stat() {
+    mkdir -p "$SB/stub"
+    # shellcheck disable=SC2016 # expanded by the stub, not here
+    printf '#!/usr/bin/env bash\ncase "${!#}" in %s) echo 4242; exit 0 ;; esac\nexec %q "$@"\n' "$1" "$(command -v stat)" >"$SB/stub/stat"
+    chmod +x "$SB/stub/stat"
+}
+# In place of an instance directory: named and kept always, like a link.
+new_appliance
+booted iid-1
+mounted=$SB/var/lib/cloud/instances/iid-mounted
+mkdir -p "$mounted"
+stub_stat '*/instances/iid-mounted'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: an instance directory on one is named once, the copies are kept, the scrub fails" "1|1|$all_kept|none" \
+    "$rc|$(grep -cF "$mounted is on another file system than $SB/var/lib/cloud/instances; the copies of the provisioning data in it are neither read nor deleted" "$SB/out")|$(kept_copies)|$(found "$SB"/var/log/cloud-init*.log)"
+new_appliance
+mounted=$SB/var/lib/cloud/instances/iid-mounted
+mkdir -p "$mounted"
+stub_stat '*/instances/iid-mounted'
+expect "another file system: an instance directory on one, nothing learned: the scrub still fails and names it" "1|yes" \
+    "$(PATH=$SB/stub:$PATH run_scrub)|$(has "$mounted is on another file system than $SB/var/lib/cloud/instances" "$(out)")"
+# Any other directory, such as /var/lib/cloud/data: the files in it are not
+# searched, so when there is something to scrub the copies stay.
+new_appliance
+booted iid-1
+stub_stat '*/var/lib/cloud/data'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: /var/lib/cloud/data on one is named, the copies are kept, the scrub fails" "1|yes|$all_kept" \
+    "$rc|$(has "$SB/var/lib/cloud/data is on another file system than the directory it is in; the provisioned secrets in it are not scrubbed" "$(out)")|$(kept_copies)"
+# The same without provisioning data: nothing to scrub, it is only named.
+new_appliance
+mkdir -p "$SB/var/lib/cloud/data"
+stub_stat '*/var/lib/cloud/data'
+expect "another file system: /var/lib/cloud/data on one, no provisioning data: the scrub succeeds and names it once" "0|1" \
+    "$(PATH=$SB/stub:$PATH run_scrub)|$(grep -cF "$SB/var/lib/cloud/data is on another file system than the directory it is in; it is not entered" "$SB/out")"
+# Everything on one file system, the stub in place: nothing is named.
+new_appliance
+booted iid-1
+stub_stat '*/no-such-directory'
+expect "another file system: none, the scrub succeeds and names none" "0|no" \
+    "$(PATH=$SB/stub:$PATH run_scrub)|$(has "another file system" "$(out)")"
+
+# --- an instance with nothing but an obj.pkl: its secrets are not known (#120) ---
+# The pickle is not read, so nothing is learned from the instance: the logs
+# go and the error messages are replaced before the pickle is deleted, or the
+# values would stay in them with nothing left to learn them from.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/cloud-config.txt" "$i/user-data.txt" "$i/user-data.txt.i"
+rc=$(run_scrub)
+expect "only an obj.pkl: the instance is unknown and named, the logs go, the error messages are replaced, the pickle is deleted" "0|yes|no|no|REDACTED|no" \
+    "$rc|$(has "$i: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted" "$(out)")|$(exists "$SB/var/log/cloud-init.log")|$(exists "$SB/var/log/cloud-init-output.log")|$(jq -r '.v1.init.errors[0]' "$SB/var/lib/cloud/data/status.json")|$(exists "$i/obj.pkl")"
+expect "only an obj.pkl: no provisioned secret is left under /var/lib/cloud or /var/log" none \
+    "$(found "$SB/var/lib/cloud" "$SB/var/log")"
+# Next to an instance whose copies can be read: still unknown, the logs go.
+new_appliance
+booted iid-1
+booted iid-2
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/cloud-config.txt" "$i/user-data.txt" "$i/user-data.txt.i"
+rc=$(run_scrub)
+expect "only an obj.pkl, next to an instance that can be read: it is unknown all the same, the logs go, every copy is deleted" "0|yes|no|no|no|none" \
+    "$rc|$(has "$i: no copy of the cloud-config can be read" "$(out)")|$(has "$SB/var/lib/cloud/instances/iid-2: no copy" "$(out)")|$(exists "$SB/var/log/cloud-init.log")|$(exists "$i/obj.pkl")|$(found "$SB/var/lib/cloud" "$SB/var/log")"
+# The pickle and a log that cannot be deleted: the pickle is kept, so that the
+# next boot finds the instance unknown again and retries (#93).
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/cloud-config.txt" "$i/user-data.txt" "$i/user-data.txt.i"
+chmod 0500 "$SB/var/log"
+rc=$(run_scrub)
+chmod 0700 "$SB/var/log"
+expect "only an obj.pkl and a log that cannot be deleted: the pickle is kept, the scrub fails" "1|yes|yes" \
+    "$rc|$(exists "$i/obj.pkl")|$(has "$SB/var/log/cloud-init.log cannot be deleted" "$(out)")"
+
 # --- a value too short to be searched for: named by its key only ---
 new_appliance
 booted iid-1

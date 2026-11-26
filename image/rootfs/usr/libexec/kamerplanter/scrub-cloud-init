@@ -70,7 +70,9 @@
 # check does not look at it: a failed scrub stops nothing.
 #
 # When an instance has copies but none of them can be read, its secrets are
-# not known. Then cloud-init's logs are deleted instead, rotated ones
+# not known; so when it holds only an obj.pkl, which is not read here, or
+# only copies that are not read (#120). Then cloud-init's logs are deleted
+# instead, rotated ones
 # included, and every error message in cloud-init's status and result
 # (/var/lib/cloud/data/{status,result}.json, and the regular files of the
 # same names in /run/cloud-init) is replaced by "REDACTED": an error message
@@ -89,7 +91,15 @@
 # Nothing is followed: only regular files are deleted or rewritten, found
 # without following symbolic links and without leaving the file system of the
 # directory they are found in; a directory that is a symbolic link is not
-# entered, and a link in a place that matters is named (see above). Values
+# entered, and a link in a place that matters is named (see above). A
+# directory on another file system is not entered either, and a search that
+# fails has passed over what it could not read: neither is taken for an empty
+# place (#119). An instance directory on another file system keeps the copies
+# and fails the unit, like a link in its place; any other directory on another
+# file system under /var/lib/cloud (the seed files apart) or /run/cloud-init
+# does when there is something to scrub, and is only named otherwise. A search
+# that fails (find's exit status; find names what it could not read) always
+# does. A file that is gone by the time find looks at it is no failure. Values
 # are never printed, passed on a command line or written to a file of their
 # own: they go from jq to Python through pipes only.
 set -euo pipefail
@@ -148,13 +158,53 @@ take_pairs() {
     pairs+=("${got[@]}")
 }
 
-# config_copies: the copies of the user-data that cloud-init keeps per
-# instance and the secrets are learned from (config_names), NUL-separated.
-config_copies() {
+# list NAME COMMAND...: reads the NUL-separated output of COMMAND into the
+# array NAME, and fails when COMMAND fails. A search (find) is read through
+# this: in a process substitution or a pipe alone its exit status is lost, and
+# a place it could not read would pass for an empty one (#119).
+list() {
+    local -n list_into=$1
+    shift
+    # shellcheck disable=SC2034 # a nameref: the array of the caller
+    mapfile -d '' -t list_into < <("$@")
+    wait "$!"
+}
+
+# instance_copies: the copies of the user-data that cloud-init keeps per
+# instance (user_data_copies), NUL-separated: the ones delete_copies deletes.
+# The secrets are learned from those of config_names (is_config). Fails when
+# the search fails.
+instance_copies() {
     local args=() name
     own_dir "$cloud_lib" && own_dir "${cloud_lib}instances" || return 0
-    for name in "${config_names[@]}"; do args+=(-o -name "$name"); done
-    find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0
+    for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
+    find "${cloud_lib}instances" -ignore_readdir_race -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0
+}
+is_config() {
+    local name
+    for name in "${config_names[@]}"; do [ "${1##*/}" != "$name" ] || return 0; done
+    return 1
+}
+
+# foreign START [EXPRESSION...]: the directories below START that are on
+# another file system than START, NUL-separated. find -xdev lists such a
+# directory and does not enter it, so nothing in it is read, rewritten or
+# deleted (#119). EXPRESSION goes before the test for a directory, such as
+# -maxdepth 1 or a -prune with its -o. Fails when the search fails or a
+# directory's file system cannot be told.
+foreign() {
+    local start=$1 dev other d dirs=() rc=0
+    shift
+    dev=$(stat -c %d -- "$start" 2>/dev/null) || return 1
+    list dirs find "$start" -ignore_readdir_race -xdev -mindepth 1 "$@" -type d -print0 || rc=1
+    for d in "${dirs[@]}"; do
+        if other=$(stat -c %d -- "$d" 2>/dev/null); then
+            [ "$other" = "$dev" ] || printf '%s\0' "$d"
+        else
+            rc=1
+        fi
+    done
+    return "$rc"
 }
 
 # linked_instances: the symbolic links in /var/lib/cloud/instances, each in
@@ -162,22 +212,27 @@ config_copies() {
 # links in place of a copy of the provisioning data, in an instance directory
 # (user_data_copies) or in /run/cloud-init (run_copies), NUL-separated.
 # Neither is followed, so the copies behind them are neither read nor deleted
-# (#93).
+# (#93). linked_logs: the symbolic links in place of one of cloud-init's
+# logs, NUL-separated. Each fails when its search fails.
 linked_instances() {
     own_dir "$cloud_lib" && own_dir "${cloud_lib}instances" || return 0
-    find "${cloud_lib}instances" -xdev -mindepth 1 -maxdepth 1 -type l -print0
+    find "${cloud_lib}instances" -ignore_readdir_race -xdev -mindepth 1 -maxdepth 1 -type l -print0
+}
+linked_logs() {
+    find "$cloud_log" -ignore_readdir_race -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0
 }
 linked_copies() {
-    local args=() name
+    local args=() name rc=0
     if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
         for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
-        find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type l \( "${args[@]:1}" \) -print0
+        find "${cloud_lib}instances" -ignore_readdir_race -xdev -mindepth 2 -maxdepth 2 -type l \( "${args[@]:1}" \) -print0 || rc=1
     fi
     if own_dir "$cloud_run"; then
         for name in "${run_copies[@]}"; do
             if [ -L "$cloud_run$name" ]; then printf '%s\0' "$cloud_run$name"; fi
         done
     fi
+    return "$rc"
 }
 
 # as_json FILE: the cloud-config documents in FILE, a copy of the user-data,
@@ -245,12 +300,15 @@ except Exception:
 ' "$1" 2>/dev/null
 }
 
-# learn: reads this boot's combined cloud-config and every copy of the
-# user-data, each once (#76), and sets
+# learn COPY...: reads this boot's combined cloud-config and every COPY of the
+# user-data (instance_copies) the secrets are learned from (is_config), each
+# once (#76), and sets
 #   pairs      their provisioned secrets, as pairs KEY, VALUE;
 #   unknown    the instance directories whose provisioned secrets are not
 #              known: those with a copy of the user-data none of which can
-#              be read (as_json). Where cloud-config.txt is there but cannot
+#              be read (as_json), and so those with nothing but an obj.pkl,
+#              which is not read at all and is deleted with the others
+#              (#120). Where cloud-config.txt is there but cannot
 #              be read, a copy of the user-data counts only when it gives a
 #              cloud-config: one that gives none, such as a shell script,
 #              says nothing about what cloud-config.txt holds;
@@ -263,9 +321,10 @@ learn() {
     if own_dir "$cloud_run" && [ -f "$combined" ] && [ ! -L "$combined" ]; then
         take_pairs <"$combined" || unlearned+=("$combined")
     fi
-    while IFS= read -r -d '' f; do
+    for f in "$@"; do
         dir=${f%/*}
         seen[$dir]=1
+        is_config "$f" || continue
         json=$(as_json "$f") || continue
         if [ -n "$json" ]; then
             take_pairs < <(printf '%s\n' "$json") || unlearned+=("$f")
@@ -273,7 +332,7 @@ learn() {
         if [ "${f##*/}" = cloud-config.txt ] || [ -n "$json" ] || { [ ! -e "$dir/cloud-config.txt" ] && [ ! -L "$dir/cloud-config.txt" ]; }; then
             known[$dir]=1
         fi
-    done < <(config_copies)
+    done
     for dir in "${!seen[@]}"; do
         if [ -z "${known[$dir]:-}" ]; then unknown+=("$dir"); fi
     done
@@ -488,22 +547,26 @@ sys.exit(0 if data is None or any(p in data for p in patterns) else 1)
 # copies that delete_copies deletes. Those are deleted when the scrub is
 # through and otherwise kept as they are, values included, so that the next
 # boot can learn the values from them again (#76): a copy with its values
-# replaced would teach it nothing.
+# replaced would teach it nothing. Fails when a search fails: then not every
+# file is among them (#119).
 scanned() {
-    local f
-    {
-        if own_dir "$cloud_lib"; then
-            find "$cloud_lib" -xdev -path "${cloud_lib}seed" -prune -o -type f -print0
-        fi
-        if own_dir "$cloud_run"; then
-            find "$cloud_run" -xdev -type f -print0
-        fi
-        if own_dir "$cloud_log"; then
-            logs
-        fi
-    } | while IFS= read -r -d '' f; do
+    local f got=() all=() rc=0
+    if own_dir "$cloud_lib"; then
+        list got find "$cloud_lib" -ignore_readdir_race -xdev -path "${cloud_lib}seed" -prune -o -type f -print0 || rc=1
+        all+=("${got[@]}")
+    fi
+    if own_dir "$cloud_run"; then
+        list got find "$cloud_run" -ignore_readdir_race -xdev -type f -print0 || rc=1
+        all+=("${got[@]}")
+    fi
+    if own_dir "$cloud_log"; then
+        list got logs || rc=1
+        all+=("${got[@]}")
+    fi
+    for f in "${all[@]}"; do
         is_copy "$f" || printf '%s\0' "$f"
     done
+    return "$rc"
 }
 
 # is_copy FILE: whether FILE is one of the copies that delete_copies deletes.
@@ -518,9 +581,10 @@ is_copy() {
     return 1
 }
 
-# logs: cloud-init's logs, rotated ones included, NUL-separated.
+# logs: cloud-init's logs, rotated ones included, NUL-separated. Fails when
+# the search fails.
 logs() {
-    find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type f -name 'cloud-init*.log*' -print0
+    find "$cloud_log" -ignore_readdir_race -xdev -mindepth 1 -maxdepth 1 -type f -name 'cloud-init*.log*' -print0
 }
 
 # log_kind FILE: "log" when FILE is one of cloud-init's logs, so that a
@@ -532,20 +596,29 @@ log_kind() {
 
 # delete_copies: deletes the copies of the user-data, and prints how many.
 # Names a copy that cannot be deleted and fails: the copies are not
-# rewritten (scanned), so such a copy still holds the values.
+# rewritten (scanned), so such a copy still holds the values. Fails as well
+# when the search for the copies fails, and says so: then not every copy was
+# found (#119).
 delete_copies() {
-    local args=() name f count=0 rc=0
-    for name in "${user_data_copies[@]}"; do args+=(-o -name "$name"); done
-    if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
-        while IFS= read -r -d '' f; do
-            if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
-                count=$((count + 1))
-            else
-                echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
-                rc=1
-            fi
-        done < <(find "${cloud_lib}instances" -xdev -mindepth 2 -maxdepth 2 -type f \( "${args[@]:1}" \) -print0)
+    local name f found=() pickles=() others=() count=0 rc=0
+    if ! list found instance_copies; then
+        echo "${cloud_lib}instances cannot be searched (see find's message); not every copy of the provisioning data in it is deleted" >&2
+        rc=1
     fi
+    # The pickles first: a boot that ends in between leaves the copies the
+    # secrets are learned from, not an instance with nothing but a pickle,
+    # for which the next boot would delete the logs (#120).
+    for f in "${found[@]}"; do
+        if [ "${f##*/}" = obj.pkl ]; then pickles+=("$f"); else others+=("$f"); fi
+    done
+    for f in "${pickles[@]}" "${others[@]}"; do
+        if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
+            count=$((count + 1))
+        else
+            echo "$f cannot be deleted; it still holds the provisioned secrets" >&2
+            rc=1
+        fi
+    done
     if own_dir "$cloud_run"; then
         for name in "${run_copies[@]}"; do
             f=$cloud_run$name
@@ -563,9 +636,23 @@ delete_copies() {
     return "$rc"
 }
 
+# unsearched PLACE: for main, which holds unscrubbed and failed: records, once
+# per PLACE, that a search in PLACE failed, so that the copies are kept and
+# the unit fails. find has named what it could not read (#119).
+unsearched() {
+    [ -z "${failed[$1]:-}" ] || return 0
+    failed[$1]=1
+    unscrubbed+=("$1 cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted")
+}
+
 main() {
     local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies='' undeleted=''
-    [ -z "$(config_copies | head -c1)" ] || copies=yes
+    local found=() links=() files=() elsewhere=() got=()
+    local -A failed=()
+    list found instance_copies || unsearched "${cloud_lib}instances"
+    for f in "${found[@]}"; do
+        if is_config "$f"; then copies=yes; fi
+    done
     # Without the YAML module that cloud-init itself uses, every copy would
     # count as unreadable and the logs would go on every boot: fail instead.
     if [ -n "$copies" ] && ! python3 -I -c 'import yaml' 2>/dev/null; then
@@ -580,7 +667,7 @@ main() {
     fi
     # Read before anything is deleted: the copies are deleted last, so that a
     # boot that ends before this is through can learn the values again.
-    learn
+    learn "${found[@]}"
     for f in "${unlearned[@]}"; do
         unscrubbed+=("$f: jq cannot take the provisioned secrets out of it; they are not known")
     done
@@ -599,12 +686,41 @@ main() {
     for d in "$cloud_lib" "${cloud_lib}instances" "$cloud_run"; do
         if [ -L "${d%/}" ]; then unscrubbed+=("${d%/} is a symbolic link; the copies of the provisioning data in it are neither read nor deleted"); fi
     done
-    while IFS= read -r -d '' f; do
+    list links linked_instances || unsearched "${cloud_lib}instances"
+    for f in "${links[@]}"; do
         unscrubbed+=("$f is a symbolic link; the copies of the provisioning data in it are neither read nor deleted")
-    done < <(linked_instances)
-    while IFS= read -r -d '' f; do
+    done
+    list links linked_copies || unsearched "${cloud_lib}instances"
+    for f in "${links[@]}"; do
         unscrubbed+=("$f is a symbolic link; the copy of the provisioning data behind it is neither read nor deleted")
-    done < <(linked_copies)
+    done
+    # A directory on another file system is not entered either (-xdev). In
+    # place of an instance directory its copies are neither read nor deleted:
+    # kept and named always, like a link there (#119). Any other one, such as
+    # /var/lib/cloud/instances itself (its copies are read and deleted, the
+    # other files in it are not searched) or /var/lib/cloud/data, is taken
+    # below with the places that matter when there is something to scrub.
+    if own_dir "$cloud_lib" && own_dir "${cloud_lib}instances"; then
+        list got foreign "${cloud_lib}instances" -maxdepth 1 || unsearched "${cloud_lib}instances"
+        for d in "${got[@]}"; do
+            unscrubbed+=("$d is on another file system than ${cloud_lib}instances; the copies of the provisioning data in it are neither read nor deleted")
+        done
+    fi
+    if own_dir "$cloud_lib"; then
+        list got foreign "$cloud_lib" -path "${cloud_lib}seed" -prune -o || unsearched "${cloud_lib%/}"
+        for d in "${got[@]}"; do
+            # An instance directory is named above.
+            [ "${d%/*}" = "${cloud_lib}instances" ] || elsewhere+=("$d")
+        done
+    fi
+    if own_dir "$cloud_run"; then
+        list got foreign "$cloud_run" || unsearched "${cloud_run%/}"
+        elsewhere+=("${got[@]}")
+    fi
+    links=()
+    if own_dir "$cloud_log"; then
+        list links linked_logs || unsearched "${cloud_log%/}"
+    fi
     # Behind /var/lib/cloud/data (cloud-init's status and result), /var/log
     # or one of cloud-init's logs as a link, the values stay when there is
     # something to scrub: then the copies stay too. Otherwise the link is
@@ -620,11 +736,12 @@ main() {
                 if [ -L "${cloud_lib}data/$f" ]; then unscrubbed+=("${cloud_lib}data/$f is a symbolic link; the provisioned secrets behind it are not scrubbed"); fi
             done
         fi
-        if own_dir "$cloud_log"; then
-            while IFS= read -r -d '' f; do
-                unscrubbed+=("$f is a symbolic link; the provisioned secrets behind it are not scrubbed")
-            done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
-        fi
+        for f in "${links[@]}"; do
+            unscrubbed+=("$f is a symbolic link; the provisioned secrets behind it are not scrubbed")
+        done
+        for d in "${elsewhere[@]}"; do
+            unscrubbed+=("$d is on another file system than the directory it is in; the provisioned secrets in it are not scrubbed")
+        done
     else
         if [ -L "${cloud_log%/}" ]; then echo "${cloud_log%/} is a symbolic link; it is not entered, and there is nothing to scrub" >&2; fi
         if [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}data" ]; then
@@ -634,18 +751,20 @@ main() {
                 if [ -L "${cloud_lib}data/$f" ]; then echo "${cloud_lib}data/$f is a symbolic link; it is not followed, and there is nothing to scrub" >&2; fi
             done
         fi
-        if own_dir "$cloud_log"; then
-            while IFS= read -r -d '' f; do
-                echo "$f is a symbolic link; it is not followed, and there is nothing to scrub" >&2
-            done < <(find "$cloud_log" -xdev -mindepth 1 -maxdepth 1 -type l -name 'cloud-init*.log*' -print0)
-        fi
+        for f in "${links[@]}"; do
+            echo "$f is a symbolic link; it is not followed, and there is nothing to scrub" >&2
+        done
+        for d in "${elsewhere[@]}"; do
+            echo "$d is on another file system than the directory it is in; it is not entered, and there is nothing to scrub" >&2
+        done
     fi
     if [ "${#unknown[@]}" -gt 0 ]; then
         for f in "${unknown[@]}"; do
             echo "$f: no copy of the cloud-config can be read; the provisioned secrets in it are not known, so cloud-init's logs are deleted and the error messages in its status are replaced" >&2
         done
         if own_dir "$cloud_log"; then
-            while IFS= read -r -d '' f; do
+            list files logs || unsearched "${cloud_log%/}"
+            for f in "${files[@]}"; do
                 # Not under set -e: a log that stays is named, and the copies
                 # stay with it, so that the next boot retries (#93).
                 if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
@@ -653,7 +772,7 @@ main() {
                 else
                     unscrubbed+=("$f cannot be deleted; the provisioned secrets in it are not known and stay in it")
                 fi
-            done < <(logs)
+            done
         fi
         while IFS= read -r -d '' f; do
             rc=0
@@ -670,7 +789,9 @@ main() {
         done < <(status_files)
     fi
     if [ "${#pats[@]}" -gt 0 ]; then
-        while IFS= read -r -d '' f; do
+        # A search that fails has not found every file: the copies stay.
+        list files scanned || unsearched "cloud-init's files and logs"
+        for f in "${files[@]}"; do
             rc=0
             # shellcheck disable=SC2046 # empty or one word
             printf '%s\0' "${pats[@]}" | redact "$f" $(log_kind "$f") || rc=$?
@@ -689,15 +810,25 @@ main() {
                 3 | 4) ;;
                 *) left+=("$f") ;;
             esac
-        done < <(scanned)
-        while IFS= read -r -d '' f; do
+        done
+        # Searched again: a compressed log that was deleted is gone.
+        list files scanned || unsearched "cloud-init's files and logs"
+        for f in "${files[@]}"; do
             # shellcheck disable=SC2046 # empty or one word
             if printf '%s\0' "${pats[@]}" | holds "$f" $(log_kind "$f"); then left+=("$f"); fi
-        done < <(scanned)
+        done
         if own_dir "$cloud_lib" && own_dir "${cloud_lib}seed"; then
-            while IFS= read -r -d '' f; do
+            # The seed files are only warned about: a part of them that is
+            # not looked into is one more warning, and fails nothing.
+            list files find "${cloud_lib}seed" -ignore_readdir_race -xdev -type f -print0 ||
+                echo "warning: ${cloud_lib}seed cannot be searched (see find's message); not every seed file is looked into" >&2
+            for f in "${files[@]}"; do
                 if printf '%s\0' "${pats[@]}" | holds "$f"; then seeded+=("$f"); fi
-            done < <(find "${cloud_lib}seed" -xdev -type f -print0)
+            done
+            list got foreign "${cloud_lib}seed" || true
+            for d in "${got[@]}"; do
+                echo "warning: $d is on another file system than ${cloud_lib}seed; the seed files in it are not looked into" >&2
+            done
         elif [ ! -L "${cloud_lib%/}" ] && [ -L "${cloud_lib}seed" ]; then
             echo "warning: ${cloud_lib}seed is a symbolic link; the seed files behind it are not looked into" >&2
         fi
