@@ -85,6 +85,13 @@ user_file() { printf '%s\n' "$@" >"$SB/etc/kamerplanter/kamerplanter.env"; }
 # one global address of eth0 each per word, an IPv6 one with +FLAG for a flag
 # such as temporary, and an address with @DEV one of the interface DEV;
 # TEST_NO_IP makes ip fail without output.
+# busctl is always a stub, so no case reaches an Avahi daemon of the machine
+# the tests run on: TEST_MDNS is the name its Avahi announces (unset: no
+# Avahi on the bus, every call fails), TEST_MDNS_STATE the state it answers,
+# one word per GetState call, the last one repeating (default 2, running),
+# and TEST_MDNS_FAIL a method whose call fails. Every call is appended to
+# $SB/busctl.calls, every pause (sleep, a stub that returns at once) as
+# "sleep N"; TEST_NO_BUSCTL leaves busctl undefined, for a PATH without it.
 address_stubs() {
     # shellcheck disable=SC2329 # called by the scripts it is exported to
     uname() { printf '%s\n' "${TEST_TRANSIENT-${TEST_HOST-}}"; }
@@ -105,8 +112,36 @@ address_stubs() {
             fi
         done
     }
-    export TEST_HOST TEST_TRANSIENT TEST_V4 TEST_V6 TEST_NO_IP
-    export -f uname ip
+    # shellcheck disable=SC2329 # called by the scripts it is exported to
+    busctl() {
+        local method=${!#} states n
+        printf '%s\n' "$*" >>"$TEST_BUS_LOG"
+        if [ -z "${TEST_MDNS+set}" ]; then
+            echo "Call failed: The name org.freedesktop.Avahi was not provided by any .service files" >&2
+            return 1
+        fi
+        if [ "$method" = "${TEST_MDNS_FAIL-}" ]; then
+            echo "Call failed: Connection timed out" >&2
+            return 1
+        fi
+        case $method in
+        GetState)
+            read -r -a states <<<"${TEST_MDNS_STATE-2}"
+            n=$(grep -c 'GetState$' "$TEST_BUS_LOG")
+            if [ "$n" -gt ${#states[@]} ]; then n=${#states[@]}; fi
+            printf 'i %s\n' "${states[n - 1]}"
+            ;;
+        GetHostNameFqdn) printf 's "%s"\n' "$TEST_MDNS" ;;
+        *) return 1 ;;
+        esac
+    }
+    # shellcheck disable=SC2329 # called by the scripts it is exported to
+    sleep() { printf 'sleep %s\n' "$*" >>"$TEST_BUS_LOG"; }
+    TEST_BUS_LOG=$SB/busctl.calls
+    : >"$TEST_BUS_LOG"
+    export TEST_HOST TEST_TRANSIENT TEST_V4 TEST_V6 TEST_NO_IP TEST_MDNS TEST_MDNS_STATE TEST_MDNS_FAIL TEST_BUS_LOG
+    export -f uname ip busctl sleep
+    if [ -n "${TEST_NO_BUSCTL-}" ]; then unset -f busctl; fi
 }
 run_configure() {  # prints the exit status; the output is in $SB/out
     (
@@ -175,8 +210,8 @@ expect "derived: a host name with a dot is the frontend URL, the addresses and l
     "$(TEST_HOST=kp.example.org TEST_V4=10.0.2.15 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has 'FRONTEND_URL is set in no layer; derived: http://kp.example.org:8080' "$(cat "$SB/out")")"
 
 configure_case
-expect "derived: a bare host name gives the first IPv4 address as frontend URL; .local, every address, none of a container network, no temporary IPv6 one" \
-    '0|http://192.168.1.20:8080|["http://192.168.1.20:8080","http://kamerplanter:8080","http://kamerplanter.local:8080","http://10.0.0.5:8080","http://[2001:db8::5]:8080","http://localhost:8080"]' \
+expect "derived: a bare host name gives the first IPv4 address as frontend URL; every address, none of a container network, no temporary IPv6 one, no .local without a responder" \
+    '0|http://192.168.1.20:8080|["http://192.168.1.20:8080","http://kamerplanter:8080","http://10.0.0.5:8080","http://[2001:db8::5]:8080","http://localhost:8080"]' \
     "$(TEST_HOST=Kamerplanter TEST_V4='10.89.0.1@podman1 192.168.1.20 10.0.0.5' TEST_V6='2001:db8::5 2001:db8::99+temporary fd00::1@veth0@if2' run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
 
 configure_case
@@ -191,8 +226,91 @@ expect "derived: an IPv6 address that failed duplicate address detection is no o
 
 configure_case
 expect "derived: a bare host name without an address is the frontend URL" \
-    '0|http://kp:8080|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|http://kp:8080|["http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)"
+
+# The .local origin only when the device's own Avahi announces the name (#148).
+mdns_warning='warning: http://kp.local:8080 is not added to CORS_ORIGINS: no mDNS responder on this device announces kp.local; set CORS_ORIGINS when the web UI is opened by that name'
+avahi_call='--system --auto-start=no --timeout=5 call org.freedesktop.Avahi / org.freedesktop.Avahi.Server'
+calls() { tr '\n' ',' <"$SB/busctl.calls"; }  # the busctl calls and pauses of the last run
+for announced in kp.local KP.Local; do
+    configure_case
+    expect "derived: a bare host name gives its .local origin when this device's Avahi announces it ($announced), without a warning" \
+        "0|[\"http://kp:8080\",\"http://kp.local:8080\",\"http://localhost:8080\"]|no|$avahi_call GetState,$avahi_call GetHostNameFqdn," \
+        "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=$announced run_configure)|$(app CORS_ORIGINS)|$(has 'kp.local:8080 is not added' "$(cat "$SB/out")")|$(calls)"
+done
+
+configure_case
+expect "derived: without an mDNS responder the .local origin is left out, the journal says so once, the services start, busctl's error is not shown" \
+    '0|["http://kp:8080","http://localhost:8080"]|yes|1|no' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(grep -c 'kp.local:8080 is not added' "$SB/out")|$(has 'Call failed' "$(cat "$SB/out")")"
+
+configure_case
+expect "derived: a responder that announces another name (a conflict renamed it) gives no .local origin" \
+    '0|["http://kp:8080","http://localhost:8080"]|yes' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp-2.local run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")"
+
+configure_case
+expect "derived: a responder in a collision (state 3) gives no .local origin, its name is not asked for" \
+    "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|$avahi_call GetState," \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_STATE=3 run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(calls)"
+
+configure_case
+expect "derived: a responder still registering is asked five times a second apart, then gives no .local origin" \
+    "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|5|4|no" \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_STATE=1 run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(grep -c 'GetState$' "$SB/busctl.calls")|$(grep -cx 'sleep 1' "$SB/busctl.calls")|$(has GetHostNameFqdn "$(calls)")"
+
+configure_case
+expect "derived: a responder that settles while registering gives the .local origin" \
+    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]|3|2' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_STATE='1 1 2' run_configure)|$(app CORS_ORIGINS)|$(grep -c 'GetState$' "$SB/busctl.calls")|$(grep -cx 'sleep 1' "$SB/busctl.calls")"
+
+configure_case
+expect "derived: a failing busctl call gives no .local origin, and the services start" \
+    '0|["http://kp:8080","http://localhost:8080"]|yes|no' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_FAIL=GetHostNameFqdn run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(has 'Call failed' "$(cat "$SB/out")")"
+
+configure_case
+expect "derived: a failing GetState call gives no .local origin, the name is not asked for, and the services start" \
+    "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|$avahi_call GetState," \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_FAIL=GetState run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(calls)"
+
+for state in 0 4; do
+    configure_case
+    expect "derived: a responder in state $state (not running) gives no .local origin" \
+        "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|$avahi_call GetState," \
+        "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_STATE=$state run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(calls)"
+done
+
+# A PATH with every command of this machine but busctl: one ln per directory
+# of PATH, in its order, so a name already linked keeps the earlier one.
+nobus=$work/no-busctl
+mkdir -p "$nobus"
+IFS=: read -r -a path_dirs <<<"$PATH"
+for d in "${path_dirs[@]}"; do
+    if [ -d "$d" ]; then ln -s "$d"/* "$nobus/" 2>/dev/null; fi
+done
+rm -f -- "$nobus/busctl"
+configure_case
+expect "derived: without busctl no .local origin, the journal says so, and the services start" \
+    'no|0|["http://kp:8080","http://localhost:8080"]|yes' \
+    "$(PATH=$nobus command -v busctl || echo no)|$(PATH=$nobus TEST_NO_BUSCTL=1 TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")"
+
+configure_case
+expect "derived: a host name with a dot gets no .local origin and no warning, even with a responder, which is not asked" \
+    '0|["http://kp.example.org:8080","http://localhost:8080"]|no|' \
+    "$(TEST_HOST=kp.example.org TEST_NO_IP=1 TEST_MDNS=kp.example.org.local run_configure)|$(app CORS_ORIGINS)|$(has 'is not added to CORS_ORIGINS' "$(cat "$SB/out")")|$(calls)"
+
+configure_case
+user_file 'CORS_ORIGINS=["http://kp.local:8080"]'
+expect "derived: a CORS_ORIGINS set in a layer is kept for a bare host name, the responder is not asked, no warning" \
+    '0|["http://kp.local:8080"]|no|' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(has 'is not added to CORS_ORIGINS' "$(cat "$SB/out")")|$(calls)"
+
+configure_case
+expect "derived: an announced name with quotes and commas never reaches app.env or the journal" \
+    '0|["http://kp:8080","http://localhost:8080"]|yes|no|no' \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS='kp.local","http://evil.example' run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(has evil "$(cat "$SB/run/kamerplanter/app.env")")|$(has evil "$(cat "$SB/out")")"
 
 configure_case
 expect "derived: a host name ending in .localdomain is used like one without a dot, the IPv4 address is the frontend URL" \
@@ -239,31 +357,31 @@ expect "derived: a provisioned FRONTEND_URL is kept, and its origin leads the CO
 configure_case
 user_file FRONTEND_URL=HTTPS://KP.Example.org:443/app
 expect "derived: the origin of a set FRONTEND_URL is written as a browser sends it" \
-    '0|["https://kp.example.org","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["https://kp.example.org","http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file FRONTEND_URL=https://user:pw@kp.example.org/
 expect "derived: a FRONTEND_URL with user information adds no origin" \
-    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file 'FRONTEND_URL=not "a" url'
 expect "derived: a FRONTEND_URL that is no URL adds no origin, and the journal says so" \
-    '0|not "a" url|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]|yes' \
+    '0|not "a" url|["http://kp:8080","http://localhost:8080"]|yes' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app FRONTEND_URL)|$(app CORS_ORIGINS)|$(has 'its origin is not added to CORS_ORIGINS' "$(cat "$SB/out")")"
 
 configure_case
 user_file 'FRONTEND_URL=https://kp.example.org?ref=mail'
 expect "derived: a FRONTEND_URL with a query and no path gives its origin" \
-    '0|["https://kp.example.org","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["https://kp.example.org","http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file 'FRONTEND_URL=http://kp:abc/'
 expect "derived: a FRONTEND_URL with a port that is no number adds no origin" \
-    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 # A FRONTEND_URL whose host or port no browser sends adds no origin (#116).
@@ -275,26 +393,26 @@ for url in 'http://a..b/' 'http://-x/' 'http://kp-/' 'http://kp:99999/' 'http://
     configure_case
     user_file "FRONTEND_URL=$url"
     expect "derived: a FRONTEND_URL with a host or port no browser sends ($url) adds no origin, and the journal says so" \
-        '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]|yes' \
+        '0|["http://kp:8080","http://localhost:8080"]|yes' \
         "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)|$(has 'its origin is not added to CORS_ORIGINS' "$(cat "$SB/out")")"
 done
 
 configure_case
 user_file 'FRONTEND_URL=http://kp:/'
 expect "derived: a FRONTEND_URL with an empty port gives the origin of the default port" \
-    '0|["http://kp","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["http://kp","http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file 'FRONTEND_URL=http://KP:08080/app'
 expect "derived: the port of a set FRONTEND_URL loses its leading zeros, as a browser sends it" \
-    '0|["http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
 user_file 'FRONTEND_URL=https://kp.example.org.:65535/'
 expect "derived: a FRONTEND_URL with a trailing dot and the highest port gives its origin" \
-    '0|["https://kp.example.org.:65535","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["https://kp.example.org.:65535","http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 # An IP address gives the origin a browser sends (#126): IPv6 shortened as a
@@ -305,7 +423,7 @@ while read -r url origin <&3; do
     configure_case
     user_file "FRONTEND_URL=$url"
     expect "derived: a FRONTEND_URL with an IP address ($url) gives the origin a browser sends ($origin)" \
-        "0|[\"$origin\",\"http://kp:8080\",\"http://kp.local:8080\",\"http://localhost:8080\"]" \
+        "0|[\"$origin\",\"http://kp:8080\",\"http://localhost:8080\"]" \
         "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 done 3<<'CASES'
 http://[2001:0db8:0:0::1]:8080/ http://[2001:db8::1]:8080
@@ -338,7 +456,7 @@ CASES
 configure_case
 user_file 'FRONTEND_URL=http://10.0.2.15.:8080/'
 expect "derived: a FRONTEND_URL with an IPv4 address gives its origin, without a trailing dot" \
-    '0|["http://10.0.2.15:8080","http://kp:8080","http://kp.local:8080","http://localhost:8080"]' \
+    '0|["http://10.0.2.15:8080","http://kp:8080","http://localhost:8080"]' \
     "$(TEST_HOST=kp TEST_NO_IP=1 run_configure)|$(app CORS_ORIGINS)"
 
 configure_case
@@ -596,6 +714,8 @@ expect "step: no reload when the generator saw the window already" "0||UPDATE_WI
 units=$image/usr/lib/systemd/system
 expect "units: the configuration check runs once the network is up, without requiring it" "yes|yes|no" \
     "$(grep -qx 'Wants=network-online.target' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^After=.*\bnetwork-online\.target\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Requires|Requisite|BindsTo)=.*network-online' "$units/kamerplanter-config.service" && echo yes || echo no)"
+expect "units: the configuration check is ordered after Avahi and pulls none in" "yes|no" \
+    "$(grep -Eq '^After=.*\bavahi-daemon\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Wants|Requires|Requisite|BindsTo|Upholds)=.*avahi' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the configuration check runs after the provisioning step and not when it failed" "yes|yes" \
     "$(grep -Eq '^After=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^Requires=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the step is ordered after cloud-init's network stage and never pulls cloud-init in" "yes|no" \

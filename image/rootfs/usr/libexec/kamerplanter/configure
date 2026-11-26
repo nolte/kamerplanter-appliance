@@ -685,11 +685,20 @@ done
 # suffix that clients do not resolve (unresolved_suffixes), else the first
 # IPv4 address, else the host name, else localhost. CORS_ORIGINS lists the
 # origin of the FRONTEND_URL in effect (set in a layer or derived), the host
-# name, the host name with .local when it has no dot, every address and
-# localhost, all on the web UI's port 8080. A value of any layer is kept as it
-# is. Nothing here fails the check: without a usable host name or address the
-# derivation ends at localhost, the default of the releases before it, and a
-# set FRONTEND_URL whose origin cannot be read only adds no origin.
+# name, the host name with .local when it has no dot and an mDNS responder on
+# this device announces exactly that name (mdns_announces), every address and
+# localhost, all on the web UI's port 8080. Any host on the network can claim
+# a .local name, and the image installs no responder: without one on the
+# device that holds the name, the .local origin allows a page served by
+# whichever host claims it (#148). The responder is asked once per run, only
+# when CORS_ORIGINS is derived; when it does not announce the name, the
+# journal says so and the origin is left out. That is what the device
+# announces at this run, no more: a name lost to a conflict later stays an
+# origin until the next run, and mDNS answers are not authenticated.
+# A value of any layer is kept as it is. Nothing here fails the check:
+# without a usable host name or address the derivation ends at localhost, the
+# default of the releases before it, a set FRONTEND_URL whose origin cannot
+# be read only adds no origin, and a .local origin left out is a warning.
 web_origin() { printf 'http://%s:8080' "$1"; }
 # A DNS name: labels of letters, digits and inner hyphens, joined by dots.
 dns_label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
@@ -805,6 +814,34 @@ ipv6_host() {
     done
     printf '%s' "$out"
 }
+# mdns_announces NAME: the mDNS responder of this device, Avahi, is running
+# and announces NAME (lower case). It is asked on the system bus, never the
+# network: a lookup on the network cannot tell this device's responder from
+# another host that claims the name. --auto-start=no keeps the probe from
+# starting a daemon. While Avahi is registering (state 1, the name still
+# being probed for conflicts) it is asked again once a second, five times in
+# all; then, or in any state but running (2), and when the call fails, the
+# name counts as not announced, as it does when a conflict made Avahi take
+# another name. Each call waits at most 5 seconds: no time without Avahi on
+# the bus, about 4 seconds while it keeps registering, 34 seconds at the
+# most when every call answers just within its limit (one that runs into
+# it fails, which ends the probe). The answer is compared, never
+# passed on. systemd-resolved is not asked: it has no property with
+# the mDNS name it announces, and after a conflict it announces another one,
+# so that it announces NAME cannot be seen.
+mdns_announces() {
+    local state fqdn tries=0 avahi=(org.freedesktop.Avahi / org.freedesktop.Avahi.Server)
+    command -v busctl >/dev/null 2>&1 || return 1
+    while :; do
+        state=$(busctl --system --auto-start=no --timeout=5 call "${avahi[@]}" GetState 2>/dev/null) || return 1
+        tries=$((tries + 1))
+        if [ "$state" != "i 1" ] || [ "$tries" -ge 5 ]; then break; fi
+        sleep 1
+    done
+    [ "$state" = "i 2" ] || return 1
+    fqdn=$(busctl --system --auto-start=no --timeout=5 call "${avahi[@]}" GetHostNameFqdn 2>/dev/null) || return 1
+    [ "${fqdn,,}" = "s \"$1\"" ]
+}
 derive_address_defaults() {
     local host named suffix dev addr rest origin set_url scheme url_host port origins=() unique=() v4=() v6=() frontend json=
     host=
@@ -894,7 +931,13 @@ derive_address_defaults() {
     fi
     if [ -n "$host" ]; then
         origins+=("$(web_origin "$host")")
-        if [[ $host != *.* ]]; then origins+=("$(web_origin "$host.local")"); fi
+        if [[ $host != *.* ]] && [ -z "${cfg[CORS_ORIGINS]+set}" ]; then
+            if mdns_announces "$host.local"; then
+                origins+=("$(web_origin "$host.local")")
+            else
+                echo "warning: $(web_origin "$host.local") is not added to CORS_ORIGINS: no mDNS responder on this device announces $host.local; set CORS_ORIGINS when the web UI is opened by that name" >&2
+            fi
+        fi
     fi
     for addr in "${v4[@]}" "${v6[@]}"; do origins+=("$(web_origin "$addr")"); done
     origins+=("$(web_origin localhost)")
