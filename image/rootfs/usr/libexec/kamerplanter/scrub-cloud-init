@@ -41,7 +41,10 @@
 # cloud-init's logs /var/log/cloud-init*.log, rotated ones included
 # (cloud-init*.log*), and every occurrence is replaced by "REDACTED" in place:
 # the values of kamerplanter: -> secrets:, and those of the secret keys under
-# kamerplanter: -> settings: (L11). They are learned from this boot's combined
+# kamerplanter: -> settings: (L11). Each is searched for as it stands, inside
+# a JSON text, and in the forms Python prints it in: inside its repr or
+# ascii, the repr of its UTF-8 bytes and json.dumps, with an apostrophe both
+# bare and escaped. They are learned from this boot's combined
 # cloud-config and from every copy of the user-data that cloud-init keeps per
 # instance: cloud-config.txt (YAML), user-data.txt.i (MIME, its
 # text/cloud-config parts) and user-data.txt (as the source supplied it:
@@ -57,7 +60,9 @@
 # The copies are kept, and the unit fails, whenever the scrub is not through
 # (#76): when jq cannot run or fails on the combined cloud-config or on a
 # copy, so that the values in it are not known (without jq none are, and
-# nothing is scrubbed, as without Python's YAML module); and when there is
+# nothing is scrubbed, as without Python's YAML module); when jq or Python
+# fails to make the values into their forms, so that none is searched for;
+# and when there is
 # something to scrub and /var/log is a symbolic link, which is not entered,
 # or one of cloud-init's logs is, which is not rewritten through it, or
 # /var/lib/cloud/data or the status or result in it is, which are not
@@ -237,7 +242,8 @@ linked_copies() {
 
 # as_json FILE: the cloud-config documents in FILE, a copy of the user-data,
 # as JSON, one mapping per line, every scalar as text (BaseLoader), so a date
-# or a tag that JSON does not know reads all the same. cloud-config.txt is
+# or a tag that JSON does not know reads all the same; merge keys (<<) are
+# resolved, as cloud-init resolves them (SafeLoader). cloud-config.txt is
 # read whole as YAML, whatever its first line. Of user-data.txt and
 # user-data.txt.i, a gzip copy is decompressed; a copy whose first line is
 # #cloud-config is one document; a MIME message gives one for each of its
@@ -250,15 +256,23 @@ linked_copies() {
 # printed on an error.
 as_json() {
     python3 -I -c '
-import email, gzip, json, os, stat, sys
+import email, gzip, json, os, re, stat, sys
 import yaml
 # MIME parts and first lines that hold no cloud-config.
 plain_types = {"text/x-shellscript", "text/cloud-boothook", "text/part-handler",
                "text/x-shellscript-per-boot", "text/x-shellscript-per-instance",
                "text/x-shellscript-per-once"}
 plain_starts = (b"#!", b"#cloud-boothook", b"#part-handler")
+# BaseLoader, with the merge keys (<<) resolved as SafeLoader resolves them.
+class Loader(yaml.BaseLoader):
+    flatten_mapping = yaml.constructor.SafeConstructor.flatten_mapping
+    def construct_mapping(self, node, deep=False):
+        if isinstance(node, yaml.MappingNode):
+            self.flatten_mapping(node)
+        return super().construct_mapping(node, deep=deep)
+Loader.add_implicit_resolver("tag:yaml.org,2002:merge", re.compile("^(?:<<)$"), ["<"])
 def load(data):
-    doc = yaml.load(data, Loader=yaml.BaseLoader)
+    doc = yaml.load(data, Loader=Loader)
     return [doc] if isinstance(doc, dict) else []
 try:
     path = sys.argv[1]
@@ -357,12 +371,43 @@ status_files() {
     fi
 }
 
+# forms: reads lines NUL-separated on stdin and prints, NUL-separated, the
+# forms in which Python prints each: inside its repr, its ascii, the repr of
+# its UTF-8 bytes, and json.dumps with and without ensure_ascii. repr picks
+# its quote by the whole string it is given, and a value can be printed alone
+# or inside a longer string: an apostrophe is taken both bare and escaped.
+# Fails, printing nothing, on a line that is not UTF-8 or on another error.
+forms() {
+    python3 -I -c '
+import json, sys
+def spellings(s, form):
+    # A part without an apostrophe is single-quoted and escapes no quote.
+    parts = [form(p) for p in s.split("\x27")]
+    return {"\x27".join(parts), "\\\x27".join(parts)}
+try:
+    got = set()
+    for raw in sys.stdin.buffer.read().split(b"\0"):
+        if not raw:
+            continue
+        s = raw.decode("utf-8")
+        got.add(json.dumps(s)[1:-1])
+        got.add(json.dumps(s, ensure_ascii=False)[1:-1])
+        got |= spellings(s, lambda p: repr(p)[1:-1])
+        got |= spellings(s, lambda p: ascii(p)[1:-1])
+        got |= spellings(s, lambda p: repr(p.encode("utf-8"))[2:-1])
+    data = b"".join(f.encode("utf-8") + b"\0" for f in got if f)
+except Exception:
+    sys.exit(1)
+sys.stdout.buffer.write(data)
+' 2>/dev/null
+}
+
 # patterns: the strings to search for, NUL-separated, longest first, from
-# pairs (learn): each line of a value, and the same as it stands inside a
-# JSON text when that differs. Names a key whose value is not searched for.
-# Fails, printing nothing, when jq fails.
+# pairs (learn): each line of a value, the same as it stands inside a JSON
+# text (jq), and the forms Python prints it in (forms). Names a key whose
+# value is not searched for. Fails, printing nothing, when jq or Python fails.
 patterns() {
-    local key value line escaped i
+    local key value line escaped i lines=() got=()
     local -A seen=()
     for ((i = 0; i + 1 < ${#pairs[@]}; i += 2)); do
         key=${pairs[i]}
@@ -377,8 +422,16 @@ patterns() {
             seen[$line]=1
             escaped=$(printf '%s' "$line" | jq -Rrs 'tojson | .[1:-1]' 2>/dev/null) || return 1
             seen[$escaped]=1
+            lines+=("$line")
         done < <(printf '%s\n' "$value")
     done
+    if [ "${#lines[@]}" -gt 0 ]; then
+        mapfile -d '' -t got < <(printf '%s\0' "${lines[@]}" | forms)
+        wait "$!" || return 1
+        # Every line has a form.
+        [ "${#got[@]}" -gt 0 ] || return 1
+        for line in "${got[@]}"; do seen[$line]=1; done
+    fi
     for line in "${!seen[@]}"; do printf '%s\t%s\0' "${#line}" "$line"; done |
         sort -z -t $'\t' -k1,1nr | while IFS= read -r -d '' line; do printf '%s\0' "${line#*$'\t'}"; done
 }
@@ -674,7 +727,7 @@ main() {
     mapfile -d '' -t pats < <(patterns)
     if ! wait "$!"; then
         pats=()
-        unscrubbed+=("jq cannot make the provisioned secrets into search patterns; none is searched for")
+        unscrubbed+=("the provisioned secrets cannot be made into search patterns (jq or Python failed); none is searched for")
     fi
     # A place that is a symbolic link is not entered (own_dir), and a file
     # that is one is not read, rewritten or deleted through it: what lies

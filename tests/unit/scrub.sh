@@ -428,7 +428,7 @@ booted iid-1
 stub_jq '*tojson*'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
 expect "jq fails on the search patterns: the scrub fails, says so, keeps the copies" "1|yes|$all_kept" \
-    "$rc|$(has "jq cannot make the provisioned secrets into search patterns" "$(out)")|$(kept_copies)"
+    "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed)" "$(out)")|$(kept_copies)"
 
 # --- each copy is read once (#76) ---
 new_appliance
@@ -803,6 +803,90 @@ expect "a file that cannot be rewritten: the rest is scrubbed, the copies are ke
 expect "a file that cannot be rewritten: the kept copies still hold the values to learn" "yes|yes" \
     "$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/user-data.txt" && echo yes)|$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt" && echo yes)"
 
+# --- each value is searched for in the forms Python prints it in (SEC-004) ---
+# Each value has an ASCII head and tail that survive every form. form_one
+# holds a quote, an apostrophe, a backslash, a non-ASCII and an astral
+# character; form_two only an apostrophe, so that repr takes double quotes.
+form_one_head=scrub-form-one-head
+form_one_tail=form-one-tail-eeeeeeee
+form_two_head=scrub-form-two-head
+form_two_tail=form-two-tail-ffffffff
+form_one="$form_one_head-\"a'ss\\wörd😀-$form_one_tail"
+form_two="$form_two_head-it's-$form_two_tail"
+# plant_forms < VALUES (NUL-separated): one log line per form of each value:
+# repr alone, in a dict, in a longer string, in one that holds a quote too,
+# ascii, the repr of its UTF-8 bytes, json.dumps with and without ensure_ascii.
+plant_forms() {
+    python3 -I -c '
+import json, sys
+for v in sys.stdin.buffer.read().decode("utf-8").split("\0"):
+    if not v:
+        continue
+    for f in (repr(v), repr({"KEY": v}), repr("text " + v + " text"), repr("say \"" + v + "\""),
+              ascii(v), repr(v.encode("utf-8")), json.dumps(v), json.dumps(v, ensure_ascii=False)):
+        sys.stdout.buffer.write(("2026-11-16 10:00:03,000 - planted[DEBUG]: " + f + "\n").encode("utf-8"))
+'
+}
+# form_config: the combined cloud-config of booted, with both values added.
+form_config() {
+    combined_config | jq -c --arg one "$form_one" --arg two "$form_two" \
+        '.kamerplanter.secrets.FORM_ONE_SECRET = $one | .kamerplanter.secrets.FORM_TWO_SECRET = $two' \
+        >"$SB/run/cloud-init/combined-cloud-config.json"
+}
+# form_left FILE: the lines of FILE that still hold a head or a tail.
+form_left() { grep -cF -e "$form_one_head" -e "$form_one_tail" -e "$form_two_head" -e "$form_two_tail" -- "$1"; }
+new_appliance
+booted iid-1
+form_config
+log=$SB/var/log/cloud-init.log
+printf '%s\0' "$form_one" "$form_two" | plant_forms >>"$log"
+planted=$(grep -c 'planted\[DEBUG\]' "$log")
+expect "the forms: every planted line holds a head and a tail before the scrub (the test can fail)" "16|16" \
+    "$planted|$(grep 'planted\[DEBUG\]' "$log" | grep -F -e "$form_one_head" -e "$form_two_head" | grep -cF -e "$form_one_tail" -e "$form_two_tail")"
+rc=$(run_scrub)
+expect "the forms: the scrub succeeds, no head or tail is left in the log, every planted line is redacted" "0|0|$planted" \
+    "$rc|$(form_left "$log")|$(grep 'planted\[DEBUG\]' "$log" | grep -c REDACTED)"
+
+# Python cannot make the forms, or makes none: no value is searched for, the
+# copies and the logs stay.
+for stub in 'exit 1' 'cat >/dev/null; exit 0'; do
+    new_appliance
+    booted iid-1
+    form_config
+    mkdir -p "$SB/stub"
+    printf '#!/usr/bin/env bash\ncase "$*" in *spellings*) %s ;; esac\nexec %q "$@"\n' "$stub" "$(command -v python3)" >"$SB/stub/python3"
+    chmod +x "$SB/stub/python3"
+    rc=$(PATH=$SB/stub:$PATH run_scrub)
+    expect "the forms cannot be made ($stub): the scrub fails, says so, keeps the copies and the log" "1|yes|$all_kept|yes" \
+        "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed); none is searched for" "$(out)")|$(kept_copies)|$(exists "$SB/var/log/cloud-init.log")"
+done
+
+# --- merge keys in a copy are resolved, as cloud-init resolves them (SEC-009) ---
+merge_secret=scrub-merge-secret-marker-gggggggg
+merge_setting=scrub-merge-setting-marker-hhhhhhhh
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/user-data.txt" "$i/user-data.txt.i"
+printf '#cloud-config\nshared: &secrets\n  MERGED_SECRET: %s\nsalted: &salt\n  LOG_PSEUDONYM_SALT: %s\nkamerplanter:\n  secrets:\n    <<: *secrets\n  settings:\n    <<: [*salt]\n' \
+    "$merge_secret" "$merge_setting" >"$i/cloud-config.txt"
+log=$SB/var/log/cloud-init.log
+printf '2026-11-16 10:00:04,000 - merged[DEBUG]: secret %s salt %s\n' "$merge_secret" "$merge_setting" >>"$log"
+rc=$(run_scrub)
+expect "merge keys: a value merged into secrets and one merged into settings are replaced, the copy goes" "0|no|no|yes|no|no" \
+    "$rc|$(has "$merge_secret" "$(cat "$log")")|$(has "$merge_setting" "$(cat "$log")")|$(has "merged[DEBUG]: secret REDACTED salt REDACTED" "$(cat "$log")")|$(exists "$i/cloud-config.txt")|$(has "no copy of the cloud-config can be read" "$(out)")"
+# A merge of a scalar is no cloud-config cloud-init reads: the copy cannot be
+# read, the instance is unknown, the logs go.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+rm -f "$i/user-data.txt" "$i/user-data.txt.i"
+printf '#cloud-config\nkamerplanter:\n  secrets:\n    <<: some text\n' >"$i/cloud-config.txt"
+expect "an invalid merge key: the copy cannot be read, the instance is unknown, the logs go" "0|yes|no" \
+    "$(run_scrub)|$(has "$i: no copy of the cloud-config can be read" "$(out)")|$(exists "$SB/var/log/cloud-init.log")"
+
 # --- the units (L15, L16) ---
 units=$image/usr/lib/systemd/system
 scrub_unit=$units/kamerplanter-cloud-init-scrub.service
@@ -996,7 +1080,7 @@ expect "host namespace: the rule finds each planted way in, and passes the harml
 
 # --- no provisioned value in anything the scrub printed (L12) ---
 leaked=none
-for m in "${markers[@]}" short1 short3 nulsoloone nulsolotwo; do
+for m in "${markers[@]}" short1 short3 nulsoloone nulsolotwo "$form_one_head" "$form_one_tail" "$form_two_head" "$form_two_tail" "$merge_secret" "$merge_setting"; do
     if grep -qF -- "$m" "$all_output"; then leaked=$m; fi
 done
 expect "no provisioned value in anything the scrub printed" "none|yes" "$leaked|$([ -s "$all_output" ] && echo yes)"
