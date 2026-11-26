@@ -10,7 +10,12 @@ name: base-image-mirror
 # Two pairs: the bootc base of the system image (image/Containerfile, #42)
 # and the Fedora base of the tool container (build/tools.Containerfile, #48).
 # A new pair has no mirror tag until this workflow ran once: dispatch it on
-# the branch that adds the pair before that branch builds from it.
+# the branch that adds the pair before that branch builds from it. That run
+# creates the package `ghcr.io/<owner>/<repository>-<target>`. In its package
+# settings, make it public (the builds pull without a login) and, under
+# "Manage Actions access", add this repository with the role Write: although
+# this workflow created the package, its next scheduled run was refused with
+# `permission_denied: write_package` until the role was granted (#118).
 
 on:
   schedule:
