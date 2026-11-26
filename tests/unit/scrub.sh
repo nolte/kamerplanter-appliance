@@ -646,7 +646,7 @@ chmod 0000 "$locked"
 rc=$(run_scrub)
 chmod 0700 "$locked"
 expect "a search that fails: an instance directory that cannot be read is named, the copies are kept, the scrub fails" "1|yes|yes|$all_kept|yes" \
-    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read in it is neither scrubbed nor deleted" "$(out)")|$(has "iid-locked" "$(out)")|$(kept_copies)|$(exists "$locked/user-data.txt")"
+    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted" "$(out)")|$(has "iid-locked" "$(out)")|$(kept_copies)|$(exists "$locked/user-data.txt")"
 expect "a search that fails: each place is named once, the logs are scrubbed all the same" "1|none" \
     "$(grep -cF "$SB/var/lib/cloud/instances cannot be searched" "$SB/out")|$(found "$SB"/var/log/cloud-init*.log)"
 # The same without anything learned: the directory may hold copies, so the

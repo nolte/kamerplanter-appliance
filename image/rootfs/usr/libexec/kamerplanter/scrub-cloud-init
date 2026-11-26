@@ -600,12 +600,18 @@ log_kind() {
 # when the search for the copies fails, and says so: then not every copy was
 # found (#119).
 delete_copies() {
-    local name f found=() count=0 rc=0
+    local name f found=() pickles=() others=() count=0 rc=0
     if ! list found instance_copies; then
         echo "${cloud_lib}instances cannot be searched (see find's message); not every copy of the provisioning data in it is deleted" >&2
         rc=1
     fi
+    # The pickles first: a boot that ends in between leaves the copies the
+    # secrets are learned from, not an instance with nothing but a pickle,
+    # for which the next boot would delete the logs (#120).
     for f in "${found[@]}"; do
+        if [ "${f##*/}" = obj.pkl ]; then pickles+=("$f"); else others+=("$f"); fi
+    done
+    for f in "${pickles[@]}" "${others[@]}"; do
         if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
             count=$((count + 1))
         else
@@ -636,7 +642,7 @@ delete_copies() {
 unsearched() {
     [ -z "${failed[$1]:-}" ] || return 0
     failed[$1]=1
-    unscrubbed+=("$1 cannot be searched (see find's message); what could not be read in it is neither scrubbed nor deleted")
+    unscrubbed+=("$1 cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted")
 }
 
 main() {
