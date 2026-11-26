@@ -73,7 +73,8 @@ fail() { errors+=("$1"); }
 # Replaces a file with what stdin delivers, durably: a reader sees either the
 # old or the new content, and the new content survives a power loss. Fails,
 # also in a condition, when a step does; also when the file is a directory,
-# into which a plain mv would move the new content and succeed.
+# into which a plain mv would move the new content and succeed (a link to a
+# directory is replaced, not followed).
 replace() {
     local tmp
     tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1

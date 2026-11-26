@@ -877,6 +877,7 @@ retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|upda
         case $1 in
             pending) echo 'a b checking' >"$update_state/pending" ;;
             blank-pending) printf ' \n' >"$update_state/pending" ;;
+            unreadable-pending) ln -s "$sb/nowhere" "$update_state/pending" ;;
             credential) echo /dev/disk/by-id/virtio-b >"$system_credentials/kamerplanter.backup-disk" ;;
             stored-credential) echo /dev/disk/by-id/virtio-b >"$sb/credstore/kamerplanter.backup-disk" ;;
             user-file) rm "$records/data.env"; echo BACKUP_DISK=/dev/disk/by-id/virtio-b >"$user" ;;
@@ -913,6 +914,9 @@ expect "retire: refused while an update is not decided, nothing changed" \
 expect "retire: a record of the update being checked of whitespace only is none, as for kamerplanter-update" \
     "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the next location that may take it (see: kamerplanter-update status)" \
     "$(retire_with blank-pending)"
+expect "retire: a record of the update being checked that cannot be read counts as one: refused, nothing changed" \
+    "1|$unchanged|an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" \
+    "$(retire_with unreadable-pending)"
 expect "retire: refused while the guard runs, nothing changed" \
     "1|$unchanged|kamerplanter-update-guard.service is running; retire the backup disk once it is done" \
     "$(retire_with guard)"

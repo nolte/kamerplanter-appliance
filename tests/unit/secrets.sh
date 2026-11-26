@@ -475,7 +475,8 @@ reboot
 expect "migration: once the update is decided, the legacy pin is deleted, the keyed one stays" "0|no|yes" \
     "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)"
 # A record of whitespace only is none, as for kamerplanter-update and the
-# disk service (pending_record in env.sh): the legacy pin goes.
+# disk service (pending_record in env.sh): the legacy pin goes. configure
+# read it so before; the case holds it to the shared reading.
 new_appliance
 run_configure >/dev/null
 rm "$(pins_dir)/.key"

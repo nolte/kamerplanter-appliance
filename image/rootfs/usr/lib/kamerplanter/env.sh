@@ -305,8 +305,10 @@ cleanup_due() {
 # decided: the words FROM TO PHASE of its first line, single-spaced, when the
 # first names the release left. Status 0 with a record; 1 with none: no file,
 # an empty one, which a write cut short leaves, or a first line without a
-# word; 2 when the file is there but cannot be read, which a reader that must
-# not act too early counts as a record.
+# word; 2 when the file is there but cannot be read. There the readers differ
+# on purpose: one that must not act too early (configure deleting a legacy
+# pin, disks retire) counts it as a record, kamerplanter-update, which could
+# decide nothing from it, as none.
 pending_record() {
     local p from='' to='' phase=''
     [ -e "$1" ] || [ -L "$1" ] || return 1

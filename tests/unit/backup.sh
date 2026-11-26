@@ -572,7 +572,7 @@ for p in "${issuers[@]}"; do wait "$p"; done
 expect "issue: runs at the same time all succeed and leave one message" "0,0,0,0,0,0|50-kamerplanter.issue" \
     "$(cat "$SB"/issue-rc.* | paste -sd,)|$(find "$SB/run/issue.d" -mindepth 1 -printf "%f\n" | sort | paste -sd,)"
 expect "source: no script of the image writes through a fixed temporary name" "" \
-    "$(grep -rnE '\.tmp"' "$root/image/rootfs")"
+    "$(grep -rnE '\.tmp\b' "$root/image/rootfs")"
 
 # A record of the update being checked that holds whitespace only is none,
 # as an empty one is (pending_record in env.sh): the fetch runs, the console
