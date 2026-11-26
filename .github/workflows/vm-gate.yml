@@ -3,19 +3,59 @@ name: vm-gate
 # Sets the commit status `vm-gate`, a required check on develop
 # (.github/settings.yml), on the head of every pull request (#43):
 #   success  the pull request changes nothing the VM tests cover;
-#   failure  it changes what they cover but lacks the label `vm-tests`;
-#   pending  it has the label: vm-gate-finalize.yml sets the result once
-#            the vm-tests run of that commit has completed (#51). A fork's
-#            run that awaits approval has not completed, so vm-gate stays
-#            pending until a maintainer approves it.
+#   failure  it changes what they cover but lacks the label `vm-tests`, or a
+#            push has withdrawn the label (below);
+#   pending  it has the label, and the label covers this head:
+#            vm-gate-finalize.yml sets the result once the vm-tests run of
+#            that commit has completed (#51). A fork's run that awaits
+#            approval has not completed, so vm-gate stays pending until a
+#            maintainer approves it.
 # The VM tests cover the image, the build, the boot and image tests and
 # vm-tests.yml, and the two gate workflows count as well: a change to
 # vm-gate.yml or vm-gate-finalize.yml takes effect only once it is on
 # develop, and counting them keeps a change to the gate behind the label.
 #
+# The label is read from the API when the job runs, not from the event
+# (#145): the event of `opened` is from before `gh pr create --label` set the
+# label, and decided failure on a pull request that did nothing wrong.
+#
+# The label is the consent to running the pull request's own vm-tests.yml
+# and scripts and to trusting their result: someone with triage access sets
+# it, or Renovate on its own fedora base pull requests (renovate.json5). It
+# names no commit, so a push withdraws it (#130): on `synchronize`, a label
+# that was there when the push arrived is removed, and vm-gate fails until
+# it is set again, when
+#   - the head is in a fork;
+#   - the push changes what the VM jobs run, in the pull request's own
+#     version: vm-tests.yml, build/, tests/boot/ and tests/image/ as the
+#     pull request changes them against develop, before and after the push.
+#     A rebase or a merge of develop that leaves the pull request's own
+#     changes to these paths as they were keeps the label; a comparison
+#     that fails (the commit before a force push is gone) or lists 300
+#     files counts as a change;
+#   - the commit before the push was not accepted here: it has no vm-gate
+#     status, or one that says the label is missing. GitHub keeps one
+#     waiting run per concurrency group, so the run of an earlier push can
+#     have been dropped; this push then cannot vouch for what that one
+#     brought, and a pull request that was closed, pushed to and reopened
+#     arrives the same way.
+# A push that changes only other paths (image/, the documentation) keeps the
+# label. Removing the label with GITHUB_TOKEN starts no workflow, so this
+# job sets the failure itself; setting the label again fires `labeled`,
+# which starts the VM tests of the head and sets pending here. The VM tests
+# that the push itself started still run, but vm-gate-finalize.yml writes a
+# result only on a commit that this workflow accepted (pending or green, or
+# one that already has a result of its VM tests) and while the label is
+# set. Running a push's run of this workflow again repeats the withdrawal,
+# also after the label was set again: set the label instead.
+#
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the
 # GitHub API is read; the pull request's code is never checked out.
+# pull-requests: write is for removing the label and nothing else;
+# tests/unit/workflows.sh keeps this the only workflow that removes it and
+# checks that none sets it, and tests/unit/vm-gate.sh runs the script below
+# against a stub of gh.
 
 on:
   pull_request_target:
@@ -24,9 +64,15 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   statuses: write
 
+# One run at a time per pull request, in the order of the events, so that
+# an older decision never overwrites a newer one. A waiting run is replaced
+# by a newer event's run: every run therefore decides from the state it
+# finds. A dropped run leaves its head without a status, or with the one
+# an earlier run wrote; only `opened`, `synchronize` and the label's own
+# `labeled` event ever set pending, so no later event accepts that head.
 concurrency:
   group: vm-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -42,9 +88,14 @@ jobs:
       NUMBER: ${{ github.event.pull_request.number }}
       SHA: ${{ github.event.pull_request.head.sha }}
       BASE: ${{ github.event.pull_request.base.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.ref }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      BEFORE: ${{ github.event.before }}
       ACTION: ${{ github.event.action }}
       LABEL: ${{ github.event.label.name }}
-      HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'vm-tests') }}
+      # Only for a push: whether the label was there when it arrived. The
+      # decision itself takes the label from the API.
+      LABEL_AT_EVENT: ${{ contains(github.event.pull_request.labels.*.name, 'vm-tests') }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Set the vm-gate status
@@ -55,27 +106,108 @@ jobs:
               -f state="$1" -f description="$2" -f target_url="$RUN_URL" >/dev/null
             echo "vm-gate: $1 ($2)"
           }
+          # Whether the pull request has the label right now.
+          labelled() {
+            gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" --jq '[.[].name] | index("vm-tests") != null'
+          }
+          # The newest vm-gate status of a commit as "state<TAB>description";
+          # nothing if it has none.
+          latest() {
+            gh api "repos/$REPO/commits/$1/statuses?per_page=100" \
+              --jq '[.[] | select(.context == "vm-gate")] | first | if . == null then empty else "\(.state)\t\(.description // "")" end'
+          }
+          # A commit this workflow accepted for the VM tests: vm-gate is
+          # pending or green on it, or vm-gate-finalize.yml has written the
+          # result of its VM tests. Not accepted: no status, or a failure
+          # from here (the label is missing, or there is no result).
+          accepted() {
+            case $1 in
+              pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          # What the VM jobs run, in the pull request's own version at a
+          # commit: the files it changes against the base branch (from the
+          # merge base, so a newer develop adds nothing) under the paths the
+          # jobs execute, each with the content it has, one JSON line per
+          # file (a file name can hold a line break).
+          own() {
+            local out
+            out=$(gh api "repos/$REPO/compare/$BASE_REF...$1" --jq '(.files | length),
+              (.files[] | select([.filename, .previous_filename // ""]
+                | any(test("^(build/|tests/boot/|tests/image/|\\.github/workflows/vm-tests\\.yml$)")))
+              | [.status, .previous_filename, .filename, .sha] | tojson)') || return 1
+            [ "$(head -n1 <<<"$out")" -lt 300 ] || return 1
+            tail -n +2 <<<"$out" | sort
+          }
+
+          has_label=$(labelled)
+
+          # A push withdraws the consent the label stands for (#130). A label
+          # that was set after the push arrived covers this head and stays.
+          withdrawn=
+          if [ "$ACTION" = synchronize ] && [ "$has_label" = true ] && [ "$LABEL_AT_EVENT" = true ]; then
+            if [ "$HEAD_REPO" != "$REPO" ]; then
+              withdrawn="a push from a fork"
+            elif ! accepted "$(latest "$BEFORE" 2>/dev/null || true)"; then
+              withdrawn="a push onto a commit vm-gate had not accepted"
+            elif ! is=$(own "$SHA") || ! was=$(own "$BEFORE") || [ "$is" != "$was" ]; then
+              withdrawn="a push that changes what the VM tests run"
+            fi
+            if [ -n "$withdrawn" ]; then
+              # The label first, the status after it: vm-gate-finalize.yml
+              # checks the label right before it writes.
+              gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/vm-tests" >/dev/null || true
+              has_label=$(labelled)
+              if [ "$has_label" = true ]; then
+                status failure "$withdrawn: the label vm-tests could not be removed, remove it by hand"
+                exit 1
+              fi
+              echo "vm-gate: removed the label vm-tests from #$NUMBER ($withdrawn)"
+            fi
+          fi
+
           # The files of exactly this head, not of whatever the pull request
           # shows by now. The comparison lists at most 300 files; a larger
           # change counts as covered.
-          files=$(gh api "repos/$REPO/compare/$BASE...$SHA" --jq '.files | length, (.[].filename)')
+          # A file moved out of a covered path counts by its old name.
+          files=$(gh api "repos/$REPO/compare/$BASE...$SHA" \
+            --jq '.files | length, (.[] | .filename, (.previous_filename // empty) | tojson)')
           covered=$(tail -n +2 <<<"$files" |
-            grep -cE '^(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-(tests|gate|gate-finalize)\.yml$)' || true)
+            grep -cE '^"(image/|build/|tests/boot/|tests/image/|\.github/workflows/vm-(tests|gate|gate-finalize)\.yml")' || true)
           [ "$(head -n1 <<<"$files")" -lt 300 ] || covered=many
           if [ "$covered" = 0 ]; then
             status success "no change the VM tests cover"
-          elif [ "$HAS_LABEL" != true ]; then
+          elif [ -n "$withdrawn" ]; then
+            status failure "$withdrawn: the label vm-tests was removed, add the label vm-tests again after review"
+          elif [ "$has_label" != true ]; then
             status failure "changes the image, build or boot tests: add the label vm-tests"
           elif [ "$ACTION" = opened ] || [ "$ACTION" = synchronize ] ||
             { [ "$ACTION" = labeled ] && [ "$LABEL" = vm-tests ]; }; then
             # A new head or the label just set: the VM tests start now, and
             # vm-gate-finalize.yml sets the result when they have completed.
-            status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
-          elif [ -z "$(gh api "repos/$REPO/commits/$SHA/statuses" --jq '[.[] | select(.context == "vm-gate")] | first | .state // empty')" ]; then
-            # No result for this head, and nothing starts the VM tests now.
-            status failure "no VM test result for this commit: remove and add the label vm-tests"
+            # Only for the commit that is the head right now: a run that
+            # waited while the head moved on reads a label that was set on
+            # another commit, and pending here would accept this one.
+            if [ "$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)" = "$SHA" ]; then
+              status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
+            else
+              status failure "no VM test result for this commit: it is not the head of the pull request any more"
+            fi
           else
-            # Reopened, or another label changed: vm-tests.yml tests nothing
-            # new, so the result vm-gate-finalize.yml set for this head stands.
-            echo "vm-gate: unchanged"
+            # Reopened, or another label changed: nothing starts the VM tests
+            # now, and this event says nothing about which head the label
+            # was set on. An old status is no ground for pending: the commit
+            # can have become the head again by a push whose own run was
+            # dropped, and a bot's label is an event the author can cause.
+            if accepted "$(latest "$SHA")"; then
+              # vm-tests.yml tests nothing new, so what vm-gate says for
+              # this head stands.
+              echo "vm-gate: unchanged"
+            else
+              # No result for this head: it was never accepted (pushed to
+              # while the pull request was closed, or the run of the event
+              # that brought it or the label was dropped).
+              status failure "no VM test result for this commit: remove the label vm-tests and set it again"
+            fi
           fi

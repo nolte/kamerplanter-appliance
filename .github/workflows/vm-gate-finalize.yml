@@ -20,6 +20,14 @@ name: vm-gate-finalize
 #     belongs to that commit only, so the current head is not touched;
 #   - the pull request lacks the label vm-tests: vm-gate.yml has decided it
 #     already, and a run without the label must not turn it green;
+#   - vm-gate.yml has not accepted the commit: the newest vm-gate status of
+#     the commit is missing or a failure that vm-gate.yml wrote (the label
+#     was missing, or a push withdrew it, #130). The run of a push starts
+#     with the label that was there when the push arrived, also when
+#     vm-gate.yml removes the label a moment later or its own run was
+#     dropped; such a run must not turn the commit green, however fast it
+#     completes. A result is written over pending, over a green vm-gate and
+#     over an earlier result of this workflow only;
 #   - the run tested nothing: it awaits approval (action_required, a fork's
 #     first contribution: vm-gate stays pending until a maintainer approves
 #     the run and it completes), or it skipped the build (a label other than
@@ -37,11 +45,17 @@ name: vm-gate-finalize
 # code. Its jobs come from its vm-tests.yml, and the scripts they run
 # (build/, tests/boot/) are its own, so a pull request that rewrites either
 # still decides what the jobs test and whether they pass. The label
-# vm-tests, which only someone with triage access sets, is the consent to
-# that; it stays on the pull request across later pushes, so it covers
-# those too, and no review is required on develop. Only runs of
-# .github/workflows/vm-tests.yml count, not another file that calls itself
-# vm-tests. Tightening the consent: #130.
+# vm-tests, which someone with triage access sets (and Renovate on its own
+# fedora base pull requests, renovate.json5), is the consent to that, and no
+# review is required on develop. The label names no commit:
+# vm-gate.yml removes it on a push from a fork and on a push that changes
+# what the jobs run, and it sets pending only on a head the label covers
+# (#130). What remains: the label covers the head the pull request has at
+# the moment it is set, also when a push arrived a moment before; and a
+# push from a branch of this repository that changes only the image keeps
+# the label, since its author could set the label as well. Only runs
+# of .github/workflows/vm-tests.yml count, not another file that calls
+# itself vm-tests.
 #
 # Statuses set with GITHUB_TOKEN start no workflow, so automerge.yaml would
 # not see this result; the automerge job below evaluates the pull request
@@ -140,10 +154,20 @@ jobs:
               break
             fi
           done
+          # Only on a commit that vm-gate.yml accepted for the VM tests:
+          # pending or green, or a result from here (a new attempt of the
+          # run). No status, or a failure of vm-gate.yml: the label did not
+          # cover this commit when its run started (#130).
+          current=$(gh api "repos/$REPO/commits/$SHA/statuses?per_page=100" \
+            --jq '[.[] | select(.context == "vm-gate")] | first | if . == null then "no status" else "\(.state)\t\(.description // "")" end')
+          case $current in
+            pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*) ;;
+            *) leave "vm-gate.yml has not accepted this commit for the VM tests (${current//$'\t'/: })" ;;
+          esac
           # The label again, right before the write: a label removed since the
           # lookup has made vm-gate.yml post failure, which success must not
           # overwrite.
-          [ "$(gh api "repos/$REPO/issues/$number/labels" --jq '[.[].name] | index("vm-tests") != null')" = true ] ||
+          [ "$(gh api "repos/$REPO/issues/$number/labels?per_page=100" --jq '[.[].name] | index("vm-tests") != null')" = true ] ||
             leave "the label vm-tests was removed from #$number meanwhile"
           gh api -X POST "repos/$REPO/statuses/$SHA" -f context=vm-gate \
             -f state="$state" -f description="$description" -f target_url="$RUN_URL" >/dev/null

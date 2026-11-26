@@ -31,7 +31,9 @@ task disk:package  # komprimiertes Disk-Image und Prüfsummen in .build/dist/
 
 `task test:boot` gibt je Lauf eine Zeile aus und legt die serielle Konsole und eine Diagnose jedes gescheiterten Laufs unter `.build/boot/` ab. Der erste Start jedes Laufs lädt die Container-Images aus ihren Registries und dauert mehrere Minuten.
 
-Die VM-Tests (`task test:boot`, `task test:update`, `task test:data-disk`) laufen auch auf GitHub Actions, verteilt auf parallele Jobs, über den Workflow `vm-tests`: in einem Pull Request, sobald er das Label `vm-tests` trägt (und erneut bei jedem Push darauf), nach jedem Merge nach `develop`, der `image/`, `build/` oder `tests/boot/` ändert, und von Hand unter **Actions → vm-tests → Run workflow**. Die Zusammenfassung des Laufs listet jedes Ergebnis; die Ergebnisdateien und seriellen Konsolen hängen am Lauf.
+Die VM-Tests (`task test:boot`, `task test:update`, `task test:data-disk`) laufen auch auf GitHub Actions, verteilt auf parallele Jobs, über den Workflow `vm-tests`: in einem Pull Request, sobald er das Label `vm-tests` trägt (und erneut bei jedem Push darauf, solange das Label bleibt), nach jedem Merge nach `develop`, der `image/`, `build/` oder `tests/boot/` ändert, und von Hand unter **Actions → vm-tests → Run workflow**. Die Zusammenfassung des Laufs listet jedes Ergebnis; die Ergebnisdateien und seriellen Konsolen hängen am Lauf.
+
+Das Label ist die Zustimmung, die Testskripte des Pull Requests auszuführen (ein Maintainer setzt es; Renovate setzt es auf seinen eigenen Aktualisierungen des Basis-Images), und es gilt für den Commit, auf dem es gesetzt wurde. Ein Push, der `.github/workflows/vm-tests.yml`, `build/`, `tests/boot/` oder `tests/image/` ändert, und jeder Push auf einen Pull Request aus einem Fork entfernt das Label: Der erforderliche Status `vm-gate` schlägt dann fehl, bis ein Maintainer den neuen Commit angesehen hat und das Label erneut setzt. Ein Push, der nur andere Pfade ändert, behält es, es sei denn, `vm-gate` hat den Commit davor nie akzeptiert (zwei Pushes kurz hintereinander oder ein Push, während der Pull Request geschlossen war).
 
 ## Die Appliance betreiben
 
