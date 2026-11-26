@@ -270,6 +270,18 @@ expect "derived: a failing busctl call gives no .local origin, and the services 
     '0|["http://kp:8080","http://localhost:8080"]|yes|no' \
     "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_FAIL=GetHostNameFqdn run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(has 'Call failed' "$(cat "$SB/out")")"
 
+configure_case
+expect "derived: a failing GetState call gives no .local origin, the name is not asked for, and the services start" \
+    "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|$avahi_call GetState," \
+    "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_FAIL=GetState run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(calls)"
+
+for state in 0 4; do
+    configure_case
+    expect "derived: a responder in state $state (not running) gives no .local origin" \
+        "0|[\"http://kp:8080\",\"http://localhost:8080\"]|yes|$avahi_call GetState," \
+        "$(TEST_HOST=kp TEST_NO_IP=1 TEST_MDNS=kp.local TEST_MDNS_STATE=$state run_configure)|$(app CORS_ORIGINS)|$(has "$mdns_warning" "$(cat "$SB/out")")|$(calls)"
+done
+
 # A PATH with every command of this machine but busctl: one ln per directory
 # of PATH, in its order, so a name already linked keeps the earlier one.
 nobus=$work/no-busctl
@@ -702,6 +714,8 @@ expect "step: no reload when the generator saw the window already" "0||UPDATE_WI
 units=$image/usr/lib/systemd/system
 expect "units: the configuration check runs once the network is up, without requiring it" "yes|yes|no" \
     "$(grep -qx 'Wants=network-online.target' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^After=.*\bnetwork-online\.target\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Requires|Requisite|BindsTo)=.*network-online' "$units/kamerplanter-config.service" && echo yes || echo no)"
+expect "units: the configuration check is ordered after Avahi and pulls none in" "yes|no" \
+    "$(grep -Eq '^After=.*\bavahi-daemon\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^(Wants|Requires|Requisite|BindsTo|Upholds)=.*avahi' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the configuration check runs after the provisioning step and not when it failed" "yes|yes" \
     "$(grep -Eq '^After=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes)|$(grep -Eq '^Requires=.*\bkamerplanter-provisioning\.service\b' "$units/kamerplanter-config.service" && echo yes || echo no)"
 expect "units: the step is ordered after cloud-init's network stage and never pulls cloud-init in" "yes|no" \
