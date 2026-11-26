@@ -14,8 +14,15 @@
 # the workflows running as develop has them (pull_request_target,
 # workflow_run) check out no code and keep the event out of their scripts
 # (#51), and that every file a failure of the VM tests names is uploaded by
-# the job of vm-tests.yml that runs the script (#110). Reads the YAML files
-# and the scripts only; needs PyYAML.
+# the job of vm-tests.yml that runs the script (#110). Also checks who may
+# reach the status at all (#130): no job of a workflow that runs as a branch
+# or a pull request has it may write commit statuses, whichever step would
+# do it; and the consent behind vm-gate, the label vm-tests: vm-gate.yml
+# reads it from the API and not from the event (#145), is the only workflow
+# that removes it, no workflow sets it, and vm-gate-finalize.yml writes its
+# result only after it has read vm-gate's status of the commit and the
+# label. What the two scripts decide is checked by tests/unit/vm-gate.sh.
+# Reads the YAML files and the scripts only; needs PyYAML.
 #
 # Usage: tests/unit/workflows.sh
 set -uo pipefail
@@ -68,6 +75,129 @@ for event in ("pull_request", "pull_request_target"):
         print(f"FAIL automerge's condition drops a workflow_run of a {event} event")
 
 automerge_uses = str(automerge_doc["jobs"]["automerge"].get("uses", ""))
+
+# Only these events run a workflow as develop has it.
+AS_DEVELOP = {"pull_request_target", "workflow_run"}
+
+
+def events(doc):
+    on = triggers(doc)
+    if isinstance(on, (str, list)):
+        on = {e: None for e in ([on] if isinstance(on, str) else on)}
+    return on
+
+
+def scripts(job):
+    # Everything a job's steps execute: run scripts and inline scripts.
+    return "\n".join(str(s.get("run", "")) + "\n" + str((s.get("with") or {}).get("script", ""))
+                     for s in ((job or {}).get("steps") or []))
+
+
+def grants(job, doc, scope):
+    # Whether the job's token may write the scope. A job's permissions
+    # replace the workflow's; None: neither level declares any, so the
+    # repository's default applies, which no file here shows.
+    perms = (job or {}).get("permissions", doc.get("permissions"))
+    if perms is None:
+        return None
+    if isinstance(perms, str):
+        return perms == "write-all"
+    return perms.get(scope) == "write"
+
+
+# The commit status vm-gate counts only from the GitHub Actions app
+# (.github/settings.yml), so every token of a workflow is one that could set
+# it. A workflow on any other event than the two above runs as the branch or
+# the pull request has it: with statuses: write, any step of it, also one a
+# pull request adds, could post the required status (#130). The check above
+# on `context=` finds only the workflows that say so.
+# Calls that set or remove a label, as gh, the REST API or github-script
+# spell them. A text check: it keeps an honest change from adding one
+# unnoticed, not a pull request that rewrites this file as well.
+ADDS_LABEL = (r"--add-label|addLabels|setLabels|labels\[\]="
+              r"|(-X|--method)[\s=]+(POST|PUT)\b[^\n]*/labels\b")
+REMOVES_LABEL = r"--remove-label|removeLabel|removeAllLabels|(-X|--method)[\s=]+DELETE\b[^\n]*/labels\b"
+branch_writers = 0
+for path in sorted(workflows.glob("*.y*ml")):
+    doc = yaml.safe_load(path.read_text()) or {}
+    on = events(doc)
+    jobs = doc.get("jobs") or {}
+    foreign = sorted(set(on) - AS_DEVELOP)
+    for job_id, job in jobs.items():
+        may = grants(job, doc, "statuses")
+        if foreign and may is None:
+            branch_writers += 1
+            print(f"FAIL {path.name}: the job {job_id} declares no permissions, so the repository's "
+                  f"default decides whether it may write commit statuses, and it runs on {', '.join(foreign)}")
+        elif foreign and may:
+            branch_writers += 1
+            print(f"FAIL {path.name}: the job {job_id} may write commit statuses and runs on "
+                  f"{', '.join(foreign)}, as the branch has it")
+        elif may:
+            print(f"ok {path.name}: the job {job_id} may write commit statuses and runs as develop has it")
+        # The label vm-tests is a consent (a person's, or Renovate's by
+        # renovate.json5): no workflow sets it, and only vm-gate.yml takes
+        # it away.
+        text = scripts(job)
+        labelers = [str(s.get("uses")) for s in ((job or {}).get("steps") or [])
+                    if re.search(r"label", str(s.get("uses", "")), re.I)]
+        if re.search(ADDS_LABEL, text) or labelers:
+            print(f"FAIL {path.name}: the job {job_id} sets a label; no workflow may set vm-tests")
+        if re.search(REMOVES_LABEL, text) and path.name != "vm-gate.yml":
+            print(f"FAIL {path.name}: the job {job_id} removes a label; only vm-gate.yml removes vm-tests")
+        # A workflow that runs as develop has it holds develop's token on a
+        # pull request's event. Writing to the pull request is for
+        # vm-gate.yml, which removes the label, and for the call of
+        # automerge's reusable workflow.
+        if not foreign and path.name != "vm-gate.yml" and str((job or {}).get("uses", "")) != automerge_uses:
+            for scope in ("pull-requests", "issues"):
+                if grants(job, doc, scope) is not False:
+                    print(f"FAIL {path.name}: the job {job_id} runs as develop has it and may write "
+                          f"{scope}; only vm-gate.yml does, to remove the label vm-tests")
+if not branch_writers:
+    print("ok no job of a workflow that runs as a branch or a pull request has it may write commit statuses")
+
+gate_text = (workflows / "vm-gate.yml").read_text()
+gate_doc = yaml.safe_load(gate_text)
+gate_job = gate_doc["jobs"]["gate"]
+gate_script = scripts(gate_job)
+# #145: the event of `opened` is older than a label set at creation.
+if re.search(r'gh api "repos/\$REPO/issues/\$NUMBER/labels[?"]', gate_script):
+    print("ok vm-gate.yml reads the pull request's labels from the API")
+else:
+    print("FAIL vm-gate.yml does not read the pull request's labels from the API")
+from_event = sorted(k for k, v in {**(gate_doc.get("env") or {}), **(gate_job.get("env") or {})}.items()
+                    if re.search(r"github\.event\.pull_request\.labels", str(v)))
+if from_event in ([], ["LABEL_AT_EVENT"]) and \
+        len(re.findall(r"github\.event\.pull_request\.labels", gate_text)) == len(from_event) and \
+        len(re.findall(r"\$\{?LABEL_AT_EVENT\b", gate_script)) <= 1 and \
+        "GITHUB_EVENT_PATH" not in gate_script and \
+        all("synchronize" in line for line in gate_script.splitlines() if "LABEL_AT_EVENT" in line):
+    print("ok vm-gate.yml takes the event's labels only to tell whether a push found the label set")
+else:
+    print("FAIL vm-gate.yml decides on the labels of the event (only LABEL_AT_EVENT, in the "
+          "condition on synchronize, may hold them)")
+# #130: removing the label is what pull-requests: write is there for.
+if re.search(r'-X DELETE "repos/\$REPO/issues/\$NUMBER/labels/vm-tests"', gate_script):
+    print("ok vm-gate.yml removes the label vm-tests")
+else:
+    print("FAIL vm-gate.yml does not remove the label vm-tests")
+gate_perms = gate_job.get("permissions", gate_doc.get("permissions")) or {}
+if gate_perms == {"contents": "read", "pull-requests": "write", "statuses": "write"}:
+    print("ok vm-gate.yml may write the pull request and commit statuses, and nothing else")
+else:
+    print(f"FAIL vm-gate.yml's permissions are {gate_perms}: beyond reading, only pull-requests "
+          "(the label) and statuses")
+# The finalizer writes only after it has read what vm-gate.yml said about
+# the commit and whether the label is still set.
+finalize_script = scripts(yaml.safe_load((workflows / "vm-gate-finalize.yml").read_text())["jobs"]["finalize"])
+write = finalize_script.find('-X POST "repos/$REPO/statuses/$SHA"')
+for what, call in (("vm-gate's status of the commit", 'gh api "repos/$REPO/commits/$SHA/statuses'),
+                   ("the pull request's labels", 'gh api "repos/$REPO/issues/$number/labels')):
+    if 0 <= finalize_script.find(call) < write:
+        print(f"ok vm-gate-finalize.yml reads {what} from the API before it writes the result")
+    else:
+        print(f"FAIL vm-gate-finalize.yml writes the result without reading {what} from the API first")
 
 names = set()
 produced = set()
