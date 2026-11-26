@@ -474,6 +474,19 @@ rm "$SB/var/lib/kamerplanter/update/pending"
 reboot
 expect "migration: once the update is decided, the legacy pin is deleted, the keyed one stays" "0|no|yes" \
     "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac")" = "$before" ] && echo yes)"
+# A record of whitespace only is none, as for kamerplanter-update and the
+# disk service (pending_record in env.sh): the legacy pin goes.
+new_appliance
+run_configure >/dev/null
+rm "$(pins_dir)/.key"
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+mkdir -p "$SB/var/lib/kamerplanter/update"
+printf ' \n' >"$SB/var/lib/kamerplanter/update/pending"
+reboot
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "migration: a record of an update being checked of whitespace only is none: the legacy pin is deleted" "0|no|yes|yes" \
+    "$rc|$(exists "$(pins_dir)/FERNET_KEY")|$([ "$(cat "$(pins_dir)/FERNET_KEY.hmac" 2>/dev/null)" = "$(hmac_of "$(pin_key)" "$(secret FERNET_KEY)")" ] && echo yes)|$(has "the pin of FERNET_KEY is now keyed" "$(out)")"
 # An empty record of the update being checked, as a write cut short leaves
 # it, is none, as for kamerplanter-update: the legacy pin goes.
 new_appliance
@@ -541,6 +554,25 @@ rc=$(run_configure)
 expect "migration: a legacy pin that differs keeps the services stopped as before; nothing is migrated" "1|yes|yes|no" \
     "$rc|$(has "FERNET_KEY differs from the value Kamerplanter started with: stored credentials are encrypted with it and become unreadable (then remove $(pins_dir)/FERNET_KEY)" "$(out)")|$(exists "$(pins_dir)/FERNET_KEY")|$(exists "$(pins_dir)/FERNET_KEY.hmac")"
 
+# A keyed pin that is a directory: the keyed pin is not written into it, so
+# the migration warns and keeps the legacy pin, which decides, rather than
+# delete it and stop the services on the next run. The key of the pins
+# stays: without it, a keyed pin of any kind is one whose key is missing.
+new_appliance
+run_configure >/dev/null
+pin_of "$(secret FERNET_KEY)" >"$(pins_dir)/FERNET_KEY"
+rm -f "$(pins_dir)/FERNET_KEY.hmac"
+mkdir "$(pins_dir)/FERNET_KEY.hmac"
+reboot
+rc=$(run_configure)
+keys+=("$(pin_key)")
+expect "migration: a keyed pin that is a directory: the legacy pin is kept, nothing is moved into it, the services start" \
+    "0|yes|yes|||yes" \
+    "$rc|$(exists "$(pins_dir)/FERNET_KEY")|$(has "warning: the pin of FERNET_KEY could not be migrated; $(pins_dir)/FERNET_KEY is kept and checked as before" "$(out)")|$(ls -A "$(pins_dir)/FERNET_KEY.hmac")|$(find "$(pins_dir)" -maxdepth 1 -name '.FERNET_KEY.hmac.*')|$(exists "$SB/run/kamerplanter/app.env")"
+reboot
+expect "migration: a keyed pin that is a directory: the next run starts the services as well" "0|yes" \
+    "$(run_configure)|$(exists "$(pins_dir)/FERNET_KEY")"
+
 # A provisioned value of a key with a keyed pin (L14): restored only when it
 # matches.
 new_appliance
@@ -566,7 +598,7 @@ leaked=none
 for k in "${keys[@]}"; do
     if [ -n "$k" ] && grep -qF -- "$k" "$all_output"; then leaked=$k; fi
 done
-expect "keyed: no key of the pins in anything the check printed" "none|8" "$leaked|${#keys[@]}"
+expect "keyed: no key of the pins in anything the check printed" "none|10" "$leaked|${#keys[@]}"
 
 # --- the step on unusual input ---
 new_appliance

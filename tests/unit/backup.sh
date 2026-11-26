@@ -553,6 +553,46 @@ expect "guard: the failure names the read of what was copied" yes \
 expect "guard: the console names a read error, not a mismatch or a damaged backup" yes \
     "$(grep -q 'returned a read error' "$SB/run/issue.d/45-kamerplanter-restore.issue" 2>/dev/null && ! grep -q 'second read\|damaged or gone' "$SB/run/issue.d/45-kamerplanter-restore.issue" && echo yes)"
 
+# A console message is written through a temporary file of its own, never a
+# fixed name: two runs at the same time (the guard, a fetch, the timer's
+# issue) do not move each other's away, and a file of that name is not hers.
+new_sandbox backup-locations
+mkdir -p "$SB/run/issue.d"
+echo sentinel >"$SB/run/issue.d/50-kamerplanter.issue.tmp"
+expect "issue: a file of the former temporary name is left alone, no temporary file is left" \
+    "0|yes|sentinel|50-kamerplanter.issue,50-kamerplanter.issue.tmp" \
+    "$(tool issue)|$(grep -q 'Kamerplanter appliance 1.2' "$SB/run/issue.d/50-kamerplanter.issue" 2>/dev/null && echo yes)|$(cat "$SB/run/issue.d/50-kamerplanter.issue.tmp")|$(find "$SB/run/issue.d" -mindepth 1 -printf "%f\n" | sort | paste -sd,)"
+new_sandbox backup-locations
+issuers=()
+for i in 1 2 3 4 5 6; do
+    tool issue >"$SB/issue-rc.$i" &
+    issuers+=("$!")
+done
+for p in "${issuers[@]}"; do wait "$p"; done
+expect "issue: runs at the same time all succeed and leave one message" "0,0,0,0,0,0|50-kamerplanter.issue" \
+    "$(cat "$SB"/issue-rc.* | paste -sd,)|$(find "$SB/run/issue.d" -mindepth 1 -printf "%f\n" | sort | paste -sd,)"
+expect "source: no script of the image writes through a fixed temporary name" "" \
+    "$(grep -rnE '\.tmp"' "$root/image/rootfs")"
+
+# A record of the update being checked that holds whitespace only is none,
+# as an empty one is (pending_record in env.sh): the fetch runs, the console
+# and the status name no update being checked.
+new_sandbox backup-locations
+printf ' \n' >"$st/pending"
+expect "pending: whitespace only is none: the fetch runs, offline it fails" "1|no" \
+    "$(tool fetch)|$(grep -q 'an update is being checked; not fetching' "$SB/out" && echo yes || echo no)"
+expect "pending: whitespace only is none: the console names no update being checked" "0|no" \
+    "$(tool issue)|$(grep -q 'an update is being checked' "$SB/run/issue.d/50-kamerplanter.issue" && echo yes || echo no)"
+: >"$SB/out"
+expect "pending: whitespace only is none: the status checks nothing" "0|null" \
+    "$(tool status --json)|$(jq -c .checking "$SB/out")"
+printf '%s %s checking\n' "$OLD" "$NEW" >"$st/pending"
+expect "pending: a record: the console names the update being checked" "0|yes" \
+    "$(tool issue)|$(grep -q 'an update is being checked' "$SB/run/issue.d/50-kamerplanter.issue" && echo yes || echo no)"
+: >"$SB/out"
+expect "pending: a record: the status names what is checked" "0|$OLD $NEW" \
+    "$(tool status --json)|$(jq -r '.checking | "\(.from) \(.to)"' "$SB/out")"
+
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
     exit 1

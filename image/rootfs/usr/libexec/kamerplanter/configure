@@ -72,11 +72,12 @@ fail() { errors+=("$1"); }
 
 # Replaces a file with what stdin delivers, durably: a reader sees either the
 # old or the new content, and the new content survives a power loss. Fails,
-# also in a condition, when a step does.
+# also in a condition, when a step does; also when the file is a directory,
+# into which a plain mv would move the new content and succeed.
 replace() {
     local tmp
     tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
-    if cat >"$tmp" && sync "$tmp" && mv "$tmp" "$1" && sync "$(dirname "$1")"; then
+    if cat >"$tmp" && sync "$tmp" && mv -fT -- "$tmp" "$1" && sync "$(dirname "$1")"; then
         return 0
     fi
     rm -f -- "$tmp"
@@ -108,16 +109,15 @@ pin_key_lock=/run/kamerplanter-pins.lock
 update_pending=/var/lib/kamerplanter/update/pending
 pin_key_hex=
 # update_checked: whether an update is being checked, read as
-# kamerplanter-update reads $update_pending: a record whose first word names
-# the release left. An empty file, which a write cut short leaves and which
-# kamerplanter-update takes for none, is none. A record that cannot be read
-# counts as one, so a legacy pin is kept rather than deleted too early.
+# kamerplanter-update reads $update_pending (pending_record in
+# /usr/lib/kamerplanter/env.sh): a record whose first word names the release
+# left. An empty file, which a write cut short leaves, or one of whitespace
+# only is none. A record that cannot be read counts as one, so a legacy pin
+# is kept rather than deleted too early.
 update_checked() {
-    local p from=
-    [ -e "$update_pending" ] || [ -L "$update_pending" ] || return 1
-    p=$(cat -- "$update_pending" 2>/dev/null) || return 0
-    read -r from _ <<<"$p" || true
-    [ -n "$from" ]
+    local status=0
+    pending_record "$update_pending" >/dev/null || status=$?
+    [ "$status" != 1 ]
 }
 # pin_key_read: sets pin_key_hex from $pin_key; fails when it holds no key.
 pin_key_read() {

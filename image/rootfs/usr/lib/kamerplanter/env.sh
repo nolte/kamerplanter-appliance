@@ -14,7 +14,8 @@
 #
 # It also names the locations of the data disk (data_disk_places below),
 # which the disk service binds and every writer checks, the record of a move
-# onto the data disk (data_disk_move), and holds the release comparison and
+# onto the data disk (data_disk_move), the reading of the record of the
+# update being checked (pending_record), and holds the release comparison and
 # the release marker of the data disk (release_version below), and the
 # locations of the pre-update backup with the decisions about them
 # (backup_locations below).
@@ -296,6 +297,23 @@ record_field() {
 cleanup_due() {
     [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ && $3 =~ ^[0-9]+$ ]] || return 1
     [ "$3" -ge $(($1 + $2 * 86400)) ]
+}
+
+# pending_record FILE: the record of the update being checked
+# (/var/lib/kamerplanter/update/pending, written by kamerplanter-update) as
+# every reader takes it, so that none skips an update another counts as
+# decided: the words FROM TO PHASE of its first line, single-spaced, when the
+# first names the release left. Status 0 with a record; 1 with none: no file,
+# an empty one, which a write cut short leaves, or a first line without a
+# word; 2 when the file is there but cannot be read, which a reader that must
+# not act too early counts as a record.
+pending_record() {
+    local p from='' to='' phase=''
+    [ -e "$1" ] || [ -L "$1" ] || return 1
+    p=$(cat -- "$1" 2>/dev/null) || return 2
+    read -r from to phase _ <<<"$p" || true
+    [ -n "$from" ] || return 1
+    printf '%s\n' "$from${to:+ $to}${phase:+ $phase}"
 }
 
 # Releases (spec/update-and-rollback/ A4, A7). One comparison serves the

@@ -599,17 +599,23 @@ issue_text() {
 # from a disk or a naming in it is shown with its unprintable characters
 # replaced (shown), so it cannot write to the console or the journal, and,
 # on the console, with its backslashes doubled (issue_text), so it cannot
-# start an agetty escape.
+# start an agetty escape. The message is written to a temporary file of its
+# own, beside it and hidden (agetty reads only *.issue), so that two runs at
+# the same time never move each other's away.
 report() {
-    install -d -m 0755 /run/issue.d
-    {
+    local dir tmp
+    dir=$(dirname "$issue")
+    install -d -m 0755 "$dir" || return 1
+    tmp=$(mktemp "$dir/.$(basename "$issue").XXXXXX") || return 1
+    if ! {
         echo "Kamerplanter: $(issue_text "$1")"
         if [ -n "${2-}" ]; then echo "  $(issue_text "$2")"; fi
         echo "  details: systemctl status $unit"
         echo
-    } >"$issue.tmp"
-    chmod 0644 "$issue.tmp"
-    mv "$issue.tmp" "$issue"
+    } >"$tmp" || ! chmod 0644 "$tmp" || ! mv -fT -- "$tmp" "$issue"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
     agetty --reload >/dev/null 2>&1 || true
 }
 clear_report() {
@@ -2361,7 +2367,11 @@ cmd_retire() {
                 ;;
         esac
     done
-    if [ -s "$update_state/pending" ]; then
+    # An unreadable record counts as one (pending_record): the update it
+    # names may still return to the backup.
+    local pending_status=0
+    pending_record "$update_state/pending" >/dev/null || pending_status=$?
+    if [ "$pending_status" != 1 ]; then
         echo "an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" >&2
         exit 1
     fi
