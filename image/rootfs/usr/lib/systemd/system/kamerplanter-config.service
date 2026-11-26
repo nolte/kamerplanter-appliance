@@ -22,7 +22,11 @@ After=kamerplanter-provisioning.service
 # configure derives CORS_ORIGINS and FRONTEND_URL that no layer sets from the
 # host name and the addresses of the device, so it runs once the network is
 # up, as the containers do. Wants=, not Requires=: without a network the
-# check still runs, after NetworkManager-wait-online.service gave up.
+# check still runs, after NetworkManager-wait-online.service gave up, which
+# its NM_ONLINE_TIMEOUT bounds (60 seconds in the upstream unit).
+# kamerplanter-update-health.service is ordered after this unit and after
+# network-online.target, and its UPDATE_HEALTH_TIMEOUT budget starts when it
+# runs, so this wait takes nothing from it.
 Wants=network-online.target
 After=network-online.target
 
