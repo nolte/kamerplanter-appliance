@@ -507,17 +507,46 @@ layout_problem() {
 # holds of the state that belongs on the data disk, one line each: the
 # secrets, pins, or data in a database volume. The user file is not counted:
 # the image ships it. When it holds any, a newly named data disk receives it
-# (spec/distribution-requirements/ E11, "Moving" above).
+# (spec/distribution-requirements/ E11, "Moving" above). Fails, with the
+# directory on stderr, when one of them is there and could not be read: it is
+# not known to be empty then, and a data disk set up as if it were would hide
+# what it holds underneath the binds (#169).
 system_data() {
-    local root=${1%/} place dir path
+    local root=${1%/} place dir path sub what rc
     for place in "${data_disk_places[@]}"; do
         read -r dir path <<<"$place"
         case $dir in
-            etc) if [ -e "$root$path/secrets.env" ]; then echo "$path/secrets.env"; fi ;;
-            pinned) if [ -n "$(find "$root$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then echo "pins in $path"; fi ;;
-            volumes/*) if [ -n "$(find "$root$path/_data" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then echo "data in $path"; fi ;;
+            etc)
+                if [ -e "$root$path/secrets.env" ]; then echo "$path/secrets.env"; fi
+                continue
+                ;;
+            pinned) sub=$root$path what="pins in $path" ;;
+            volumes/*) sub=$root$path/_data what="data in $path" ;;
+            *) continue ;;
+        esac
+        [ -d "$sub" ] || continue
+        rc=0
+        filled "$sub" || rc=$?
+        case $rc in
+            0) echo "$what" ;;
+            1) ;;
+            *) echo "$sub could not be read" >&2; return 1 ;;
         esac
     done
+}
+
+# filled DIR: whether DIR holds anything: 0 when it does, 1 when it is empty,
+# 2 when it could not be read (find's message goes to stderr). The search is
+# read through list (/usr/lib/kamerplanter/env.sh), which keeps find's exit
+# status: in a command substitution it is lost, and a directory that could
+# not be read would pass for an empty one (#169; the pre-commit hook
+# no-find-in-command-substitution refuses that form). An entry that goes
+# while the search runs is no failure (-ignore_readdir_race, as in
+# backup_entries): system_data may read a directory that is in use.
+filled() {
+    local first=()
+    list first find "$1" -ignore_readdir_race -mindepth 1 -maxdepth 1 -print0 -quit || return 2
+    [ ${#first[@]} -gt 0 ]
 }
 
 # window_stale (in /usr/lib/kamerplanter/env.sh): whether the maintenance
@@ -762,10 +791,17 @@ not_local() {
 # roots DEVICE: the devices DEVICE is built on that are built on nothing
 # themselves: its whole disk, not a partition or a mapped device.
 roots() {
-    local path kname
+    local path kname below
     while read -r path kname; do
         [ -n "$kname" ] && [ ! -e "/sys/class/block/$kname/partition" ] || continue
-        [ -z "$(find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 2>/dev/null)" ] || continue
+        # This search fails on every device today, and the test for a
+        # partition above never finds one: with -p lsblk prints KNAME as a
+        # path (/dev/sdb), so neither path exists in sysfs, and every row of
+        # the tree is printed (#185). The status of the search says nothing
+        # here, so it is dropped and the result kept as it was (what the
+        # search did print decides, as before) until #185 decides it.
+        list below find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
+        [ ${#below[@]} -eq 0 ] || continue
         echo "$path"
     done < <(lsblk -nrspo NAME,KNAME -- "$1") | sort -u
 }
@@ -802,13 +838,18 @@ system_device() {
 # in_use DEVICE: prints why DEVICE or a partition on it is in use (mounted,
 # swap, or held by a device mapper or RAID device); fails when it is not.
 in_use() {
-    local d k at holders
+    local d k at holders=()
     while read -r d k; do
         at=$(findmnt -rno TARGET -S "$d" 2>/dev/null | head -n1 || true)
         if [ -n "$at" ]; then echo "$d is mounted at $at"; return 0; fi
         if awk 'NR > 1 {print $1}' /proc/swaps | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
-        holders=$(find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)
-        if [ -n "$holders" ]; then echo "$d is in use by ${holders% }"; return 0; fi
+        # This search fails on every device today: with -p lsblk prints
+        # KNAME as a path (/dev/sdb), so the path does not exist in sysfs and
+        # no holder is ever seen (#185). The status of the search says
+        # nothing here, so it is dropped and the result kept as it was (what
+        # the search did print decides, as before) until #185 decides it.
+        list holders find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null || true
+        if [ ${#holders[@]} -gt 0 ]; then echo "$d is in use by ${holders[*]}"; return 0; fi
     done < <(lsblk -nrpo NAME,KNAME -- "$1")
     return 1
 }
@@ -1290,7 +1331,10 @@ set_up() {
             "name the disk by one of those paths (ls -l /dev/disk/by-id/), then run: systemctl restart kamerplanter.target"
     # E11: the system disk holds data already, which is moved onto the disk.
     held=
-    if [ "$role" = data ]; then held=$(system_data /); fi
+    if [ "$role" = data ]; then
+        held=$(system_data /) ||
+            die "$name is not set up as data disk: whether the system disk holds Kamerplanter data could not be read (the directory is named in the journal); it would be hidden underneath the disk"
+    fi
     if [ -n "$held" ]; then
         local running
         running=$(services_running)
@@ -2067,16 +2111,13 @@ cmd_clean_underneath() {
         echo "no verified move with the disk mounted" >&2
         exit 1
     fi
-    local place dir path d emptied=() left
+    local place dir path d emptied=() rc
     for place in "${data_disk_places[@]}"; do
         read -r dir path <<<"$place"
         while mountpoint -q "$path"; do umount "$path" || { echo "$path could not be unbound here" >&2; exit 1; }; done
         [ -d "$path" ] || continue
         if [ "$(stat -c %d "$path")" = "$(stat -c %d "$mnt")" ]; then echo "$path is on the data disk still" >&2; exit 1; fi
-        if [ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-            empty_dir "$path" || { echo "$path could not be emptied" >&2; exit 1; }
-            emptied+=("$path")
-        fi
+        clean_filled "$path"
     done
     if [ -d "$deployments" ]; then
         if mountpoint -q /sysroot && [[ ,$(findmnt -rno OPTIONS -M /sysroot | tail -n1), == *,ro,* ]]; then
@@ -2086,16 +2127,38 @@ cmd_clean_underneath() {
         fi
         for d in "$deployments"/*/deploy/*/etc/kamerplanter; do
             [ -d "$d" ] && [ ! -L "$d" ] || continue
-            if [ -n "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-                empty_dir "$d" || { echo "$d could not be emptied" >&2; exit 1; }
-                emptied+=("$d")
-            fi
+            clean_filled "$d"
         done
     fi
     sync
-    left=$(for d in "${emptied[@]}"; do find "$d" -mindepth 1 -maxdepth 1 -print -quit; done)
-    if [ -n "$left" ]; then echo "$left is left" >&2; exit 1; fi
+    for d in ${emptied[@]+"${emptied[@]}"}; do
+        rc=0
+        filled "$d" || rc=$?
+        case $rc in
+            0) echo "something is left in $d" >&2; exit 1 ;;
+            1) ;;
+            *) echo "$d could not be read after it was emptied" >&2; exit 1 ;;
+        esac
+    done
     if [ ${#emptied[@]} -eq 0 ]; then echo "nothing was left of it"; else printf '%s\n' "${emptied[@]}"; fi
+}
+
+# clean_filled DIR: for cmd_clean_underneath, whose array emptied it adds DIR
+# to: empties DIR when it holds anything. Ends the command when DIR could not
+# be read or not be emptied: a directory that could not be read is not an
+# empty one, and "nothing was left of it" would record the copy as deleted
+# while it is still there (#169).
+clean_filled() {
+    local rc=0
+    filled "$1" || rc=$?
+    case $rc in
+        0)
+            empty_dir "$1" || { echo "$1 could not be emptied" >&2; exit 1; }
+            emptied+=("$1")
+            ;;
+        1) ;;
+        *) echo "$1 could not be read" >&2; exit 1 ;;
+    esac
 }
 
 # empty_dir DIR: deletes everything in DIR, DIR stays (a bind is made onto

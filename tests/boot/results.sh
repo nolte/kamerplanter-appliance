@@ -27,13 +27,19 @@ check() {
 }
 
 summary() {
-    local dir=$1 job file
+    local dir=$1 job file files='' found rc=0
     local -A count=()
     echo "### VM tests"
     echo
     echo "| job | test | result | time | description |"
     echo "| --- | --- | --- | --- | --- |"
+    # find's exit status is read: results that could not be searched are not
+    # taken for none (#169). No DIR at all is no results: a run whose build
+    # did not finish downloads no artifact. A search that failed in part
+    # shows the rows it did find and then fails the summary, on purpose.
+    if [ -d "$dir" ]; then files=$(find "$dir" -name '*.tsv') || rc=1; fi
     while IFS= read -r file; do
+        [ -n "$file" ] || continue
         job=${file#"$dir"/}
         job=${job%%/*}
         while IFS=$'\t' read -r name result secs text; do
@@ -41,14 +47,18 @@ summary() {
             text=${text//|/\\|}
             echo "| ${job#vm-results-} | $name | $result | $secs | $text |"
         done <"$file"
-    done < <(find "$dir" -name '*.tsv' | sort)
+    done < <(sort <<<"$files")
     echo
+    [ "$rc" = 0 ] || { echo "The results below $dir could not be read completely."; echo; }
     echo "PASS ${count[PASS]:-0}, FAIL ${count[FAIL]:-0}, SKIP ${count[SKIP]:-0}"
     for job in "$dir"/*/; do
         [ -d "$job" ] || continue
-        [ -n "$(find "$job" -name '*.tsv' -size +0)" ] ||
+        found=$(find "$job" -name '*.tsv' -size +0) ||
+            { echo "The results of $(basename "$job" | sed "s/^vm-results-//") could not be read completely."; rc=1; continue; }
+        [ -n "$found" ] ||
             echo "No results from $(basename "$job" | sed "s/^vm-results-//")."
     done
+    return "$rc"
 }
 
 case ${1-} in

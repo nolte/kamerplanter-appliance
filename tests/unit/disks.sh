@@ -257,6 +257,65 @@ held "database data on the system disk" "data in /var/lib/containers/storage/vol
 held "everything listed" $'/etc/kamerplanter/secrets.env\npins in /var/lib/kamerplanter/pinned\ndata in /var/lib/containers/storage/volumes/valkey_data' \
     "mkdir -p etc/kamerplanter var/lib/kamerplanter/pinned $vol/valkey_data/_data && touch etc/kamerplanter/secrets.env var/lib/kamerplanter/pinned/X $vol/valkey_data/_data/dump.rdb"
 
+# A directory that cannot be read is not an empty one (#169): filled tells
+# the three apart, where [ -n "$(find ...)" ] took a failed search for an
+# empty directory. A missing directory fails find the same way as one that
+# cannot be read, so these run as root too; the cases with a directory
+# without permissions run as another user only (root reads every directory).
+fd=$(mktemp -d "$work/filled.XXXXXX")
+mkdir "$fd/empty" "$fd/some" "$fd/hidden"
+touch "$fd/some/a" "$fd/some/b" "$fd/hidden/.key"
+filled_rc() { filled "$1" 2>/dev/null; echo "$?"; }
+expect "filled: a directory with entries" 0 "$(filled_rc "$fd/some")"
+expect "filled: a hidden entry counts" 0 "$(filled_rc "$fd/hidden")"
+expect "filled: an empty directory" 1 "$(filled_rc "$fd/empty")"
+expect "filled: a search that fails is neither" 2 "$(filled_rc "$fd/none")"
+# clean_filled, the step of clean-underneath: empties what holds something,
+# and ends the command on a directory it could not read, instead of counting
+# it as empty and reporting that nothing was left.
+cleaned() {  # cleaned DIR: exit status, what was emptied, and the last line said
+    local out rc
+    out=$( (emptied=(); clean_filled "$1"; printf '%s' "${emptied[*]}") 2>&1 ); rc=$?
+    printf '%s|%s' "$rc" "${out##*$'\n'}"
+}
+expect "clean-underneath: a directory that holds something is emptied and listed" "0|$fd/some|" "$(cleaned "$fd/some")|$(ls -A "$fd/some")"
+expect "clean-underneath: an empty directory is not listed" "0|" "$(cleaned "$fd/empty")"
+expect "clean-underneath: a search that fails ends the command" "1|$fd/none could not be read" "$(cleaned "$fd/none")"
+if [ "$(id -u)" != 0 ]; then
+    chmod 0000 "$fd/hidden"
+    expect "filled: a directory that cannot be read is not empty" 2 "$(filled_rc "$fd/hidden")"
+    expect "clean-underneath: a directory that cannot be read ends the command" "1|$fd/hidden could not be read" "$(cleaned "$fd/hidden")"
+    chmod 0700 "$fd/hidden"
+    expect "clean-underneath: what could not be read is still there" ".key" "$(ls -A "$fd/hidden")"
+    locked_held() {  # locked_held NAME SETUP DIR: system_data of a fresh root after SETUP, DIR unreadable
+        local d out rc
+        d=$(mktemp -d "$work/root.XXXXXX")
+        (cd "$d" && eval "$2")
+        chmod 0000 "$d/$3"
+        out=$(system_data "$d" 2>"$d.err"); rc=$?
+        chmod 0700 "$d/$3"
+        expect "$1" "|1|$d/$3 could not be read" "$out|$rc|$(tail -n1 "$d.err")"
+    }
+    locked_held "pins that cannot be read are not taken for none" "mkdir -p var/lib/kamerplanter/pinned && touch var/lib/kamerplanter/pinned/FERNET_KEY" var/lib/kamerplanter/pinned
+    locked_held "database data that cannot be read is not taken for none" "mkdir -p $vol/arangodb_data/_data && touch $vol/arangodb_data/_data/ENGINE" "$vol/arangodb_data/_data"
+fi
+# Baselines, which #185 will change: lsblk -p prints KNAME as a path, so
+# in_use and roots look for /sys/class/block//dev/NAME/..., which never
+# exists. Today in_use sees no holder, and roots prints every row. These
+# passed before #169 as well: its change keeps the results as they were.
+no_device() {  # no_device FUNCTION: FUNCTION of a device, with lsblk answering as lsblk -p does
+    (
+        # shellcheck disable=SC2329 # called by the function under test
+        lsblk() { echo "/dev/kp-none /dev/kp-none"; }
+        # shellcheck disable=SC2329 # called by the function under test
+        findmnt() { :; }
+        out=$("$1" /dev/kp-none 2>/dev/null); rc=$?
+        printf '%s|%s' "$out" "$rc"
+    )
+}
+expect "in_use, baseline until #185: a device not mounted and no swap is not in use, no holder is looked up" "|1" "$(no_device in_use)"
+expect "roots, baseline until #185: every row lsblk lists is printed" "/dev/kp-none|0" "$(no_device roots)"
+
 # Key files (E14): metadata only; owned by root and readable by root only.
 keydir=$(mktemp -d "$work/keys.XXXXXX")
 head -c 48 /dev/zero >"$keydir/ok"; chmod 0600 "$keydir/ok"

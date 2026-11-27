@@ -50,12 +50,29 @@ repos:
       # a directory it could not read passes for an empty one (#119, #149).
       # The shipped scripts read a search through list (mapfile, then
       # wait "$!"; /usr/lib/kamerplanter/env.sh). This refuses that one form
-      # only, on one line: a find whose status is dropped in a command
-      # substitution or behind a function is not seen (#169).
+      # only, on one line; the hook below refuses the command substitution.
       - id: no-find-in-process-substitution
         name: No find in a process substitution in the image's scripts
         language: pygrep
         entry: '<\(\s*(cd\s[^)]*&&\s*)?find\s'
+        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        types: [file]
+
+      # In a command substitution find's exit status is lost the same way:
+      # [ -n "$(find DIR ...)" ] is false for a directory that could not be
+      # read as for an empty one, and "|| true" inside drops it on purpose
+      # (#169). The shipped scripts read a search through list. This refuses
+      # a find anywhere inside "$(" up to the first ")", on one line, also in
+      # a comment, and also the assignment alone (x=$(find ...) || ...), which
+      # would keep the status: list reads it the same and needs no exception
+      # here. A find in a pipe, in backticks, behind a function or a variable,
+      # or after an earlier ")" in the same substitution is not seen; the
+      # scripts outside the image (tests/boot/results.sh assigns alone) are
+      # not checked.
+      - id: no-find-in-command-substitution
+        name: No find in a command substitution in the image's scripts
+        language: pygrep
+        entry: '\$\([^)]*\bfind\s'
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
         types: [file]
 
