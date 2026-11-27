@@ -31,12 +31,11 @@ name: vm-tests
 # head nobody consented to; it protects nothing, since a pull request can
 # rewrite this file. What protects the result is vm-gate-finalize.yml, which
 # counts none of a commit vm-gate did not accept. The job decides once: a
-# run that it let through is not stopped when the label goes afterwards.
-# That happens without anyone's doing when a label is set a second after a
-# push, so that the push's event already holds it: vm-gate.yml sets pending
-# from the push's run, consent sees it, and the label's run takes it back
-# seconds later (the header of vm-gate.yml). The suites then run that head
-# to the end without a result that counts (#180).
+# run that it let through is not stopped when the label goes afterwards
+# (#180). A label that is set a second after a push, so that the push's
+# event already holds it, is not such a case as a rule: the push's own run
+# of vm-gate.yml refuses it before it sets pending (#182; the header of
+# vm-gate.yml names when it cannot tell).
 
 on:
   workflow_dispatch:
