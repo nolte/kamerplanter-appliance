@@ -56,9 +56,9 @@ name: vm-gate
 # A label that is set after the head arrived covers that head only when the
 # one who set it can have seen it (#151): a maintainer reads commit A and
 # sets the label, and a push that arrived a moment before has made B the
-# head the label's event names. So on `labeled`, on `opened` and on a
-# `synchronize` whose event did not hold the label yet, the head gets
-# pending only if
+# head the label's event names. So on `labeled`, on `opened` and on
+# `synchronize` (but for the one label named below, which a push found
+# set), the head gets pending only if
 #   - it has been the tip of the head branch, and the pull request open
 #     since it was last reopened, for the grace time (5 minutes) when the
 #     label was set, or
@@ -71,39 +71,49 @@ name: vm-gate
 # set less than 5 minutes after a push or a reopening": look at the head
 # again and set the label again, which counts once the head is 5 minutes
 # old. The status stays when the other of the two runs (the push's and the
-# label's) finds no label afterwards. Both times and both accounts are
+# label's) finds no label afterwards. A push's own run asks the same, also
+# when its event already holds the label (#182): GitHub builds the event a
+# moment after the push, so a label set a second after the push is in it,
+# and the event alone cannot tell that label from one the push found set.
+# The records can: a label older than the push was there when the push
+# arrived and has passed the rules of #130 above, and nothing more is asked
+# of it; a label of the same second or younger is judged as on `labeled`.
+# So a push's run with the label needs the two records as well, and loses
+# the label when they cannot be read; it reads them six times before it
+# gives up, since it starts seconds after the push, and whether Renovate
+# sets a label again that its rebase lost is not established (#158), so
+# someone may have to set it by hand. Both times and both accounts are
 # GitHub's own records, none of them the commit's: the newest `labeled`
 # event of vm-tests and the newest `reopened` event in the pull request's
 # events (pull-requests: read), and the newest entry of the head branch in
 # the activity of the head repository (contents: read; public for a fork),
-# which must name this commit as what the branch points to since then. The
+# which must name this commit as what the branch points to since then. If
+# the newest event of the label says it was removed while the pull request
+# has it, the list is behind and counts as unread: an older `labeled` event
+# would date the label before the push. The
 # head repository is asked for by its id, as the pull request has it when
 # the job runs: a name can be given to another repository after the event.
 # A commit's author, committer and dates are the pusher's to choose and are
 # not read. A record that cannot be read, or that does not name this head
-# after three readings, counts as too new. What the grace time cannot see:
+# after three readings (six in a push's run that found the label), counts
+# as too new. What the grace time cannot see:
 # a page that was loaded more than 5 minutes before the click and never
 # refreshed; a head the one who set the label pushed without reading what
-# it merged (the button "Update branch"); and a label that was set so soon
-# after a push that the push's own event already holds it (GitHub builds
-# the event a moment after the push). That push counts as one that found
-# the label set: from a fork it loses the label anyway, but a push to a
-# branch of this repository that changes only the image, onto an accepted
-# commit, gets pending from its own run. The label's run then takes it
-# back, unless it is replaced as the waiting run (the pull request closed
-# and reopened at once: the run of `reopened` finds pending and leaves
-# it). Whoever can push to a branch here could set the label as well, so
-# this is a gap against a mistake, not a way in.
+# it merged (the button "Update branch"); and a label that the records
+# date before a push it was set after (the two times are seconds, taken by
+# GitHub in two places: a label of the push's own second counts as set
+# after it, an earlier second as set before it). The push's run then sets
+# pending as it did before #182, and the label's run, which makes no such
+# exception, takes it back unless it is dropped as the waiting run.
 #
 # What this protects is the result, not the run: vm-tests.yml starts on the
 # `labeled` event with the label its event holds. Its first job reads the
 # label and this status again and ends the run of a head whose label is
 # taken back here (#152), but it is the pull request's own version of that
 # job, so a pull request that rewrites it still runs that head's code once.
-# And it decides once, on the status it finds: in the gap above (the push's
-# event already holds the label, pending from the push's run, taken back by
-# the label's run) it has seen pending and lets the suites run that head to
-# the end (#180).
+# And it decides once, on the status it finds: a label that is taken away
+# after it let a run through does not stop that run (#180), as in the case
+# of the two clocks above.
 # The result of such a run does not count. That job reads vm-gate's
 # status by its text: it runs on pending and green from here and on a
 # result that vm-gate-finalize.yml wrote, the same three as accepted()
@@ -136,15 +146,15 @@ permissions:
 # an earlier run wrote; only `opened`, `synchronize` and the label's own
 # `labeled` event ever set pending, so no later event accepts that head.
 # The run of a push and the run of a label that was set right after it can
-# come in either order, or the push's run is the one dropped. If the
-# push's event did not hold the label, whichever of them finds it reads
-# the same records (#151) and decides the same, and the one that comes
-# after a removal finds no label and leaves the status that says why. If
-# the push's event already held the label (it can, for a label set a
-# second after the push), the push's run applies the rules of #130 alone
-# and the two can differ: pending from the push's run stands until the
-# label's run takes it back, and for good if that run is dropped (the
-# header names this as what remains).
+# come in either order, or one of them is dropped as the waiting run.
+# Whichever of them finds the label reads the same records (#151), and
+# they decide the same about the grace time, whether or not the push's
+# event already held the label (#182), but for a label the records date
+# before the push it was set after (the header: the push's run accepts,
+# the label's run refuses). The push's run can refuse first for a reason
+# of #130. The one that comes after a removal finds no label and leaves
+# the status that says why, so neither writes pending over the other's
+# failure.
 concurrency:
   group: vm-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -244,7 +254,15 @@ jobs:
           # (#151): the head was the tip of its branch, and the pull request
           # open, for the grace time when the label was set, or the head is
           # in this repository and the one who set the label pushed it. If
-          # not, $late says why. The label's time and account are those of
+          # not, $late says why. A label that a push found set, by its
+          # event and by the records (older than the push), is not asked:
+          # the rules of #130 are for that one. The event alone does not
+          # say so, since it also holds a label that was set a second
+          # after the push (#182); a label of the push's own second counts
+          # as set after it, and a list whose newest event of the label is
+          # its removal is behind the label and counts as unread, or an
+          # older event would pass for the label the push found. The
+          # label's time and account are those of
           # the newest `labeled` event of vm-tests, on whichever page of the
           # events it is; the push's are those of the newest entry of the
           # head branch in the activity of the head repository $head_repo
@@ -257,9 +275,10 @@ jobs:
             late=$unread
             [ -n "$head_repo" ] || return 1
             label=$(gh api --paginate "repos/$REPO/issues/$NUMBER/events?per_page=100" |
-              jq -rs '[.[][]] | ([.[] | select(.event == "labeled" and .label.name == "vm-tests")] | last) as $set
+              jq -rs '[.[][]] | ([.[] | select((.event == "labeled" or .event == "unlabeled")
+                    and .label.name == "vm-tests")] | last) as $set
                 | ([.[] | select(.event == "reopened")] | last) as $back
-                | if $set == null then empty else [($set.created_at | fromdateiso8601),
+                | if $set == null or $set.event != "labeled" then empty else [($set.created_at | fromdateiso8601),
                     (if $back == null then 0 else $back.created_at | fromdateiso8601 end),
                     ($set.actor.id // "")] | @tsv end') || return 1
             push=$(gh api -X GET "repositories/$head_repo/activity" -f ref="refs/heads/$HEAD_REF" -f per_page=1 |
@@ -269,6 +288,9 @@ jobs:
             IFS=$'\t' read -r label_at reopened_at label_by <<<"$label"
             IFS=$'\t' read -r push_at push_by <<<"$push"
             [ -n "$label_at" ] && [ -n "$push_at" ] || return 1
+            if [ "$at_push" = true ] && [ "$head_repo" = "$base_repo" ] && [ "$label_at" -lt "$push_at" ]; then
+              return 0
+            fi
             if [ "$head_repo" = "$base_repo" ] && [ -n "$label_by" ] && [ "$label_by" = "$push_by" ]; then
               return 0
             fi
@@ -281,23 +303,29 @@ jobs:
           }
           # Three readings, a pause between them, when a record is missing or
           # does not name this head yet: the run of `opened` can be faster
-          # than the lists (the unit test sets the pause to 0).
+          # than the lists (the unit test sets the pause to 0). Six for a
+          # push that found the label: its run starts right after the push,
+          # and before #182 it kept the label without reading anything.
           timely() {
-            local try
-            for try in 1 2 3; do
+            local try tries=3
+            [ "$at_push" != true ] || tries=6
+            for try in $(seq "$tries"); do
               ! measured || return 0
-              [ "$late" = "$unread" ] && [ "$try" != 3 ] || return 1
+              [ "$late" = "$unread" ] && [ "$try" != "$tries" ] || return 1
               sleep "${VM_GATE_PAUSE:-5}"
             done
           }
 
           has_label=$(labelled)
-          # Whether a push found the label set, by its event.
+          # Whether a push found the label set, by its event: also true for
+          # a label set a moment after the push, which measured() tells
+          # apart by the records.
           at_push=false
           [ "$ACTION" != synchronize ] || [ "$LABEL_AT_EVENT" != true ] || at_push=true
 
           # A push withdraws the consent the label stands for (#130). A label
-          # that was set after the push arrived is for the grace time below.
+          # that was set after the push arrived is for the grace time below,
+          # and so is one in the push's event that these rules leave.
           withdrawn=
           if [ "$at_push" = true ] && [ "$has_label" = true ]; then
             if [ "$HEAD_REPO" != "$REPO" ]; then
@@ -346,11 +374,12 @@ jobs:
             IFS=$'\t' read -r head base_repo head_repo <<<"$now"
             if [ "$head" != "$SHA" ]; then
               status failure "no VM test result for this commit: it is not the head of the pull request any more"
-            elif [ "$at_push" != true ] && ! timely; then
+            elif ! timely; then
               # The label was set after this head arrived, and too soon
               # after it for the one who set it to have seen this head
-              # (#151). A label the push found set has passed the rules
-              # above instead.
+              # (#151), also when the push's event already holds it
+              # (#182). A label that is older than the push has passed the
+              # rules above instead.
               withdraw "$late"
               status failure "$late: the label vm-tests was removed, add the label vm-tests again after review"
             else

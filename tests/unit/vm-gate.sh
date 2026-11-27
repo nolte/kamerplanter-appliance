@@ -2,12 +2,13 @@
 # Runs the scripts of .github/workflows/vm-gate.yml and
 # .github/workflows/vm-gate-finalize.yml and the script of the job consent of
 # .github/workflows/vm-tests.yml, as the workflow files hold them,
-# against a stub of gh, and checks what they decide (#145, #130, #151): the
-# label vm-tests is read from the API and not from the event, a push
+# against a stub of gh, and checks what they decide (#145, #130, #151, #182):
+# the label vm-tests is read from the API and not from the event, a push
 # withdraws it when the head is in a fork, when the push changes the pull
 # request's own version of what the VM jobs run, or when the commit before it
 # was not accepted, a label that is set too soon after someone else's push is
-# removed again, and vm-gate-finalize writes a result only on a commit that
+# removed again, also by the push's own run when its event already holds the
+# label (#182), and vm-gate-finalize writes a result only on a commit that
 # vm-gate accepted and while the label is set. Both workflows run as develop
 # has them, so a pull request never runs its own version of them: this test
 # is what runs a change to them before the merge. The job consent ends a run
@@ -138,7 +139,8 @@ case "$method $path" in
         # The activity of a repository, newest first: one line each of ref,
         # the commit it points to since, time and the account's id. The
         # repository is the one whose id the call names: 10 is this one, 20
-        # the fork someone/appliance. A list that lags answers nothing once.
+        # the fork someone/appliance. A list that lags answers nothing, once
+        # or as often as the test says.
         case $path in
             repositories/10/activity) owner=example ;;
             repositories/20/activity) owner=someone ;;
@@ -146,7 +148,13 @@ case "$method $path" in
         esac
         [ ! -e "$STATE/activity-gone" ] || exit 1
         if [ -e "$STATE/activity-fails-once" ]; then rm "$STATE/activity-fails-once"; exit 1; fi
-        if [ -e "$STATE/activity-lags" ]; then rm "$STATE/activity-lags"; echo '[]'; exit 0; fi
+        if [ -e "$STATE/activity-lags" ]; then
+            # Behind for as many readings as the file says, or for one.
+            left=$(cat "$STATE/activity-lags")
+            if [ "${left:-1}" -gt 1 ]; then echo $((left - 1)) >"$STATE/activity-lags"; else rm "$STATE/activity-lags"; fi
+            echo '[]'
+            exit 0
+        fi
         touch "$STATE/activity-$owner"
         jq -R -s --arg ref "$ref" '[split("\n")[] | select(. != "") | split("\t")
             | {ref: .[0], after: .[1], timestamp: .[2], activity_type: "push",
@@ -849,8 +857,9 @@ expect "too soon, and the label cannot be removed: failure, not pending" \
     "$(last new)"
 
 # The grace time is for a label that was set after the head arrived. A label
-# the push found set has passed the rules of #130, and a pull request that
-# changes nothing the VM tests cover needs no label.
+# the push found set, older than the push by the records, has passed the rules
+# of #130, and a pull request that changes nothing the VM tests cover needs
+# no label.
 reset vm-tests
 compare base new image/Containerfile=a2
 compare develop new image/Containerfile=a2
@@ -858,7 +867,8 @@ compare develop old image/Containerfile=a1
 had old pending "waiting"
 pushed 13:30:00 2
 gate synchronize LABEL_AT_EVENT=true
-expect "a push that found the label set: pending, whatever the times" "status new $pending" "$(log)"
+expect "a push long after the label was set: pending, as before" "status new $pending" "$(log)"
+expect "a push long after the label was set: the label stays" set "$(label)"
 
 reset vm-tests
 compare base new docs/en/index.md=a1
@@ -867,20 +877,243 @@ gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
 expect "nothing the VM tests cover, the label set a moment after the push: success, the label stays" \
     "success no change the VM tests cover set" "$(last new) $(label)"
 
-# What remains (the header of vm-gate.yml): the label was set a second after
-# a push to a branch of this repository, and the push's event already holds
-# it. The push's run applies the rules of #130 alone and sets pending; the
-# label's run after it takes that back.
-reset vm-tests
-compare base new image/Containerfile=a2
-compare develop new image/Containerfile=a2
-compare develop old image/Containerfile=a1
-had old pending "waiting"
+echo "# vm-gate.yml: a label in the push's own event that was set after the push (#182)"
+# GitHub builds the event of a push a moment after the push: a label that
+# another account set a second after it is in that event, and the push looks
+# like one that found the label set. The push's own run reads the records and
+# refuses it; before #182 it set pending and left the refusal to the label's
+# run. at_push: #7 with the label, a push that changes only image/ onto the
+# accepted commit `old`, so the rules of #130 keep the label.
+at_push() {
+    reset vm-tests
+    compare base new image/Containerfile=a2
+    compare develop new image/Containerfile=a2
+    compare develop old image/Containerfile=a1
+    had old pending "waiting"
+}
+at_push
 pushed 12:59:59 2
 gate synchronize LABEL_AT_EVENT=true
-expect "a push whose event holds a label set 1 s after it: pending from the push's run" "$pending" "$(last new)"
+expect "a push whose event holds another account's label, set 1 s after it: removed, no pending" \
+    "remove-label|status new $soon" "$(log)"
+expect "a push whose event holds another account's label, set 1 s after it: the label is gone" removed "$(label)"
 gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
-expect "the label's run after it: the label is removed, no pending" "$soon removed" "$(last new) $(label)"
+expect "the label's run after it: nothing more, the reason stays" "remove-label|status new $soon" "$(log)"
+gate unlabeled LABEL=cicd
+gate reopened LABEL_AT_EVENT=true
+expect "another label removed, and a reopening, after it: the reason stays" "remove-label|status new $soon" "$(log)"
+
+# The other order: the label's run refuses first, the push's run finds no
+# label and writes no pending over the failure.
+at_push
+pushed 12:59:59 2
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+gate synchronize LABEL_AT_EVENT=true
+expect "the label's run first, the push's run after it: one removal, the reason stays" \
+    "remove-label|status new $soon" "$(log)"
+
+# The one who pushed has seen the head: an account that sets the label right
+# after its own push (the delivery run's pushes).
+at_push
+pushed 12:59:59 1
+gate synchronize LABEL_AT_EVENT=true
+expect "a push whose event holds the pusher's own label, set 1 s after it: pending" "status new $pending" "$(log)"
+expect "a push whose event holds the pusher's own label: the label stays" set "$(label)"
+
+# The two times are whole seconds: a label of the push's own second counts as
+# set after it, one of the second before as the label the push found set.
+at_push
+pushed 13:00:00 2
+gate synchronize LABEL_AT_EVENT=true
+expect "another account's label of the push's own second: removed" "$soon removed" "$(last new) $(label)"
+
+at_push
+pushed 13:00:00 1
+gate synchronize LABEL_AT_EVENT=true
+expect "the pusher's own label of the push's own second: pending" "$pending set" "$(last new) $(label)"
+
+at_push
+pushed 13:00:01 2
+gate synchronize LABEL_AT_EVENT=true
+expect "another account's label, set 1 s before the push: pending, as before" "status new $pending" "$(log)"
+expect "another account's label, set 1 s before the push: the label stays" set "$(label)"
+
+# The push's run again, later (a re-run has the first run's event).
+at_push
+pushed 12:55:01 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a push whose event holds a label set 299 s after it: no pending" "$soon" "$(last new)"
+
+at_push
+pushed 12:55:00 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a push whose event holds a label set 300 s after it: pending" "status new $pending" "$(log)"
+
+at_push
+pushed 12:59:59 2
+labelled 13:05:00 1
+gate synchronize LABEL_AT_EVENT=true
+expect "the push's run again after the label was set once more, 5 minutes after the push: pending" \
+    "$pending set" "$(last new) $(label)"
+
+# The exemption is for the label the push found, whatever came later: a
+# reopening after the push does not make that label a new one. A label that
+# is younger than the push is measured against the reopening as on `labeled`.
+at_push
+pushed 13:30:00 2
+printf 'reopened\t\t2026-01-01T13:40:00Z\t2\n' >>"$work/state/events"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push long after the label, the pull request reopened since: pending" "$pending set" "$(last new) $(label)"
+
+at_push
+pushed 12:50:00 2
+printf 'reopened\t\t2026-01-01T12:59:30Z\t2\n' >>"$work/state/events"
+gate synchronize LABEL_AT_EVENT=true
+expect "a label 10 minutes after the push, 30 s after a reopening: no pending" "$soon removed" "$(last new) $(label)"
+
+# The list of events is behind the label: its newest event of vm-tests is the
+# removal of an older label (a withdrawal of #130), and the label that
+# another account set a second after the push is not listed yet. The older
+# `labeled` event must not pass for the label the push found set.
+at_push
+: >"$work/state/events"
+labelled 12:10:00 1
+unlabelled 12:20:00 3
+pushed 12:59:59 2
+gate synchronize LABEL_AT_EVENT=true
+expect "the events end with the label's removal while the label is set: unread, no pending" \
+    "$unread removed" "$(last new) $(label)"
+
+at_push
+: >"$work/state/events"
+labelled 12:10:00 1
+unlabelled 12:20:00 3
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the same on the label's own run: unread, no pending" "$unread removed" "$(last new) $(label)"
+
+# A head in a fork loses the label by the rules of #130, once, with their
+# reason.
+at_push
+pushed 12:59:59 2 new someone
+fork
+gate synchronize LABEL_AT_EVENT=true HEAD_REPO=someone/appliance
+expect "a fork's push whose event holds a label set 1 s after it: the reason of #130, one removal" \
+    "remove-label|status new failure a push from a fork: $again" "$(log)"
+
+# The exemption is for a head in this repository, by the ids the pull request
+# has when the job runs: the fork rule of #130 goes by the name in the event,
+# which can be this repository's while the head is in another one. Here the
+# label is a second older than the fork's push, so only the comparison of the
+# ids in measured() keeps it from the exemption: without it this case comes
+# out pending (traced against the stub, where pulls/7 answers the ids 10 and
+# 20 and the activity of 20 names `new` since 13:00:01; not run locally).
+at_push
+pushed 13:00:01 2 new someone
+fork
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with an older label, the head in another repository by its id: no exemption, no pending" \
+    "$soon removed" "$(last new) $(label)"
+
+# The rules of #130 come first and give their own reason; the label is
+# removed once.
+at_push
+compare base new tests/boot/run.sh=n2
+compare develop new tests/boot/run.sh=n2
+compare develop old tests/boot/run.sh=n1
+pushed 12:59:59 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a push that changes tests/boot/, a label set 1 s after it: the reason of #130, one removal" \
+    "remove-label|status new failure a push that changes what the VM tests run: $again" "$(log)"
+
+# Whether the label is older than the push is read from the records, so a
+# push's run with the label needs them: what cannot be read counts as too new.
+at_push
+touch "$work/state/activity-gone"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity cannot be read: removed, no pending" \
+    "remove-label|status new $unread" "$(log)"
+
+at_push
+touch "$work/state/events-gone"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the events cannot be read: no pending" "$unread removed" "$(last new) $(label)"
+
+at_push
+pushed 13:10:00 2 newer
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity names another commit as the tip: no pending" "$unread" "$(last new)"
+
+at_push
+touch "$work/state/activity-lags"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity lags once: pending" "status new $pending" "$(log)"
+
+at_push
+touch "$work/state/activity-fails-once"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity cannot be read once: pending" "status new $pending" "$(log)"
+
+# Six readings for a push that found the label, three for the others.
+at_push
+echo 5 >"$work/state/activity-lags"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity behind for five readings: pending" "status new $pending" "$(log)"
+
+at_push
+echo 6 >"$work/state/activity-lags"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with the label, the activity behind for six readings: no pending" "$unread removed" "$(last new) $(label)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+echo 2 >"$work/state/activity-lags"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label's run, the activity behind for two readings: pending" "status new $pending" "$(log)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+echo 3 >"$work/state/activity-lags"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label's run, the activity behind for three readings: no pending" "$unread removed" "$(last new) $(label)"
+
+# Not asked at all: a run whose commit is not the head any more, and a pull
+# request that changes nothing the VM tests cover.
+at_push
+pushed 12:59:59 2
+echo newer >"$work/state/head"
+gate synchronize LABEL_AT_EVENT=true
+expect "a label set 1 s after a push that is not the head any more: the label stays" "$moved set" "$(last new) $(label)"
+
+reset vm-tests
+compare base new docs/a.md=d1
+compare develop new docs/a.md=d1
+compare develop old docs/a.md=d1
+had old success "no change the VM tests cover"
+pushed 12:59:59 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a label set 1 s after a push that changes nothing covered: success, the label stays" \
+    "success no change the VM tests cover set" "$(last new) $(label)"
+
+at_push
+pushed 12:59:59 2
+touch "$work/state/label-stays"
+gate synchronize LABEL_AT_EVENT=true
+expect "a label set 1 s after the push that cannot be removed: the run fails" 1 "$code"
+expect "a label set 1 s after the push that cannot be removed: failure, not pending" \
+    "failure the label was set less than 5 minutes after a push or a reopening: the label vm-tests could not be removed, remove it by hand" \
+    "$(last new)"
+
+# The script as it was before #182 (a push that found the label set is not
+# asked) must come out differently on the first case, or the cases above
+# would not tell the two apart.
+# shellcheck disable=SC2016  # the script's own variable, not this one's
+sed 's/elif ! timely; then/elif [ "$at_push" != true ] \&\& ! timely; then/' "$work/vm-gate.sh" >"$work/changed.sh"
+gate_script=$work/changed.sh
+at_push
+pushed 12:59:59 2
+gate synchronize LABEL_AT_EVENT=true
+expect "the script without the grace time on a push's event: pending from the push's run" "$pending" "$(last new)"
+gate_script=$work/vm-gate.sh
 
 # The run of the label's event waited while the head moved on: the label is
 # not this commit's to lose.
