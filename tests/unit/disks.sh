@@ -993,6 +993,12 @@ retire_with() {  # retire_with CASE [ROLE]: exit status|naming file|records|upda
             stored-credential) echo /dev/disk/by-id/virtio-b >"$sb/credstore/kamerplanter.backup-disk" ;;
             user-file) rm "$records/data.env"; echo BACKUP_DISK=/dev/disk/by-id/virtio-b >"$user" ;;
             twice) (cmd_retire backup) >/dev/null 2>&1 ;;
+            # Another program holds the lock of the update actions: a lock
+            # belongs to the open file, so descriptor 7 refuses cmd_retire's 8.
+            update-running) exec 7>"$update_state/.lock"; flock -n 7 ;;
+            # Read line by line, this name would delete d2, the record of the
+            # backup on the data disk, and leave the record itself (#168).
+            newline-name) printf 'LOCATION=backup-disk\n' >"$update_backups/"$'d3\nd2' ;;
             guard) systemctl() { echo activating; } ;;
             health) systemctl() { echo active; } ;;
             left-mounted)
@@ -1018,7 +1024,13 @@ expect "retire: the backup disk's naming, backup records, record and key go; the
 expect "retire: run again, there is nothing left to retire" \
     "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|no backup disk is set up or named; nothing to retire" \
     "$(retire_with twice)"
+expect "retire: a backup record whose name holds a newline goes as one record; the data disk's stays (#168)" \
+    "0|DATA_DISK=/dev/disk/by-id/virtio-a|data.env|d2|data.key|the next pre-update backup goes to the next location that may take it (see: kamerplanter-update status)" \
+    "$(retire_with newline-name)"
 unchanged="DATA_DISK=/dev/disk/by-id/virtio-a,BACKUP_DISK=/dev/disk/by-id/virtio-b,BACKUP_DISK_FORCE=1|backup.env,data.env|d1,d2|backup.key,data.key"
+expect "retire: refused while an update action holds its lock, nothing changed" \
+    "1|$unchanged|an update action is running; retire the backup disk once it is done" \
+    "$(retire_with update-running)"
 expect "retire: refused while an update is not decided, nothing changed" \
     "1|$unchanged|an update is not decided yet (see: kamerplanter-update status), and its return would restore the backup taken before it; retire the backup disk once it is decided" \
     "$(retire_with pending)"

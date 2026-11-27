@@ -2345,13 +2345,15 @@ retire_sources() {
 }
 
 # disk_backups: the pre-update backups the update tool records on the backup
-# disk (LOCATION=backup-disk in its records, update_backups), one name per
-# line. Once the disk is retired they can never be restored.
+# disk (LOCATION=backup-disk in its records, update_backups), each name ended
+# by a NUL: a name is taken from the directory as it is, and a file name may
+# hold a newline (#168), so the caller reads them into an array through list.
+# Once the disk is retired they can never be restored.
 disk_backups() {
     local rec
     for rec in "$update_backups"/*; do
         [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-        if [ "$(record_field LOCATION "$rec")" = backup-disk ]; then echo "${rec##*/}"; fi
+        if [ "$(record_field LOCATION "$rec")" = backup-disk ]; then printf '%s\0' "${rec##*/}"; fi
     done
 }
 
@@ -2375,7 +2377,7 @@ cmd_retire() {
     fi
     # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
     . /usr/lib/kamerplanter/env.sh
-    local why sources d targets
+    local why sources d targets backups
     # The lock of the update actions (kamerplanter-update, update_lock) first,
     # never waited for: no update action writes, restores or deletes a backup
     # on the disk meanwhile.
@@ -2414,8 +2416,15 @@ cmd_retire() {
         exit 1
     fi
     load "$naming_file"
+    # Read once, for the check and for the deletion below: the lock of the
+    # update actions is held, and the guard, which writes its backup without
+    # that lock, was found not running above and starts only at a boot.
+    list backups disk_backups || {
+        echo "the records of the pre-update backups in $update_backups could not be listed; nothing is changed" >&2
+        exit 1
+    }
     if [ ! -e "$record" ] && [ -z "$(get "$key")$(get "${key}_FORCE")" ] && [ ! -e "$key_store" ] &&
-        [ -z "$(disk_backups)" ] && ! mountpoint -q "$mnt" && [ ! -b "$mapper" ]; then
+        [ "${#backups[@]}" -eq 0 ] && ! mountpoint -q "$mnt" && [ ! -b "$mapper" ]; then
         echo "no backup disk is set up or named; nothing to retire"
         return 0
     fi
@@ -2441,10 +2450,10 @@ cmd_retire() {
             exit 1
         }
     fi
-    while IFS= read -r d; do
+    for d in "${backups[@]}"; do
         rm -f -- "${update_backups:?}/${d:?}"
         log_event backup-forgotten "the record of the pre-update backup $d on the disk; that backup can no longer be restored"
-    done < <(disk_backups)
+    done
     if [ -d "$update_backups" ]; then sync "$update_backups"; fi
     if [ -e "$record" ]; then rm -f -- "$record"; fi
     sync "$records"
