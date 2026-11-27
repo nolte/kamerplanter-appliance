@@ -113,10 +113,73 @@ def grants(job, doc, scope):
 # on `context=` finds only the workflows that say so.
 # Calls that set or remove a label, as gh, the REST API or github-script
 # spell them. A text check: it keeps an honest change from adding one
-# unnoticed, not a pull request that rewrites this file as well.
-ADDS_LABEL = (r"--add-label|addLabels|setLabels|labels\[\]="
-              r"|(-X|--method)[\s=]+(POST|PUT)\b[^\n]*/labels\b")
-REMOVES_LABEL = r"--remove-label|removeLabel|removeAllLabels|(-X|--method)[\s=]+DELETE\b[^\n]*/labels\b"
+# unnoticed, not a pull request that rewrites this file as well. It reads
+# what the jobs of this repository's workflows execute; what a reusable
+# workflow or an action does inside, and what an app outside the workflows
+# does (Renovate, by renovate.json5), is not in these files.
+ADDS_LABEL = r"--add-label|addLabels|setLabels|labels\[\]="
+REMOVES_LABEL = r"--remove-label|removeLabel|removeAllLabels"
+METHOD = r"(?:-X|--method|--request)[ \t=]*[\"']?([A-Za-z]+)"
+# What makes a call without a method a POST: the fields of gh api, the data
+# of curl.
+FIELDS = r"(?<![\w-])(?:-[fFd]|--field|--raw-field|--input|--data(?:-[a-z]+)?|--json)(?![\w-])"
+# The only removal there is: vm-gate.yml takes the label vm-tests away.
+THE_REMOVAL = '-X DELETE "repos/$REPO/issues/$NUMBER/labels/vm-tests"'
+
+
+def label_calls(text):
+    # The logical lines of a script that set a label, and those that remove
+    # one. A call of the REST API on a path .../labels counts by its
+    # method, wherever on the line it stands; without one it sets a label
+    # as soon as it sends fields, as gh api and curl do it.
+    adds, removes = [], []
+    for line in re.sub(r"\\\n[ \t]*", " ", text).splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if re.search(ADDS_LABEL, line):
+            adds.append(line.strip())
+        if re.search(REMOVES_LABEL, line):
+            removes.append(line.strip())
+        if re.search(r"/labels\b", line):
+            methods = {m.upper() for m in re.findall(METHOD, line)}
+            if methods & {"POST", "PUT", "PATCH"} or (not methods and re.search(FIELDS, line)):
+                adds.append(line.strip())
+            if "DELETE" in methods:
+                removes.append(line.strip())
+    return adds, removes
+
+
+# The rule against its own sample (#167: a POST without -X and a method
+# after the path were not seen).
+label_sample = (
+    ('gh api "repos/$REPO/issues/$NUMBER/labels" -f "labels[]=vm-tests"', "adds"),
+    ('gh api "repos/$REPO/issues/$NUMBER/labels" -f name=vm-tests', "adds"),
+    ('gh api "repos/$REPO/issues/$NUMBER/labels" --input labels.json', "adds"),
+    ('gh api "repos/$REPO/issues/$NUMBER/labels" \\\n  -X POST', "adds"),
+    ('gh api --method=PUT "repos/$REPO/issues/$NUMBER/labels"', "adds"),
+    ('curl -d @labels.json "$API/issues/$NUMBER/labels"', "adds"),
+    ('gh pr edit "$NUMBER" --add-label vm-tests', "adds"),
+    ('gh api "repos/$REPO/issues/$NUMBER/labels/vm-tests" -X DELETE', "removes"),
+    ('gh api --method DELETE "repos/$REPO/issues/$NUMBER/labels"', "removes"),
+    ('gh pr edit "$NUMBER" --remove-label vm-tests', "removes"),
+    ('gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" --jq ".[].name"', "reads"),
+    ('gh api --paginate "repos/$REPO/issues/$NUMBER/labels"', "reads"),
+    ('# gh api "repos/$REPO/issues/$NUMBER/labels" -f name=vm-tests', "reads"),
+    ('gh api -X POST "repos/$REPO/statuses/$SHA" -f context=vm-gate', "reads"),
+)
+wrong = []
+for call, expected in label_sample:
+    adds, removes = label_calls(call)
+    found = "adds" if adds and not removes else "removes" if removes and not adds else \
+        "reads" if not adds and not removes else "both"
+    if found != expected:
+        wrong.append(f"{call!r} {found}, not {expected}")
+if wrong:
+    print(f"FAIL the rule for the calls that set or remove a label reads {'; '.join(wrong)}")
+else:
+    print("ok the rule for the calls that set or remove a label tells a POST without a method, "
+          "a method after the path and a read apart")
+
 branch_writers = 0
 for path in sorted(workflows.glob("*.y*ml")):
     doc = yaml.safe_load(path.read_text()) or {}
@@ -138,18 +201,26 @@ for path in sorted(workflows.glob("*.y*ml")):
         # The label vm-tests is a consent (a person's, or Renovate's by
         # renovate.json5): no workflow sets it, and only vm-gate.yml takes
         # it away.
-        text = scripts(job)
-        labelers = [str(s.get("uses")) for s in ((job or {}).get("steps") or [])
-                    if re.search(r"label", str(s.get("uses", "")), re.I)]
-        if re.search(ADDS_LABEL, text) or labelers:
+        adds, removes = label_calls(scripts(job))
+        # An action or a reusable workflow that is a labeler by its name,
+        # as a step or as the job itself.
+        labelers = [str(u) for u in [(job or {}).get("uses")] + [s.get("uses") for s in ((job or {}).get("steps") or [])]
+                    if re.search(r"label", str(u or ""), re.I)]
+        if adds or labelers:
             print(f"FAIL {path.name}: the job {job_id} sets a label; no workflow may set vm-tests")
-        if re.search(REMOVES_LABEL, text) and path.name != "vm-gate.yml":
-            print(f"FAIL {path.name}: the job {job_id} removes a label; only vm-gate.yml removes vm-tests")
+        # vm-gate.yml removes one label, in one call; any other removal,
+        # there as well, is one too many.
+        if path.name == "vm-gate.yml":
+            removes = [line for line in removes if THE_REMOVAL not in line]
+        if removes:
+            print(f"FAIL {path.name}: the job {job_id} removes a label; only vm-gate.yml removes "
+                  "one, and only vm-tests")
         # A workflow that runs as develop has it holds develop's token on a
-        # pull request's event. Writing to the pull request is for
-        # vm-gate.yml, which removes the label, and for the call of
-        # automerge's reusable workflow.
-        if not foreign and path.name != "vm-gate.yml" and str((job or {}).get("uses", "")) != automerge_uses:
+        # pull request's event, also when other events start it as well.
+        # Writing to the pull request is for vm-gate.yml, which removes the
+        # label, and for the call of automerge's reusable workflow.
+        if set(on) & AS_DEVELOP and path.name != "vm-gate.yml" and \
+                str((job or {}).get("uses", "")) != automerge_uses:
             for scope in ("pull-requests", "issues"):
                 if grants(job, doc, scope) is not False:
                     print(f"FAIL {path.name}: the job {job_id} runs as develop has it and may write "
@@ -178,10 +249,10 @@ else:
     print("FAIL vm-gate.yml decides on the labels of the event (only LABEL_AT_EVENT, in the "
           "condition on synchronize, may hold them)")
 # #130: removing the label is what pull-requests: write is there for.
-if re.search(r'-X DELETE "repos/\$REPO/issues/\$NUMBER/labels/vm-tests"', gate_script):
-    print("ok vm-gate.yml removes the label vm-tests")
+if gate_script.count(THE_REMOVAL) == 1:
+    print("ok vm-gate.yml removes the label vm-tests, in one call")
 else:
-    print("FAIL vm-gate.yml does not remove the label vm-tests")
+    print(f"FAIL vm-gate.yml removes the label vm-tests in {gate_script.count(THE_REMOVAL)} calls, not in one")
 gate_perms = gate_job.get("permissions", gate_doc.get("permissions")) or {}
 if gate_perms == {"contents": "read", "pull-requests": "write", "statuses": "write"}:
     print("ok vm-gate.yml may write the pull request and commit statuses, and nothing else")
@@ -189,12 +260,23 @@ else:
     print(f"FAIL vm-gate.yml's permissions are {gate_perms}: beyond reading, only pull-requests "
           "(the label) and statuses")
 # The finalizer writes only after it has read what vm-gate.yml said about
-# the commit and whether the label is still set.
-finalize_script = scripts(yaml.safe_load((workflows / "vm-gate-finalize.yml").read_text())["jobs"]["finalize"])
+# the commit and whether the label is still set. The order of the text, with
+# the comments left out, and one write only: that the script acts on what it
+# read is what tests/unit/vm-gate.sh runs it for (no status, a failure of
+# vm-gate.yml, the label removed after the lookup: nothing written).
+finalize_script = "\n".join(
+    line for line in scripts(yaml.safe_load((workflows / "vm-gate-finalize.yml").read_text())["jobs"]["finalize"]).splitlines()
+    if not line.lstrip().startswith("#"))
+writes = len(re.findall(r"/statuses/", finalize_script))
 write = finalize_script.find('-X POST "repos/$REPO/statuses/$SHA"')
-for what, call in (("vm-gate's status of the commit", 'gh api "repos/$REPO/commits/$SHA/statuses'),
-                   ("the pull request's labels", 'gh api "repos/$REPO/issues/$number/labels')):
-    if 0 <= finalize_script.find(call) < write:
+if writes == 1 and write >= 0:
+    print("ok vm-gate-finalize.yml writes a commit status in one place")
+else:
+    print(f"FAIL vm-gate-finalize.yml names a path to write a commit status {writes} times, not once")
+for what, call in (("vm-gate's status of the commit", r'gh api (--paginate )?"repos/\$REPO/commits/\$SHA/statuses'),
+                   ("the pull request's labels", r'gh api "repos/\$REPO/issues/\$number/labels')):
+    read = re.search(call, finalize_script)
+    if read and read.start() < write:
         print(f"ok vm-gate-finalize.yml reads {what} from the API before it writes the result")
     else:
         print(f"FAIL vm-gate-finalize.yml writes the result without reading {what} from the API first")
