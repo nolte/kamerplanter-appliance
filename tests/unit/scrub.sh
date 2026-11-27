@@ -139,7 +139,8 @@ exists() { [ -e "$1" ] || [ -L "$1" ] && echo yes || echo no; }
 # The cases that take a directory's mode away (chmod 0000, 0500) rest on the
 # mode stopping this user. It does not stop root, or anyone who may override
 # it (CAP_DAC_OVERRIDE): measured here, and those cases are skipped then, by
-# name, instead of failing for a reason that is not the scrub's (#155).
+# name, instead of failing for a reason that is not the scrub's (#155). In CI
+# a skipped case fails the file at its end (#173).
 mkdir "$work/mode-probe"
 chmod 0000 "$work/mode-probe"
 if ls "$work/mode-probe" >/dev/null 2>&1; then modes_bind=''; else modes_bind=yes; fi
@@ -559,6 +560,19 @@ expect "seed files: the scrub succeeds and leaves them as they are" "0|$seed_bef
     "$(run_scrub)|$(md5sum <"$SB/var/lib/cloud/seed/nocloud/user-data")|$(exists "$SB/var/lib/cloud/seed/nocloud/meta-data")"
 expect "seed files: the warning names the file, the copies are gone" "yes|none" \
     "$(has "warning: the seed file $SB/var/lib/cloud/seed/nocloud/user-data holds provisioned secrets" "$(out)")|$(found "$SB/var/lib/cloud/instances" "$SB/run/cloud-init" "$SB"/var/log/cloud-init*.log)"
+# A directory among the seed files whose file system cannot be told (stat
+# fails on it; the stubs of stat are below, with the other cases of a file
+# system): one more warning, and nothing fails.
+new_appliance
+booted iid-1
+user_data >"$SB/var/lib/cloud/seed/nocloud/user-data"
+mkdir -p "$SB/stub"
+# shellcheck disable=SC2016 # expanded by the stub, not here
+printf '#!/usr/bin/env bash\ncase "${!#}" in */seed/nocloud) exit 1 ;; esac\nexec %q "$@"\n' "$(command -v stat)" >"$SB/stub/stat"
+chmod +x "$SB/stub/stat"
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "seed files: a directory whose file system cannot be told is warned about, the scrub succeeds" "0|1|none" \
+    "$rc|$(grep -cF "warning: the file system of $SB/var/lib/cloud/seed/nocloud cannot be told; whether every seed file in it is looked into is not known" "$SB/out")|$(found "$SB/var/lib/cloud/instances" "$SB/run/cloud-init" "$SB"/var/log/cloud-init*.log)"
 
 # --- symbolic links are never followed ---
 # A link that is no copy and in no place the scrub enters: the file it points
@@ -674,6 +688,24 @@ else
     expect "a search that fails: the scrub names the one cause once, by its first place, the logs are scrubbed all the same" "1|1|none" \
         "$(grep -cF "cannot be searched (see find's message)" "$SB/out")|$(grep -cF "$SB/var/lib/cloud/instances cannot be searched" "$SB/out")|$(found "$SB"/var/log/cloud-init*.log)"
 fi
+# A second directory that cannot be read, outside the instances, is another
+# cause: /var/lib/cloud is named as well, once, as failing outside the place
+# that is named already (#173).
+new_appliance
+booted iid-1
+locked=$SB/var/lib/cloud/instances/iid-locked
+other_locked=$SB/var/lib/cloud/data/locked
+mkdir -p "$locked" "$other_locked"
+user_data >"$locked/user-data.txt"
+if [ -z "$modes_bind" ]; then
+    skipped "a search that fails: two directories that cannot be read, in two places"
+else
+    chmod 0000 "$locked" "$other_locked"
+    rc=$(run_scrub)
+    chmod 0700 "$locked" "$other_locked"
+    expect "a search that fails: two directories that cannot be read, in two places: each place is named once, the copies are kept, the scrub fails" "1|2|1|1|$all_kept" \
+        "$rc|$(grep -cF "cannot be searched" "$SB/out")|$(grep -cF "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted" "$SB/out")|$(grep -cF "$SB/var/lib/cloud cannot be searched outside $SB/var/lib/cloud/instances either (see find's message); what could not be read there is neither scrubbed nor deleted" "$SB/out")|$(kept_copies)"
+fi
 # The same without anything learned: the directory may hold copies, so the
 # scrub fails all the same.
 new_appliance
@@ -694,13 +726,18 @@ fi
 # directory: the scrub tells the file system by it. What is checked is that
 # such a directory is named and keeps the copies; that find does not enter a
 # real one is find's own.
-# stub_stat PATTERN: a stat in $SB/stub that gives a device number of its own
-# for a file that matches PATTERN (a case pattern) and runs the real one
-# otherwise.
+# stub_stat PATTERN [FROM]: a stat in $SB/stub that gives a device number of
+# its own for a file that matches PATTERN (a case pattern), from the FROM-th
+# time it is asked for such a file on (1 when not given: always), and runs the
+# real one otherwise. The scrub asks for /var/lib/cloud/data once when it
+# looks for directories on another file system, and once more when it hands
+# out the status and result of an instance whose secrets are unknown.
 stub_stat() {
     mkdir -p "$SB/stub"
+    : >"$SB/stub/stat-calls"
     # shellcheck disable=SC2016 # expanded by the stub, not here
-    printf '#!/usr/bin/env bash\ncase "${!#}" in %s) echo 4242; exit 0 ;; esac\nexec %q "$@"\n' "$1" "$(command -v stat)" >"$SB/stub/stat"
+    printf '#!/usr/bin/env bash\ncase "${!#}" in %s)\n    echo asked >>%q\n    if [ "$(wc -l <%q)" -ge %q ]; then echo 4242; exit 0; fi ;;\nesac\nexec %q "$@"\n' \
+        "$1" "$SB/stub/stat-calls" "$SB/stub/stat-calls" "${2:-1}" "$(command -v stat)" >"$SB/stub/stat"
     chmod +x "$SB/stub/stat"
 }
 # In place of an instance directory: named and kept always, like a link.
@@ -738,44 +775,92 @@ booted iid-1
 stub_stat '*/no-such-directory'
 expect "another file system: none, the scrub succeeds and names none" "0|no" \
     "$(PATH=$SB/stub:$PATH run_scrub)|$(has "another file system" "$(out)")"
+# unreadable_copies: makes iid-1 an instance none of whose copies can be read,
+# with nothing learned from this boot either: its secrets are unknown, so the
+# logs go and the status and result are handed out. Sets i to its directory.
+unreadable_copies() {
+    rm -rf "${SB:?}/run"
+    i=$SB/var/lib/cloud/instances/iid-1
+    printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+    printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
+    mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+}
 # No copy can be read and /var/lib/cloud/data is on another file system: the
 # status and result in it are not rewritten, as nothing else in it is; it is
-# named, the copies stay, the scrub fails (#155).
+# named, once, the copies stay, the scrub fails (#155).
 new_appliance
 booted iid-1
-rm -rf "$SB/run"
-i=$SB/var/lib/cloud/instances/iid-1
-printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
-printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
-mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+unreadable_copies
 status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
 stub_stat '*/var/lib/cloud/data'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
-expect "another file system: /var/lib/cloud/data on one, no copy can be read: the status in it is not rewritten, it is named, the copies are kept, the scrub fails" "1|$status_before|no|yes|yes|yes" \
-    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "error messages replaced in" "$(out)")|$(has "$SB/var/lib/cloud/data is on another file system than the directory it is in; the provisioned secrets in it are not scrubbed" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")"
-# stub_stat_fails PATTERN [COMMAND]: a stat in $SB/stub that fails for a file
-# that matches PATTERN (a case pattern), after running COMMAND, and runs the
-# real one otherwise.
+expect "another file system: /var/lib/cloud/data on one, no copy can be read: the status in it is not rewritten, it is named, the copies are kept, the scrub fails" "1|$status_before|no|1|yes|yes|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "error messages replaced in" "$(out)")|$(grep -cF "$SB/var/lib/cloud/data is on another file system" "$SB/out")|$(has "$SB/var/lib/cloud/data is on another file system than the directory it is in; the provisioned secrets in it are not scrubbed" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")"
+# The same when /var/lib/cloud/data shows as another file system only by the
+# time the status and result are handed out: it is not among the directories
+# named before, so it is named there, once (#173).
+new_appliance
+booted iid-1
+unreadable_copies
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+stub_stat '*/var/lib/cloud/data' 2
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: /var/lib/cloud/data on one only when the status is handed out: the status is not rewritten, it is named once, the copies are kept, the scrub fails" "1|$status_before|no|1|1|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "error messages replaced in" "$(out)")|$(grep -cF "is on another file system" "$SB/out")|$(grep -cF "$SB/var/lib/cloud/data is on another file system than the directory it is in; the error messages in cloud-init's status and result in it are not replaced" "$SB/out")|$(exists "$i/cloud-config.txt")"
+# stub_stat_fails PATTERN [COMMAND [FROM]]: a stat in $SB/stub that fails for
+# a file that matches PATTERN (a case pattern), after running COMMAND, from
+# the FROM-th time it is asked for such a file on (1 when not given: always),
+# and runs the real one otherwise.
 stub_stat_fails() {
     mkdir -p "$SB/stub"
+    : >"$SB/stub/stat-calls"
     # shellcheck disable=SC2016 # expanded by the stub, not here
-    printf '#!/usr/bin/env bash\ncase "${!#}" in %s) %s; exit 1 ;; esac\nexec %q "$@"\n' "$1" "${2:-:}" "$(command -v stat)" >"$SB/stub/stat"
+    printf '#!/usr/bin/env bash\ncase "${!#}" in %s)\n    echo asked >>%q\n    if [ "$(wc -l <%q)" -ge %q ]; then %s; exit 1; fi ;;\nesac\nexec %q "$@"\n' \
+        "$1" "$SB/stub/stat-calls" "$SB/stub/stat-calls" "${3:-1}" "${2:-:}" "$(command -v stat)" >"$SB/stub/stat"
     chmod +x "$SB/stub/stat"
 }
 # The file system of /var/lib/cloud/data cannot be told: the status is not
-# rewritten either, and that is named.
+# rewritten either. The one cause is named once, as a file system that cannot
+# be told, not as a search that failed: find printed nothing (#170).
 new_appliance
 booted iid-1
-rm -rf "$SB/run"
-i=$SB/var/lib/cloud/instances/iid-1
-printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
-printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
-mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+unreadable_copies
 status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
 stub_stat_fails '*/var/lib/cloud/data'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
-expect "another file system: that of /var/lib/cloud/data cannot be told, no copy can be read: the status is not rewritten, that is named, the copies are kept, the scrub fails" "1|$status_before|yes|yes" \
-    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "the file system of $SB/var/lib/cloud/data cannot be told; the error messages in cloud-init's status and result in it are not replaced" "$(out)")|$(exists "$i/cloud-config.txt")"
+expect "another file system: that of /var/lib/cloud/data cannot be told, no copy can be read: the status is not rewritten, that is named once and as no failed search, the copies are kept, the scrub fails" "1|$status_before|1|1|no|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud/data cannot be told; whether everything in it was searched is not known, and nothing in it counts as scrubbed" "$SB/out")|$(has "cannot be searched" "$(out)")|$(exists "$i/cloud-config.txt")"
+# It cannot be told only by the time the status and result are handed out:
+# named there, once.
+new_appliance
+booted iid-1
+unreadable_copies
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+stub_stat_fails '*/var/lib/cloud/data' : 2
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: that of /var/lib/cloud/data cannot be told only when the status is handed out: the status is not rewritten, that is named once, the copies are kept, the scrub fails" "1|$status_before|1|1|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "whether $SB/var/lib/cloud/data is on another file system cannot be told; the error messages in cloud-init's status and result in it are not replaced" "$SB/out")|$(exists "$i/cloud-config.txt")"
+# A /var/lib/cloud/data that is gone by the time the status and result are
+# handed out holds none: no failure, as for a directory that is gone when the
+# directories on another file system are looked for (#170). The stub moves it
+# away when asked the second time: for the scrub it is gone, as a deleted one
+# is, and what was in it is not looked at here.
+new_appliance
+booted iid-1
+unreadable_copies
+# shellcheck disable=SC2016 # expanded by the stub, not here
+stub_stat_fails '*/var/lib/cloud/data' 'mv -- "${!#}" "${!#}.moved"' 2
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a /var/lib/cloud/data that is gone when the status is handed out: no failure, the scrub succeeds, the copies go" "0|no|no|no|no" \
+    "$rc|$(exists "$SB/var/lib/cloud/data")|$(has "cannot be told" "$(out)")|$(has "cannot be searched" "$(out)")|$(exists "$i/cloud-config.txt")"
+# The file system of /var/lib/cloud itself cannot be told: no directory below
+# it is compared. Named once, by /var/lib/cloud.
+new_appliance
+booted iid-1
+stub_stat_fails '*/var/lib/cloud/'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "the file system of /var/lib/cloud cannot be told: the scrub fails, names it once and as no failed search, keeps the copies" "1|1|1|no|$all_kept" \
+    "$rc|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud cannot be told; whether everything in it was searched is not known, and nothing in it counts as scrubbed" "$SB/out")|$(has "cannot be searched" "$(out)")|$(kept_copies)"
 # A directory that is gone between the search and the question for its file
 # system is on none: no failure (#155). The stub removes it when asked.
 new_appliance
@@ -786,15 +871,26 @@ stub_stat_fails '*/instances/iid-gone' 'rmdir -- "${!#}"'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
 expect "a directory that is gone when its file system is asked for: no failure, the scrub succeeds, the copies go" "0|no|no|no" \
     "$rc|$(exists "$SB/var/lib/cloud/instances/iid-gone")|$(has "cannot be searched" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
+# So is a place the directories on another file system are looked for in, such
+# as /var/lib/cloud/instances. The stub moves it away when asked.
+new_appliance
+booted iid-1
+# shellcheck disable=SC2016 # expanded by the stub, not here
+stub_stat_fails '*/var/lib/cloud/instances' 'mv -- "${!#}" "${!#}.moved"'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a place that is gone when its file system is asked for: no failure, the scrub succeeds" "0|no|no|no" \
+    "$rc|$(exists "$SB/var/lib/cloud/instances")|$(has "cannot be told" "$(out)")|$(has "cannot be searched" "$(out)")"
 # One that is still there but whose file system cannot be told is a failure:
-# named once, the copies stay.
+# named once, though two searches meet it, as a file system that cannot be
+# told and not as a search that failed, which find would have named (#170).
+# The copies stay.
 new_appliance
 booted iid-1
 mkdir -p "$SB/var/lib/cloud/instances/iid-untold"
 stub_stat_fails '*/instances/iid-untold'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
-expect "a directory whose file system cannot be told: the scrub fails, names the place once, keeps the copies" "1|1|$all_kept" \
-    "$rc|$(grep -cF "cannot be searched (see find's message)" "$SB/out")|$(kept_copies)"
+expect "a directory whose file system cannot be told: the scrub fails, names it once and as no failed search, keeps the copies" "1|1|1|no|$all_kept" \
+    "$rc|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud/instances/iid-untold cannot be told; whether everything in it was searched is not known, and nothing in it counts as scrubbed" "$SB/out")|$(has "cannot be searched" "$(out)")|$(kept_copies)"
 
 # --- an instance with nothing but an obj.pkl: its secrets are not known (#120) ---
 # The pickle is not read, so nothing is learned from the instance: the logs
@@ -1266,6 +1362,14 @@ expect "nothing outside the sandbox was touched: every file the scrub wrote lies
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
+    exit 1
+fi
+# A skipped case is a case that did not run. On a notebook, as root, that is
+# said and passes; in CI (GitHub sets CI and GITHUB_ACTIONS) it fails the
+# file: the job of ci.yml that runs it is not root, so a skip there means the
+# cases of a failing search, deletion or rewrite are no longer checked (#173).
+if [ "$skips" -gt 0 ] && [ -n "${CI:-}${GITHUB_ACTIONS:-}" ]; then
+    echo "$skips case(s) skipped: in CI every case has to run"
     exit 1
 fi
 if [ "$skips" -gt 0 ]; then echo "all checks passed, $skips case(s) skipped"; else echo "all checks passed"; fi
