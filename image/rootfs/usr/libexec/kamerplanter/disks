@@ -540,10 +540,12 @@ system_data() {
 # read through list (/usr/lib/kamerplanter/env.sh), which keeps find's exit
 # status: in a command substitution it is lost, and a directory that could
 # not be read would pass for an empty one (#169; the pre-commit hook
-# no-find-in-command-substitution refuses that form).
+# no-find-in-command-substitution refuses that form). An entry that goes
+# while the search runs is no failure (-ignore_readdir_race, as in
+# backup_entries): system_data may read a directory that is in use.
 filled() {
     local first=()
-    list first find "$1" -mindepth 1 -maxdepth 1 -print0 -quit || return 2
+    list first find "$1" -ignore_readdir_race -mindepth 1 -maxdepth 1 -print0 -quit || return 2
     [ ${#first[@]} -gt 0 ]
 }
 
@@ -792,13 +794,13 @@ roots() {
     local path kname below
     while read -r path kname; do
         [ -n "$kname" ] && [ ! -e "/sys/class/block/$kname/partition" ] || continue
-        # A device whose slaves could not be listed counts as built on
-        # nothing, on purpose: lsblk lists what it is built on as rows of
-        # their own, so this only adds a name. The one reader, system_device,
-        # looks for a name the disk and the running system share, and a
-        # device both are built on stands above a whole disk both share: an
-        # added name refuses no disk that would be used, and lets none through.
-        list below find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || below=()
+        # This search fails on every device today, and the test for a
+        # partition above never finds one: with -p lsblk prints KNAME as a
+        # path (/dev/sdb), so neither path exists in sysfs, and every row of
+        # the tree is printed (#185). The status of the search says nothing
+        # here, so it is dropped and the result kept as it was (what the
+        # search did print decides, as before) until #185 decides it.
+        list below find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
         [ ${#below[@]} -eq 0 ] || continue
         echo "$path"
     done < <(lsblk -nrspo NAME,KNAME -- "$1") | sort -u
@@ -841,12 +843,12 @@ in_use() {
         at=$(findmnt -rno TARGET -S "$d" 2>/dev/null | head -n1 || true)
         if [ -n "$at" ]; then echo "$d is mounted at $at"; return 0; fi
         if awk 'NR > 1 {print $1}' /proc/swaps | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
-        # Holders that could not be listed count as in use: the device is
-        # formatted only when nothing is known to hold it.
-        if ! list holders find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0'; then
-            echo "what holds $d could not be read (find's message is in the journal)"
-            return 0
-        fi
+        # This search fails on every device today: with -p lsblk prints
+        # KNAME as a path (/dev/sdb), so the path does not exist in sysfs and
+        # no holder is ever seen (#185). The status of the search says
+        # nothing here, so it is dropped and the result kept as it was (what
+        # the search did print decides, as before) until #185 decides it.
+        list holders find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null || true
         if [ ${#holders[@]} -gt 0 ]; then echo "$d is in use by ${holders[*]}"; return 0; fi
     done < <(lsblk -nrpo NAME,KNAME -- "$1")
     return 1

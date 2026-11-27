@@ -35,7 +35,8 @@ summary() {
     echo "| --- | --- | --- | --- | --- |"
     # find's exit status is read: results that could not be searched are not
     # taken for none (#169). No DIR at all is no results: a run whose build
-    # did not finish downloads no artifact.
+    # did not finish downloads no artifact. A search that failed in part
+    # shows the rows it did find and then fails the summary, on purpose.
     if [ -d "$dir" ]; then files=$(find "$dir" -name '*.tsv') || rc=1; fi
     while IFS= read -r file; do
         [ -n "$file" ] || continue

@@ -299,21 +299,22 @@ if [ "$(id -u)" != 0 ]; then
     locked_held "pins that cannot be read are not taken for none" "mkdir -p var/lib/kamerplanter/pinned && touch var/lib/kamerplanter/pinned/FERNET_KEY" var/lib/kamerplanter/pinned
     locked_held "database data that cannot be read is not taken for none" "mkdir -p $vol/arangodb_data/_data && touch $vol/arangodb_data/_data/ENGINE" "$vol/arangodb_data/_data"
 fi
-# On sysfs: holders that cannot be listed count as in use, so nothing is
-# formatted on a guess; slaves that cannot be listed leave the device a whole
-# disk, which only adds a name to those system_device compares (roots).
-no_device() {  # no_device FUNCTION: FUNCTION of a device sysfs does not know
+# Baselines, which #185 will change: lsblk -p prints KNAME as a path, so
+# in_use and roots look for /sys/class/block//dev/NAME/..., which never
+# exists. Today in_use sees no holder, and roots prints every row. These
+# passed before #169 as well: its change keeps the results as they were.
+no_device() {  # no_device FUNCTION: FUNCTION of a device, with lsblk answering as lsblk -p does
     (
         # shellcheck disable=SC2329 # called by the function under test
-        lsblk() { echo "/dev/kp-none kp-none"; }
+        lsblk() { echo "/dev/kp-none /dev/kp-none"; }
         # shellcheck disable=SC2329 # called by the function under test
         findmnt() { :; }
         out=$("$1" /dev/kp-none 2>/dev/null); rc=$?
         printf '%s|%s' "$out" "$rc"
     )
 }
-expect "in_use: holders that cannot be listed count as in use" "what holds /dev/kp-none could not be read (find's message is in the journal)|0" "$(no_device in_use)"
-expect "roots: slaves that cannot be listed leave the device a whole disk" "/dev/kp-none|0" "$(no_device roots)"
+expect "in_use, baseline until #185: a device not mounted and no swap is not in use, no holder is looked up" "|1" "$(no_device in_use)"
+expect "roots, baseline until #185: every row lsblk lists is printed" "/dev/kp-none|0" "$(no_device roots)"
 
 # Key files (E14): metadata only; owned by root and readable by root only.
 keydir=$(mktemp -d "$work/keys.XXXXXX")

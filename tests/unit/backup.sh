@@ -450,7 +450,7 @@ unrecorded_old() {
 aged_logged() { grep -q '"event":"cleanup","result":"error","detail":"the age of the pre-update backup of .* could not be read' "$st/log.jsonl" 2>/dev/null && echo yes || echo no; }
 unrecorded_old
 tool fetch >/dev/null
-expect "cleanup: an unrecorded backup older than the period is deleted" "no|no|cleanup 7 locked" \
+expect "cleanup, baseline (as before #169): an unrecorded backup older than the period is deleted" "no|no|cleanup 7 locked" \
     "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(aged_logged)|$(lines "$SB/disks-calls")"
 unrecorded_old
 # shellcheck disable=SC2329 # called by the tool it is exported to
