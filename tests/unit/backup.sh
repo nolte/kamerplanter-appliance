@@ -279,6 +279,16 @@ touch "$backup_disk_mount/update-backup/sha256:file"
 ln -s "$work/victim" "$backup_disk_mount/update-backup/sha256:$(printf '%064d' 3)"
 expect "entries: only directories named as backups, no links" "$D|$E" "$(backup_entries backup-disk | sort | paste -sd'|')"
 expect "delete: a backup of its own" "yes|no" "$(yes_no backup_delete backup-disk "$E")|$([ -e "$backup_disk_mount/update-backup/$E" ] && echo yes || echo no)"
+# A base that cannot be read is not one without backups (#149): find fails on
+# it, and backup_entries fails with it. Root reads every directory, so this
+# runs as another user only.
+entries_rc() { if backup_entries "$1" >/dev/null 2>&1; then echo listed; else echo failed; fi; }
+expect "entries: a base that is read lists and succeeds" "$D|listed" "$(backup_entries backup-disk)|$(entries_rc backup-disk)"
+if [ "$(id -u)" != 0 ]; then
+    chmod 0000 "$backup_disk_mount/update-backup"
+    expect "entries: a base that cannot be read fails" "|failed" "$(backup_entries backup-disk 2>/dev/null)|$(entries_rc backup-disk)"
+    chmod 0700 "$backup_disk_mount/update-backup"
+fi
 # update-backup/D -> victim: the entry as a link.
 rm -rf "${backup_disk_mount:?}/update-backup/$D"
 ln -s "$work/victim" "$backup_disk_mount/update-backup/$D"
@@ -416,6 +426,18 @@ new_sandbox backup-locations; due_backup
 expect "fetch: offline, the fetch fails" 1 "$(tool fetch)"
 expect "fetch: offline, the cleanup runs all the same, under the lock" "no|cleanup 7 locked" \
     "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(lines "$SB/disks-calls")"
+# The cleanup says a base it could not read through, instead of taking it for
+# one without leftover backups, and goes on (#149). Root reads every
+# directory, so this runs as another user only.
+if [ "$(id -u)" != 0 ]; then
+    new_sandbox backup-locations; due_backup
+    rm -f "$st/backups/$OLD"; rmdir "$st/backup/$OLD"
+    chmod 0000 "$st/backup"
+    tool fetch >/dev/null
+    chmod 0700 "$st/backup"
+    expect "cleanup: a base that cannot be read is logged, and the cleanup goes on" "yes|cleanup 7 locked" \
+        "$(grep -q '"event":"cleanup","result":"error","detail":"the pre-update backups on .* could not all be listed' "$st/log.jsonl" 2>/dev/null && echo yes || echo no)|$(lines "$SB/disks-calls")"
+fi
 
 # apply-now keeps set -e inside the fetch: bootc failing after the download
 # stops it, instead of recording a staged update that is not known.

@@ -421,20 +421,28 @@ device_identity() {
 # at its top beside the locations: update-backup, where the update tool
 # writes and deletes pre-update backups as root, must be a directory holding
 # directories only; none of them, nor update-backup, may be a symbolic link,
-# which root would follow. Empty when it is fine or missing. Reads only.
+# which root would follow; and it must be readable: what a search could not
+# list is not known to hold no link (the search is read through list in
+# /usr/lib/kamerplanter/env.sh, which keeps find's exit status). Empty when
+# it is fine or missing. Reads only.
 top_problem() {
-    local dir=$1/update-backup type entry
+    local dir=$1/update-backup type entry listed=()
     if [ -L "$dir" ]; then echo "update-backup is a symbolic link"; return; fi
     [ -e "$dir" ] || return 0
     if [ ! -d "$dir" ]; then echo "update-backup is not a directory"; return; fi
-    while IFS=' ' read -r -d '' type entry; do
+    if ! list listed find "$dir" -ignore_readdir_race -mindepth 1 -maxdepth 1 -printf '%y %p\0'; then
+        echo "update-backup could not be read (find's message is in the journal)"
+        return
+    fi
+    for entry in ${listed[@]+"${listed[@]}"}; do
+        type=${entry%% *}
         entry=update-backup/$(shown "${entry##*/}")
         case $type in
             d) ;;
             l) echo "$entry is a symbolic link"; return ;;
             *) echo "$entry is not a directory"; return ;;
         esac
-    done < <(find "$dir" -mindepth 1 -maxdepth 1 -printf '%y %p\0')
+    done
 }
 
 # luks_uuid DM_UUID (the UUID of the LUKS2 container behind a dm-crypt
@@ -446,12 +454,14 @@ top_problem() {
 # directory on the way to one, that is a symbolic link or no directory; an
 # entry of etc or pinned that is not a regular file, or a regular file with
 # more than one link (a hard link elsewhere on the disk, such as into a volume
-# a container writes to); and a _data of a volume that is a symbolic link or
-# no directory, which Podman would follow; the release marker as a symbolic
-# link or no regular file; and what top_problem refuses. A missing location
-# is fine: it is created. Reads only.
+# a container writes to), and etc or pinned itself when it cannot be read
+# (what a search could not list is not known to be a regular file); and a
+# _data of a volume that is a symbolic link or no directory, which Podman
+# would follow; the release marker as a symbolic link or no regular file; and
+# what top_problem refuses. A missing location is fine: it is created. Reads
+# only.
 layout_problem() {
-    local root=$1 place dir path d part parts type links entry
+    local root=$1 place dir path d part parts type links entry listed=()
     if [ -L "$root/release" ]; then echo "release is a symbolic link"; return; fi
     if [ -e "$root/release" ] && [ ! -f "$root/release" ]; then echo "release is not a regular file"; return; fi
     entry=$(top_problem "$root")
@@ -472,7 +482,14 @@ layout_problem() {
                 if [ -e "$root/$dir/_data" ] && [ ! -d "$root/$dir/_data" ]; then echo "$dir/_data is not a directory"; return; fi
                 ;;
             *)
-                while IFS=' ' read -r -d '' type links entry; do
+                if ! list listed find "$root/$dir" -ignore_readdir_race -mindepth 1 -maxdepth 1 -printf '%y %n %p\0'; then
+                    echo "$dir could not be read (find's message is in the journal)"
+                    return
+                fi
+                for entry in ${listed[@]+"${listed[@]}"}; do
+                    type=${entry%% *}
+                    links=${entry#* }
+                    links=${links%% *}
                     entry=$dir/$(shown "${entry##*/}")
                     case $type in
                         f) [ "$links" = 1 ] || { echo "$entry has $links hard links"; return; } ;;
@@ -480,7 +497,7 @@ layout_problem() {
                         d) echo "$entry is a directory"; return ;;
                         *) echo "$entry is a device or other special file"; return ;;
                     esac
-                done < <(find "$root/$dir" -mindepth 1 -maxdepth 1 -printf '%y %n %p\0')
+                done
                 ;;
         esac
     done
@@ -552,14 +569,16 @@ naming_ignored() {
 # with it when a pre-update backup is deleted.
 
 # top_entries ROOT: the names at the top of the file system mounted at ROOT,
-# other than lost+found, one per line.
+# other than lost+found, one per line. Fails when the search fails (pipefail
+# keeps find's exit status): the caller reads that, never the output alone.
 top_entries() {
     find "$1" -mindepth 1 -maxdepth 1 ! -name lost+found -printf '%f\n' | sort
 }
 
 # tree_listing DIR: type, mode, owner and, for files and links, size and
 # target of everything below DIR, one line each, sorted; the copy of a move is
-# compared by it.
+# compared by it. Fails when DIR cannot be searched through (pipefail keeps
+# find's exit status): a listing that is not whole is not compared.
 tree_listing() {
     (cd "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p\n' && find . -mindepth 1 \( -type f -o -type l \) -printf '%y %s %p -> %l\n') | LC_ALL=C sort
 }
@@ -1772,19 +1791,24 @@ copy_place() {
 
 # same_place DIRECTORY PATH: whether DIRECTORY on the disk holds what PATH
 # holds after copy_place: a volume the same tree (tree_listing), etc and
-# pinned every regular file; and every file copied the same bytes.
+# pinned every regular file; and every file copied the same bytes. Fails as
+# well when PATH, or the copy of a volume, cannot be searched through: files
+# that were not listed were not compared (#149).
 same_place() {
-    local dir=$1 path=$2 f depth=(-maxdepth 1)
+    local dir=$1 path=$2 f depth=(-maxdepth 1) ours theirs files=()
     [ -d "$path" ] || return 0
     case $dir in
         volumes/*)
-            [ "$(tree_listing "$path")" = "$(tree_listing "$mnt/$dir")" ] || return 1
+            ours=$(tree_listing "$path") || return 1
+            theirs=$(tree_listing "$mnt/$dir") || return 1
+            [ "$ours" = "$theirs" ] || return 1
             depth=()
             ;;
     esac
-    while IFS= read -r -d '' f; do
+    list files find "$path" -mindepth 1 "${depth[@]}" -type f -printf '%P\0' || return 1
+    for f in ${files[@]+"${files[@]}"}; do
         cmp -s -- "$path/$f" "$mnt/$dir/$f" || return 1
-    done < <(cd "$path" && find . -mindepth 1 "${depth[@]}" -type f -print0)
+    done
 }
 
 # move_failed REASON: a copy that could not be made. A disk that does not
@@ -1828,7 +1852,7 @@ abandon_move() {
 # that set -e holds for every step, the record above all: the disk's
 # locations are bound only once it says moved (cmd_start).
 move_in() {
-    local place dir path running entry need free
+    local place dir path running entry need free left
     running=$(services_running)
     if [ -n "$running" ]; then
         undo
@@ -1845,13 +1869,15 @@ move_in() {
     # A copy left by a reset, or an earlier move onto this disk, starts over:
     # everything at the top of the disk but lost+found goes, the release
     # marker too.
-    if [ -n "$(top_entries "$mnt")" ]; then
+    # A top that cannot be listed is not taken for an empty one (#149).
+    left=$(top_entries "$mnt") || { move_failed "the top of the disk could not be read"; return 0; }
+    if [ -n "$left" ]; then
         log_event move-restarted "the copy left on the disk by an interrupted or an earlier move is removed; the copy starts over from the system disk"
     fi
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
         rm -rf -- "${mnt:?}/$entry" || { move_failed "the copy left on the disk could not be removed"; return 0; }
-    done < <(top_entries "$mnt")
+    done <<<"$left"
     sync -f "$mnt" || { move_failed "the disk could not be synced"; return 0; }
     need=$(move_bytes) || { undo; die "the size of the data on the system disk could not be determined; nothing is moved"; }
     # Room for the copy, and 10 % and 32 MiB more for the databases to go on.

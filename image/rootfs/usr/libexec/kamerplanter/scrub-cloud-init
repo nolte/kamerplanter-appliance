@@ -165,17 +165,10 @@ take_pairs() {
     pairs+=("${got[@]}")
 }
 
-# list NAME COMMAND...: reads the NUL-separated output of COMMAND into the
-# array NAME, and fails when COMMAND fails. A search (find) is read through
-# this: in a process substitution or a pipe alone its exit status is lost, and
-# a place it could not read would pass for an empty one (#119).
-list() {
-    local -n list_into=$1
-    shift
-    # shellcheck disable=SC2034 # a nameref: the array of the caller
-    mapfile -d '' -t list_into < <("$@")
-    wait "$!"
-}
+# list NAME COMMAND... (reads the NUL-separated output of COMMAND into the
+# array NAME, and fails when COMMAND fails) is in
+# /usr/lib/kamerplanter/env.sh: every search (find) here is read through it,
+# so that a place it could not read does not pass for an empty one (#119).
 
 # instance_copies: the copies of the user-data that cloud-init keeps per
 # instance (user_data_copies), NUL-separated: the ones delete_copies deletes.

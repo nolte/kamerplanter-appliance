@@ -211,6 +211,33 @@ rm -r "$b/update-backup"; ln -s "$victim" "$b/update-backup"
 expect "backup disk: update-backup as symbolic link is refused" "update-backup is a symbolic link" "$(top_problem "$b")"
 expect "the victim is untouched by the checks" "" "$(ls -A "$victim")"
 
+# A directory that cannot be read is not taken for an empty one (#149): find
+# fails on it, and its exit status is read (list). Root reads every
+# directory, so these run as another user only.
+got=()
+expect "list: the output of a command that succeeds" "0|2|a b|c" \
+    "$(list got printf 'a b\0c\0'; echo "$?|${#got[@]}|${got[0]}|${got[1]}")"
+expect "list: a command that fails after its output fails" "7|1" \
+    "$(list got bash -c 'printf "a\0"; exit 7'; echo "$?|${#got[@]}")"
+if [ "$(id -u)" != 0 ]; then
+    locked() {  # locked NAME EXPECTED SETUP DIR: layout_problem of a fresh tree after SETUP, DIR unreadable
+        local d
+        d=$(mktemp -d "$work/disk.XXXXXX")
+        (cd "$d" && eval "$3")
+        chmod 0000 "$d/$4"
+        expect "$1" "$2" "$(layout_problem "$d" 2>/dev/null)"
+        chmod 0700 "$d/$4"
+    }
+    locked "etc that cannot be read is refused" "etc could not be read (find's message is in the journal)" "$full" etc
+    locked "pinned that cannot be read is refused" "pinned could not be read (find's message is in the journal)" "$full" pinned
+    locked "update-backup that cannot be read is refused" "update-backup could not be read (find's message is in the journal)" "$full && mkdir update-backup" update-backup
+    b=$(mktemp -d "$work/backup.XXXXXX")
+    mkdir "$b/update-backup"; chmod 0000 "$b/update-backup"
+    expect "backup disk: update-backup that cannot be read is refused" "update-backup could not be read (find's message is in the journal)" "$(top_problem "$b" 2>/dev/null)"
+    chmod 0700 "$b/update-backup"
+    expect "backup disk: readable again, it is fine" "" "$(top_problem "$b")"
+fi
+
 held() {  # held NAME EXPECTED SETUP: system_data of a fresh root after SETUP
     local d
     d=$(mktemp -d "$work/root.XXXXXX")
@@ -735,6 +762,42 @@ expect "tree listing: another size differs" differs "$([ "$(tree_listing "$a")" 
 printf 'x' >"$b/_data/sub/f"; rm "$b/_data/l"; ln -s elsewhere "$b/_data/l"
 expect "tree listing: another link target differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
 
+# The comparison after the copy of a move (same_place): what could not be
+# searched through was not compared, so it is not the same (#149).
+same() {  # same DIRECTORY PATH: whether same_place holds, with the disk at $work/moved
+    (
+        mnt=$work/moved
+        if same_place "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi
+    )
+}
+sys=$(mktemp -d "$work/sys.XXXXXX")
+mkdir -p "$sys/etc" "$sys/vol/_data/sub" "$work/moved/volumes"
+echo one >"$sys/etc/kamerplanter.env"; echo two >"$sys/etc/secrets.env"; echo db >"$sys/vol/_data/sub/f"
+cp -a "$sys/etc" "$work/moved/etc"; cp -a "$sys/vol" "$work/moved/volumes/vol"
+expect "same place: the copied files of etc" same "$(same etc "$sys/etc")"
+expect "same place: a copied volume" same "$(same volumes/vol "$sys/vol")"
+expect "same place: a location the system disk lacks" same "$(same pinned "$sys/pinned")"
+echo changed >"$work/moved/etc/secrets.env"
+expect "same place: other bytes in a file of etc differ" differs "$(same etc "$sys/etc")"
+echo two >"$work/moved/etc/secrets.env"
+echo dx >"$work/moved/volumes/vol/_data/sub/f"
+expect "same place: other bytes of the same size in a volume differ" differs "$(same volumes/vol "$sys/vol")"
+echo db >"$work/moved/volumes/vol/_data/sub/f"
+expect "same place: restored, both are the same again" "same|same" "$(same etc "$sys/etc")|$(same volumes/vol "$sys/vol")"
+if [ "$(id -u)" != 0 ]; then
+    chmod 0000 "$sys/etc"
+    expect "same place: etc that cannot be read is not the same" differs "$(same etc "$sys/etc")"
+    chmod 0700 "$sys/etc"
+    # Unreadable on both sides: what both listings hold agrees, and neither
+    # is whole.
+    chmod 0000 "$sys/vol/_data/sub" "$work/moved/volumes/vol/_data/sub"
+    expect "same place: a volume that cannot be searched through is not the same" differs "$(same volumes/vol "$sys/vol")"
+    chmod 0700 "$sys/vol/_data/sub" "$work/moved/volumes/vol/_data/sub"
+    chmod 0000 "$t"
+    expect "top entries: a top that cannot be read fails" failed "$(if top_entries "$t" >/dev/null 2>&1; then echo listed; else echo failed; fi)"
+    chmod 0700 "$t"
+fi
+
 # The move record: written whole and durably, one line per value.
 records=$work/records data_disk_move=$work/records/move.env
 mkdir -p "$records"
@@ -835,6 +898,11 @@ start_move() {  # start_move CASE: cmd_start data on a disk receiving a move: th
         case $1 in
             record-fails) replace() { if [ "$1" = "$data_disk_move" ]; then cat >/dev/null; return 1; fi; real_replace "$@"; } ;;
             no-space) stat() { if [ "$1" = -f ]; then echo '1 * 1'; else command stat "$@"; fi; } ;;
+            top-fails)
+                top_entries() { return 1; }
+                # shellcheck disable=SC2329 # called by move_failed: the disk still answers
+                data_disk_present() { return 0; }
+                ;;
         esac
         cmd_start data >/dev/null 2>&1
         printf '%s|%s' "$(move_get STATE)" "$(grep -c '^DATA_DISK=' "$sb/disk/etc/kamerplanter.env" 2>/dev/null)"
@@ -845,6 +913,7 @@ expect "move: copied and recorded as moved, then placed and checked; the copied 
     "moved|0|0|placed,check" "$(start_move ok)"
 expect "move: the record cannot say moved: the start fails, nothing is placed" "|1|" "$(start_move record-fails)"
 expect "move: abandoned for lack of space: the services start, nothing is placed" "failed||0|" "$(start_move no-space)"
+expect "move: the top of the disk cannot be listed: abandoned, nothing is copied or placed (#149)" "failed||0|" "$(start_move top-fails)"
 
 # Retiring the backup disk: refused with nothing changed while an update is
 # not decided or something other than the naming file names the disk; else

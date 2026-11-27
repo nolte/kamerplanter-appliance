@@ -45,3 +45,16 @@ repos:
         entry: '^\s*(FROM\s+(--\S+\s+)*|COPY\s+(--\S+\s+)*--from=|ARG\s+\w+=["'']?)(quay\.io/fedora/|registry\.fedoraproject\.org/|fedora(-bootc)?(:|@|\s|$))'
         args: [--ignore-case]
         files: '(^|/)([^/]*\.)?(Containerfile|Dockerfile)(\.[^/]*)?$'
+
+      # A find read through a process substitution loses its exit status, so
+      # a directory it could not read passes for an empty one (#119, #149).
+      # The shipped scripts read a search through list (mapfile, then
+      # wait "$!"; /usr/lib/kamerplanter/env.sh). This refuses that one form
+      # only, on one line: a find whose status is dropped in a command
+      # substitution or behind a function is not seen (#169).
+      - id: no-find-in-process-substitution
+        name: No find in a process substitution in the image's scripts
+        language: pygrep
+        entry: '<\(\s*(cd\s[^)]*&&\s*)?find\s'
+        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        types: [file]

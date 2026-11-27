@@ -1374,7 +1374,7 @@ check_health() {
 # that did not complete) is deleted at any location that is available, once
 # its directory is older than that period.
 cleanup() {
-    local keep now protect rec d loc epoch problem base
+    local keep now protect rec d loc epoch problem base listed
     # Under the lock of the update actions, so that no rollback or activation
     # relies on a backup that is being deleted; fetch takes it before.
     if ! update_lock; then
@@ -1408,9 +1408,13 @@ cleanup() {
     for loc in "${backup_locations[@]}"; do
         [ "$(location_state "$loc")" = ok ] || continue
         # Only the directories named as backups, never through a link
-        # (backup_entries in /usr/lib/kamerplanter/env.sh).
+        # (backup_entries in /usr/lib/kamerplanter/env.sh). A base that could
+        # not be read through is said: what was not listed stays (#149).
         base=$(backup_base "$loc")
-        while IFS= read -r d; do
+        mapfile -t listed < <(backup_entries "$loc")
+        wait "$!" ||
+            log cleanup error "the pre-update backups on $(backup_where "$loc") could not all be listed; what was not listed is kept and tried again at the next run"
+        for d in ${listed[@]+"${listed[@]}"}; do
             [ "$d" != "${protect-}" ] || continue
             [ "$(record_field LOCATION "$backups/$d")" != "$loc" ] || continue
             [ -n "$(find "$base/$d" -maxdepth 0 -mtime "+$((keep - 1))")" ] || continue
@@ -1419,7 +1423,7 @@ cleanup() {
             else
                 log cleanup error "the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be deleted; it is tried again at the next run"
             fi
-        done < <(backup_entries "$loc")
+        done
     done
     if [ "$(data_disk_move_field STATE)" = verified ]; then
         "$disks_tool" cleanup "$keep" ||
