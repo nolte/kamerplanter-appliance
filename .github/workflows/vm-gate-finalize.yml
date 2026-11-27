@@ -25,13 +25,17 @@ name: vm-gate-finalize
 #     was missing, or a push withdrew it, #130). The run of a push starts
 #     with the label that was there when the push arrived, also when
 #     vm-gate.yml removes the label a moment later or its own run was
-#     dropped; such a run must not turn the commit green, however fast it
-#     completes. A result is written over pending, over a green vm-gate and
-#     over an earlier result of this workflow only;
+#     dropped; the first job of vm-tests.yml ends such a run (#152), but
+#     that job is the pull request's own, so a run that went on must not
+#     turn the commit green, however fast it completes. A result is written
+#     over pending, over a green vm-gate and over an earlier result of this
+#     workflow only;
 #   - the run tested nothing: it awaits approval (action_required, a fork's
 #     first contribution: vm-gate stays pending until a maintainer approves
 #     the run and it completes), or it skipped the build (a label other than
-#     vm-tests was added).
+#     vm-tests was added, or the job consent of vm-tests.yml found the label
+#     removed and ended the run, or failed because vm-gate.yml had not
+#     accepted the commit, #152).
 #
 # workflow_run: the workflow runs as develop has it, with the base
 # repository's token, also for a pull request from a fork whose own token is

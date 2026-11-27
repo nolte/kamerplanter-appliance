@@ -20,6 +20,17 @@ name: vm-tests
 # the jobs of this run once it has completed and runs as develop has it; no
 # job here writes a commit status, since this workflow runs as the pull
 # request has it (#51).
+#
+# The label is the consent to running one head, and vm-gate.yml takes it
+# away again on a push that changes what these jobs run and when it was set
+# too soon after someone else's push (#130, #151). The event that starts a
+# run is older than that decision, so the first job, consent, asks the API
+# before anything is built (#152): the build starts only if the pull
+# request has the label and vm-gate has accepted the head, and the run ends
+# if the label was removed after the run's event. This saves the runners of a
+# head nobody consented to; it protects nothing, since a pull request can
+# rewrite this file. What protects the result is vm-gate-finalize.yml, which
+# counts none of a commit vm-gate did not accept.
 
 on:
   workflow_dispatch:
@@ -65,12 +76,110 @@ env:
   IMAGE_REF: localhost/kamerplanter-appliance:poc
 
 jobs:
-  build:
-    name: build
+  # Whether this run still has the consent it started with (#152). The
+  # condition sorts out, without a runner, the events that never start the
+  # tests: a push that found no label, and another label that was added.
+  # The script then reads the live state, for a pull request only:
+  #   - the label vm-tests, from the API;
+  #   - whether it was removed after this run's event (the pull request's
+  #     events): the run of a push whose label vm-gate.yml withdrew ends
+  #     also when the label is set again before this job looks, because
+  #     setting it starts a run of its own, and only that one tests the
+  #     head; the same for the run of a label that was removed again;
+  #   - vm-gate's newest status of the head since the event: pending, green
+  #     or a result of the VM tests, which are the states on which
+  #     vm-gate-finalize.yml writes a result. vm-gate.yml decides some
+  #     seconds after the event (measured on #174 to #177: 5 to 10 s), so
+  #     the job asks again every 10 s until the label is gone or the head
+  #     is accepted. An older status does not count: on a commit that was
+  #     the head before, it is from before this event.
+  # No decision after about 10 minutes (vm-gate.yml refused the head and
+  # left the label, its run was dropped, it was late, or the API does not
+  # answer) fails the job, and the tests do not run: remove the label and
+  # set it again, which starts a new run (setting a label that is still
+  # there starts nothing), or, if vm-gate has accepted the head by now, run
+  # the failed jobs again. The time compared with is the pull request's
+  # `updated_at` in the event, GitHub's own record: never later than the
+  # event itself, and a label change sets it (measured on #179), so it is
+  # not earlier than a removal before the label of this event. The script
+  # prints it.
+  #
+  # The job ends green when the consent is gone, and every later job is
+  # skipped: vm-gate-finalize.yml reads a skipped build as a run that tested
+  # nothing and leaves vm-gate as vm-gate.yml set it. The token only reads
+  # (the labels and events of the pull request, the statuses of the head),
+  # as it does for a pull request from a fork; no code is checked out.
+  # tests/unit/vm-gate.sh runs the script against a stub of gh.
+  consent:
+    name: consent
     if: >-
       github.event_name != 'pull_request' ||
       (contains(github.event.pull_request.labels.*.name, 'vm-tests') &&
       (github.event.action != 'labeled' || github.event.label.name == 'vm-tests'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pull-requests: read
+      statuses: read
+    outputs:
+      run: ${{ steps.consent.outputs.run }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      EVENT: ${{ github.event_name }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+      SINCE: ${{ github.event.pull_request.updated_at }}
+    steps:
+      - name: Read the label vm-tests and vm-gate's status of the head
+        id: consent
+        run: |
+          set -euo pipefail
+          decide() {  # decide true|false REASON
+            echo "vm-tests: $2"
+            echo "run=$1" >>"$GITHUB_OUTPUT"
+            [ "$1" = true ] || echo "The VM tests did not run: $2." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          [ "$EVENT" = pull_request ] || decide true "a run on $EVENT needs no label"
+
+          echo "vm-tests: the event of this run is from $SINCE"
+          waited="no answer from the API"
+          for try in $(seq "${VM_TESTS_TRIES:-60}"); do
+            [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
+            # Whether the pull request has the label right now.
+            has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
+              --jq '[.[].name] | index("vm-tests") != null') || continue
+            [ "$has" = true ] || decide false "#$NUMBER does not have the label vm-tests any more"
+            # Whether the label was removed after this run's event, on
+            # whichever page of the events that is. Later, not at the same
+            # second: a label that is removed and set at once has the time
+            # of the event that set it.
+            removed=$(gh api --paginate "repos/$REPO/issues/$NUMBER/events?per_page=100" |
+              jq -rs --arg since "$SINCE" '[.[][] | select(.event == "unlabeled" and .label.name == "vm-tests"
+                and .created_at > $since)] | length > 0') || continue
+            [ "$removed" != true ] ||
+              decide false "the label vm-tests was removed from #$NUMBER after this run's event; the run that setting it again started tests this commit"
+            # vm-gate's newest status of the head since the event, as
+            # "state<TAB>description". Every page of the list, newest first:
+            # the status can sit behind 100 newer ones of other contexts.
+            gate=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" |
+              jq -rs --arg since "$SINCE" '[.[][] | select(.context == "vm-gate" and .created_at >= $since)] | first
+                | if . == null then "no status since the event" else "\(.state)\t\(.description // "")" end') || continue
+            # What vm-gate-finalize.yml writes a result on.
+            case $gate in
+              pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*)
+                decide true "#$NUMBER has the label vm-tests, and vm-gate has accepted this commit" ;;
+            esac
+            waited="vm-gate: ${gate//$'\t'/: }"
+          done
+          echo "::error::vm-gate has not accepted this commit for the VM tests ($waited): the VM tests do not run. Remove the label vm-tests and set it again, or run the failed jobs again once vm-gate has accepted the commit."
+          exit 1
+
+  build:
+    name: build
+    needs: consent
+    if: needs.consent.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
