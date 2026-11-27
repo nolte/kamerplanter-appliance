@@ -439,7 +439,7 @@ jobs:
     # Skipped jobs earlier in the chain (the reuse path) would otherwise skip
     # this job as well.
     if: ${{ !cancelled() && needs.current.result == 'success' }}
-    uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@d664e75afc4d57de958af926987f842c1fc1f420 # v2.3.1
+    uses: nolte/gh-plumbing/.github/workflows/reusable-release-publish.yml@a4655795b1c9927947db97467d30d9e7c5868384 # v2.4.0
     with:
       tag: ${{ inputs.tag }}
       dry_run: ${{ inputs.dry_run }}
