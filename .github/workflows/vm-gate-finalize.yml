@@ -130,8 +130,11 @@ jobs:
           grep -q ' true$' <<<"$prs" || leave "the pull request lacks the label vm-tests"
 
           # The jobs of exactly the attempt that completed, as name<TAB>result.
+          # The names are the pull request's: @tsv writes a tab or a line
+          # break in one as \t or \n, so a job named "build<TAB>success"
+          # is no job called build and cannot pass for its result.
           jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100" |
-            jq -r '.jobs[] | "\(.name)\t\(.conclusion // .status)"')
+            jq -r '.jobs[] | [.name, (.conclusion // .status)] | @tsv')
           # The result of one suite: its jobs are named "<suite>" or
           # "<suite> (<matrix entry>)". missing if none ran, else the first
           # result that is not success, else success.
@@ -157,9 +160,10 @@ jobs:
           # Only on a commit that vm-gate.yml accepted for the VM tests:
           # pending or green, or a result from here (a new attempt of the
           # run). No status, or a failure of vm-gate.yml: the label did not
-          # cover this commit when its run started (#130).
-          current=$(gh api "repos/$REPO/commits/$SHA/statuses?per_page=100" \
-            --jq '[.[] | select(.context == "vm-gate")] | first | if . == null then "no status" else "\(.state)\t\(.description // "")" end')
+          # cover this commit when its run started (#130). Every page of the
+          # list: the status can sit behind 100 newer ones of other contexts.
+          current=$(gh api --paginate "repos/$REPO/commits/$SHA/statuses?per_page=100" |
+            jq -rs '[.[][] | select(.context == "vm-gate")] | first | if . == null then "no status" else "\(.state)\t\(.description // "")" end')
           case $current in
             pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*) ;;
             *) leave "vm-gate.yml has not accepted this commit for the VM tests (${current//$'\t'/: })" ;;

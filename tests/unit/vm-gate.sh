@@ -11,9 +11,13 @@
 # is what runs a change to them before the merge.
 #
 # The stub keeps the pull request in files: its labels, the vm-gate statuses
-# of each commit and the comparisons the API would answer. jq is the real
-# one and runs the workflows' own filters. Needs PyYAML and jq; no network,
-# no token.
+# of each commit, and the comparisons and trees the API would answer. It
+# answers a call as the API would, as far as the scripts depend on it (#167):
+# a list comes in pages of `per_page` entries (30 without it), the first one
+# only unless the call says --paginate; a tree holds the top level only
+# without `recursive=1`; and a status is written under the context the call
+# names, where only vm-gate counts. jq is the real one and runs the
+# workflows' own filters. Needs PyYAML and jq; no network, no token.
 #
 # Usage: tests/unit/vm-gate.sh
 set -uo pipefail
@@ -48,7 +52,8 @@ for name, job in (("vm-gate", "gate"), ("vm-gate-finalize", "finalize")):
     (work / f"{name}.sh").write_text(runs[0])
 EOF
 
-# --- the stub of gh: `gh api [-X METHOD] PATH [--jq FILTER] [-f key=value]...`
+# --- the stub of gh:
+# `gh api [--paginate] [-X METHOD] PATH[?QUERY] [--jq FILTER] [-f key=value]...`
 # over the files of $STATE; every write is one line in $STATE/log ---
 mkdir -p "$work/bin"
 cat >"$work/bin/gh" <<'EOF'
@@ -56,7 +61,7 @@ cat >"$work/bin/gh" <<'EOF'
 set -euo pipefail
 [ "$1" = api ] || { echo "gh stub: unexpected command $1" >&2; exit 2; }
 shift
-method=GET path='' filter='' state='' description=''
+method=GET path='' filter='' state='' description='' context='' paginate=false
 while [ $# -gt 0 ]; do
     case $1 in
         -X) method=$2; shift 2 ;;
@@ -65,20 +70,38 @@ while [ $# -gt 0 ]; do
             case $2 in
                 state=*) state=${2#state=} ;;
                 description=*) description=${2#description=} ;;
+                context=*) context=${2#context=} ;;
             esac
             shift 2 ;;
-        --paginate) shift ;;
+        --paginate) paginate=true; shift ;;
         *) path=$1; shift ;;
     esac
 done
 path=${path#repos/example/appliance/}
-path=${path%%\?*}
+query=''
+case $path in
+    *\?*) query=${path#*\?}; path=${path%%\?*} ;;
+esac
+per_page=30
+case "&$query&" in
+    *"&per_page="*) per_page=${query##*per_page=}; per_page=${per_page%%&*} ;;
+esac
 answer() {  # the JSON on stdin, through the filter if there is one
     if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi
 }
+# The JSON list on stdin as the API pages it: its first $per_page entries,
+# or with --paginate every page as a document of its own. The filter runs on
+# each page by itself, as gh runs it.
+pages() {
+    if [ "$paginate" = true ]; then
+        jq -c --argjson n "$per_page" '. as $all | range(0; [length, 1] | max; $n) as $i | $all[$i:$i + $n]'
+    else
+        jq -c --argjson n "$per_page" '.[:$n]'
+    fi | while IFS= read -r page; do answer <<<"$page"; done
+}
 case "$method $path" in
     "GET issues/7/labels")
-        jq -R -s 'split("\n") | map(select(. != "") | {name: .})' "$STATE/labels" | answer ;;
+        jq -R -s 'split("\n") | map(select(. != "") | {name: .})' "$STATE/labels" | pages ;;
     "DELETE issues/7/labels/vm-tests")
         echo "remove-label" >>"$STATE/log"
         [ ! -e "$STATE/label-stays" ] || exit 1
@@ -88,21 +111,37 @@ case "$method $path" in
         sha=${path#commits/}; sha=${sha%/statuses}
         [ -n "$sha" ] && [ ! -e "$STATE/gone-$sha" ] || exit 1
         touch "$STATE/status-$sha"
-        # Newest first, as the API lists them, with a status of another
-        # context in front.
+        # Newest first, as the API lists them, with the statuses of another
+        # context in front: one, or as many as $STATE/others-<sha> says.
         tac "$STATE/status-$sha" |
-            jq -R -s '[{context: "other", state: "failure", description: "not vm-gate"}] +
+            jq -R -s --argjson others "$(cat "$STATE/others-$sha" 2>/dev/null || echo 1)" \
+                '[range($others) | {context: "other", state: "failure", description: "not vm-gate \(.)"}] +
                 (split("\n") | map(select(. != "") | split("\t")
-                    | {context: "vm-gate", state: .[0], description: .[1]}))' | answer ;;
+                    | {context: "vm-gate", state: .[0], description: .[1]}))' | pages ;;
     "POST statuses/"*)
         sha=${path#statuses/}
         [ ${#description} -le 140 ] || { echo "gh stub: description over 140 characters" >&2; exit 1; }
-        printf '%s\t%s\n' "$state" "$description" >>"$STATE/status-$sha"
-        echo "status $sha $state $description" >>"$STATE/log" ;;
+        # A status of another context is written, but it is not vm-gate's.
+        if [ "$context" = vm-gate ]; then
+            printf '%s\t%s\n' "$state" "$description" >>"$STATE/status-$sha"
+            echo "status $sha $state $description" >>"$STATE/log"
+        else
+            echo "status $sha $state $description (context '$context')" >>"$STATE/log"
+        fi ;;
     "GET compare/"*)
         file=$STATE/compare-${path#compare/}
         [ -e "$file" ] || exit 1
         answer <"$file" ;;
+    "GET git/trees/"*)
+        # The tree of a commit: empty unless a test gave it one. Without
+        # recursive=1 the API lists the top level only.
+        sha=${path#git/trees/}
+        [ ! -e "$STATE/gone-$sha" ] || exit 1
+        if [ -e "$STATE/tree-$sha" ]; then cat "$STATE/tree-$sha"; else echo '{"truncated": false, "tree": []}'; fi |
+            case "&$query&" in
+                *"&recursive=1&"*) cat ;;
+                *) jq '.tree |= map(select(.path | contains("/") | not))' ;;
+            esac | answer ;;
     "GET pulls")
         answer <"$STATE/pulls" ;;
     "GET pulls/7")
@@ -141,7 +180,17 @@ many() {
     jq -n '{files: [range(300) | {filename: "docs/page-\(.).md", sha: "d\(.)", status: "modified"}]}' \
         >"$work/state/compare-$1...$2"
 }
+# tree COMMIT [FILE=MODE]...: the tree of COMMIT, as far as a test needs it.
+tree() {
+    local commit=$1 entry
+    shift
+    for entry in "$@"; do printf '%s\n' "$entry"; done |
+        jq -R -s '{truncated: false, tree: (split("\n") | map(select(. != "") | split("=")
+            | {path: .[0], mode: .[1], type: "blob"}))}' >"$work/state/tree-$commit"
+}
 had() { printf '%s\t%s\n' "$2" "$3" >>"$work/state/status-$1"; }  # had COMMIT STATE DESCRIPTION
+# others COMMIT N: N statuses of another context are newer than vm-gate's.
+others() { echo "$2" >"$work/state/others-$1"; }
 label() { grep -qx vm-tests "$work/state/labels" && echo set || echo removed; }
 last() { tail -n1 "$work/state/status-$1" 2>/dev/null | tr '\t' ' '; }  # last COMMIT
 log() { paste -sd'|' "$work/state/log"; }
@@ -151,7 +200,9 @@ missing='failure changes the image, build or boot tests: add the label vm-tests'
 again='the label vm-tests was removed, add the label vm-tests again after review'
 
 # gate ACTION [NAME=VALUE]...: one run of vm-gate.yml on the head `new` of #7,
-# pushed onto `old`; the exit code is in $code.
+# pushed onto `old`; the exit code is in $code. $gate_script is the script
+# that runs: the workflow's, unless a test puts a changed copy there.
+gate_script=$work/vm-gate.sh
 gate() {
     local action=$1
     shift
@@ -159,7 +210,7 @@ gate() {
         REPO=example/appliance NUMBER=7 SHA=new BASE=base BASE_REF=develop \
         HEAD_REPO=example/appliance BEFORE=old ACTION="$action" LABEL='' LABEL_AT_EVENT=false \
         RUN_URL=https://example.invalid/run "$@" \
-        bash "$work/vm-gate.sh" >"$work/out" 2>&1 </dev/null
+        bash "$gate_script" >"$work/out" 2>&1 </dev/null
     code=$?
 }
 
@@ -416,6 +467,107 @@ expect "the label cannot be removed: the run fails" 1 "$code"
 expect "the label cannot be removed: failure, not pending" \
     "failure a push that changes what the VM tests run: the label vm-tests could not be removed, remove it by hand" "$(last new)"
 
+echo "# vm-gate.yml: the file mode is part of what the VM tests run (#167)"
+# The comparison answers the same before and after the push: only the tree
+# tells a `chmod +x` on a file the pull request already changes.
+reset vm-tests
+compare base new tests/boot/run.sh=t1
+compare develop new tests/boot/run.sh=t1
+compare develop old tests/boot/run.sh=t1
+tree new tests/boot/run.sh=100755
+tree old tests/boot/run.sh=100644
+had old pending "waiting"
+gate synchronize LABEL_AT_EVENT=true
+expect "a push that changes only the mode of a file under tests/boot/: the label is removed" \
+    "remove-label|status new failure a push that changes what the VM tests run: $again" "$(log)"
+
+# develop brought a file of its own under tests/boot/: it is in the tree, but
+# it is none of the pull request's files.
+reset vm-tests
+compare base new tests/boot/run.sh=t1
+compare develop new tests/boot/run.sh=t1
+compare develop old tests/boot/run.sh=t1
+tree new tests/boot/run.sh=100755 tests/boot/from-develop.sh=100755
+tree old tests/boot/run.sh=100755
+had old pending "waiting"
+gate synchronize LABEL_AT_EVENT=true
+expect "a rebase that leaves content and mode as they were: the label stays" set "$(label)"
+expect "a rebase that leaves content and mode as they were: pending" "$pending" "$(last new)"
+
+reset vm-tests
+compare base new tests/boot/run.sh=t1
+compare develop new tests/boot/run.sh=t1
+compare develop old tests/boot/run.sh=t1
+tree new tests/boot/run.sh=100755
+tree old tests/boot/run.sh=100755
+jq '.truncated = true' "$work/state/tree-new" >"$work/state/tree-new.tmp" && mv "$work/state/tree-new.tmp" "$work/state/tree-new"
+had old pending "waiting"
+gate synchronize LABEL_AT_EVENT=true
+expect "a tree that is truncated: removed" \
+    "failure a push that changes what the VM tests run: $again" "$(last new)"
+
+echo "# vm-gate.yml: every page of a list that is read (#167)"
+reset vm-tests
+compare base new image/Containerfile=a2
+compare develop new image/Containerfile=a2
+compare develop old image/Containerfile=a1
+had old pending "waiting"
+others old 100
+gate synchronize LABEL_AT_EVENT=true
+expect "a push onto a commit whose pending is behind 100 newer statuses: the label stays" set "$(label)"
+expect "a push onto a commit whose pending is behind 100 newer statuses: pending" "$pending" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+had new success "the VM tests of this commit passed"
+others new 250
+gate reopened LABEL_AT_EVENT=true
+expect "reopened on a head whose result is behind 250 newer statuses: nothing written" "" "$(log)"
+
+# More labels than a page of 30 holds, vm-tests the last of them.
+mapfile -t filler < <(seq -f 'label-%g' 40)
+reset "${filler[@]}" vm-tests
+compare base new image/Containerfile=a1
+gate opened
+expect "the label as the 41st of the pull request: pending" "$pending" "$(last new)"
+
+echo "# the stub answers as the API would: a call that lost a parameter fails (#167)"
+# Each changed copy of the script must come out differently; a copy that the
+# sed did not change comes out like the workflow's and fails here.
+sed 's/-f context=vm-gate/-f context=other/' "$work/vm-gate.sh" >"$work/changed.sh"
+gate_script=$work/changed.sh
+reset
+compare base new docs/en/index.md=a1
+gate opened
+expect "a status written under another context: vm-gate has none" "" "$(last new)"
+
+sed 's/labels?per_page=100/labels/' "$work/vm-gate.sh" >"$work/changed.sh"
+reset "${filler[@]}" vm-tests
+compare base new image/Containerfile=a1
+gate opened
+expect "the labels read without per_page=100: the 41st is not seen" "$missing" "$(last new)"
+
+sed 's/statuses?per_page=100/statuses/; s/gh api --paginate/gh api/' "$work/vm-gate.sh" >"$work/changed.sh"
+reset vm-tests
+compare base new image/Containerfile=a1
+had new success "the VM tests of this commit passed"
+others new 30
+gate reopened LABEL_AT_EVENT=true
+expect "the statuses read as one page of 30: the result behind them is not seen" \
+    "failure no VM test result for this commit: remove the label vm-tests and set it again" "$(last new)"
+
+sed 's/?recursive=1//' "$work/vm-gate.sh" >"$work/changed.sh"
+reset vm-tests
+compare base new tests/boot/run.sh=t1
+compare develop new tests/boot/run.sh=t1
+compare develop old tests/boot/run.sh=t1
+tree new tests/boot/run.sh=100755
+tree old tests/boot/run.sh=100644
+had old pending "waiting"
+gate synchronize LABEL_AT_EVENT=true
+expect "the tree read without recursive=1: the mode under tests/boot/ is not seen" set "$(label)"
+gate_script=$work/vm-gate.sh
+
 # --- vm-gate-finalize.yml ---
 # finalize: one run on the completed vm-tests run of the commit `new`.
 finalize() {
@@ -489,6 +641,25 @@ finalize
 expect "pending, the label removed after the lookup: nothing written" "" "$(log)"
 expect "the label removed after the lookup: the run says why" \
     "vm-gate: unchanged (the label vm-tests was removed from #7 meanwhile)" "$(cat "$work/out")"
+
+echo "# vm-gate-finalize.yml: every page of the statuses, and job names as data (#167)"
+tested vm-tests
+had new pending "waiting"
+others new 100
+finalize
+expect "pending behind 100 newer statuses of other contexts: the result is written" "$passed" "$(last new)"
+
+# The names of the jobs are the pull request's. A failed job whose name
+# holds a tab or a line break must not read as a build that succeeded.
+for name in 'build\tsuccess' 'x\nbuild\tsuccess'; do
+    tested vm-tests
+    had new pending "waiting"
+    jq --arg name "$name" '.jobs[0] = {name: ($name | "\"\(.)\"" | fromjson), status: "completed", conclusion: "failure"}' \
+        "$work/state/jobs" >"$work/state/jobs.new" && mv "$work/state/jobs.new" "$work/state/jobs"
+    finalize
+    expect "a failed job named $name: no result of the build" \
+        "failure the VM tests of this commit did not pass (build: missing)" "$(last new)"
+done
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

@@ -28,11 +28,12 @@ name: vm-gate
 #   - the head is in a fork;
 #   - the push changes what the VM jobs run, in the pull request's own
 #     version: vm-tests.yml, build/, tests/boot/ and tests/image/ as the
-#     pull request changes them against develop, before and after the push.
+#     pull request changes them against develop, before and after the push,
+#     by content and by file mode (a `chmod +x` is a change).
 #     A rebase or a merge of develop that leaves the pull request's own
 #     changes to these paths as they were keeps the label; a comparison
-#     that fails (the commit before a force push is gone) or lists 300
-#     files counts as a change;
+#     that fails (the commit before a force push is gone), lists 300
+#     files or meets a truncated tree counts as a change;
 #   - the commit before the push was not accepted here: it has no vm-gate
 #     status, or one that says the label is missing. GitHub keeps one
 #     waiting run per concurrency group, so the run of an earlier push can
@@ -111,10 +112,11 @@ jobs:
             gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" --jq '[.[].name] | index("vm-tests") != null'
           }
           # The newest vm-gate status of a commit as "state<TAB>description";
-          # nothing if it has none.
+          # nothing if it has none. Every page of the list, newest first:
+          # the status can sit behind 100 newer ones of other contexts.
           latest() {
-            gh api "repos/$REPO/commits/$1/statuses?per_page=100" \
-              --jq '[.[] | select(.context == "vm-gate")] | first | if . == null then empty else "\(.state)\t\(.description // "")" end'
+            gh api --paginate "repos/$REPO/commits/$1/statuses?per_page=100" |
+              jq -rs '[.[][] | select(.context == "vm-gate")] | first | if . == null then empty else "\(.state)\t\(.description // "")" end'
           }
           # A commit this workflow accepted for the VM tests: vm-gate is
           # pending or green on it, or vm-gate-finalize.yml has written the
@@ -129,16 +131,28 @@ jobs:
           # What the VM jobs run, in the pull request's own version at a
           # commit: the files it changes against the base branch (from the
           # merge base, so a newer develop adds nothing) under the paths the
-          # jobs execute, each with the content it has, one JSON line per
-          # file (a file name can hold a line break).
+          # jobs execute, each with the content and the file mode it has,
+          # one JSON line per file (a file name can hold a line break). The
+          # comparison names no mode (a file whose mode alone differs from
+          # the base is listed, with no blob; a `chmod +x` on a file the
+          # pull request already changes leaves its entry as it was), so
+          # the mode comes from the commit's tree; a file that is gone has
+          # none.
           own() {
-            local out
+            local out files modes
             out=$(gh api "repos/$REPO/compare/$BASE_REF...$1" --jq '(.files | length),
               (.files[] | select([.filename, .previous_filename // ""]
                 | any(test("^(build/|tests/boot/|tests/image/|\\.github/workflows/vm-tests\\.yml$)")))
               | [.status, .previous_filename, .filename, .sha] | tojson)') || return 1
             [ "$(head -n1 <<<"$out")" -lt 300 ] || return 1
-            tail -n +2 <<<"$out" | sort
+            files=$(tail -n +2 <<<"$out")
+            [ -n "$files" ] || return 0
+            modes=$(gh api "repos/$REPO/git/trees/$1?recursive=1" --jq '.truncated,
+              ([.tree[] | select(.path
+                | test("^(build/|tests/boot/|tests/image/|\\.github/workflows/vm-tests\\.yml$)"))
+                | {key: .path, value: .mode}] | from_entries | tojson)') || return 1
+            [ "$(head -n1 <<<"$modes")" = false ] || return 1
+            jq -c --argjson modes "$(tail -n +2 <<<"$modes")" '. + [$modes[.[2]]]' <<<"$files" | sort
           }
 
           has_label=$(labelled)
