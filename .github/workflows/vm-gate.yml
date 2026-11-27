@@ -81,8 +81,23 @@ name: vm-gate
 # not read. A record that cannot be read, or that does not name this head
 # after three readings, counts as too new. What the grace time cannot see:
 # a page that was loaded more than 5 minutes before the click and never
-# refreshed, and a head the one who set the label pushed without reading
-# what it merged (the button "Update branch").
+# refreshed; a head the one who set the label pushed without reading what
+# it merged (the button "Update branch"); and a label that was set so soon
+# after a push that the push's own event already holds it (GitHub builds
+# the event a moment after the push). That push counts as one that found
+# the label set: from a fork it loses the label anyway, but a push to a
+# branch of this repository that changes only the image, onto an accepted
+# commit, gets pending from its own run. The label's run then takes it
+# back, unless it is replaced as the waiting run (the pull request closed
+# and reopened at once: the run of `reopened` finds pending and leaves
+# it). Whoever can push to a branch here could set the label as well, so
+# this is a gap against a mistake, not a way in.
+#
+# What this protects is the result, not the run: vm-tests.yml starts on the
+# `labeled` event with the label its event holds, so the VM tests of a
+# head whose label is taken back here still run that head's code once.
+# Their result does not count. Reading the label when vm-tests.yml runs
+# is #152.
 #
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the
@@ -109,11 +124,15 @@ permissions:
 # an earlier run wrote; only `opened`, `synchronize` and the label's own
 # `labeled` event ever set pending, so no later event accepts that head.
 # The run of a push and the run of a label that was set right after it can
-# come in either order, or the push's run is the one dropped: whichever of
-# them finds a label that the push's event did not hold reads the same
-# records (#151) and decides the same, and the one that comes after a
-# removal finds no label and leaves the status that says why. A push whose
-# event already held the label is for the rules of #130 alone.
+# come in either order, or the push's run is the one dropped. If the
+# push's event did not hold the label, whichever of them finds it reads
+# the same records (#151) and decides the same, and the one that comes
+# after a removal finds no label and leaves the status that says why. If
+# the push's event already held the label (it can, for a label set a
+# second after the push), the push's run applies the rules of #130 alone
+# and the two can differ: pending from the push's run stands until the
+# label's run takes it back, and for good if that run is dropped (the
+# header names this as what remains).
 concurrency:
   group: vm-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false

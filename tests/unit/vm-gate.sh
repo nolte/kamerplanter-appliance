@@ -140,6 +140,7 @@ case "$method $path" in
             *) exit 1 ;;
         esac
         [ ! -e "$STATE/activity-gone" ] || exit 1
+        if [ -e "$STATE/activity-fails-once" ]; then rm "$STATE/activity-fails-once"; exit 1; fi
         if [ -e "$STATE/activity-lags" ]; then rm "$STATE/activity-lags"; echo '[]'; exit 0; fi
         touch "$STATE/activity-$owner"
         jq -R -s --arg ref "$ref" '[split("\n")[] | select(. != "") | split("\t")
@@ -750,6 +751,20 @@ expect "the push's run removed the label, the label's run after it: the reason s
 gate unlabeled LABEL=cicd
 expect "another label removed after it: the reason stays" "$soon" "$(last new)"
 
+# The same on the push's own run, when its event did not hold the label yet.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:58 1
+gate synchronize LABEL_AT_EVENT=false
+expect "synchronize, the label set 2 s after the push by the one who pushed: pending" "status new $pending" "$(log)"
+
+# The activity cannot be read once: the next reading has the push.
+reset vm-tests
+compare base new image/Containerfile=a1
+touch "$work/state/activity-fails-once"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the activity cannot be read at the first reading: pending" "status new $pending" "$(log)"
+
 # The activity is behind the run once: the next reading has the push.
 reset vm-tests
 compare base new image/Containerfile=a1
@@ -838,6 +853,21 @@ pushed 12:59:30 2
 gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
 expect "nothing the VM tests cover, the label set a moment after the push: success, the label stays" \
     "success no change the VM tests cover set" "$(last new) $(label)"
+
+# What remains (the header of vm-gate.yml): the label was set a second after
+# a push to a branch of this repository, and the push's event already holds
+# it. The push's run applies the rules of #130 alone and sets pending; the
+# label's run after it takes that back.
+reset vm-tests
+compare base new image/Containerfile=a2
+compare develop new image/Containerfile=a2
+compare develop old image/Containerfile=a1
+had old pending "waiting"
+pushed 12:59:59 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a push whose event holds a label set 1 s after it: pending from the push's run" "$pending" "$(last new)"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label's run after it: the label is removed, no pending" "$soon removed" "$(last new) $(label)"
 
 # The run of the label's event waited while the head moved on: the label is
 # not this commit's to lose.
