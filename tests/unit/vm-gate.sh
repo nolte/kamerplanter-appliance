@@ -912,8 +912,8 @@ gate synchronize LABEL_AT_EVENT=true
 expect "the label's run first, the push's run after it: one removal, the reason stays" \
     "remove-label|status new $soon" "$(log)"
 
-# The one who pushed has seen the head: the delivery run's own pushes, and
-# Renovate when it sets its label again after a rebase.
+# The one who pushed has seen the head: an account that sets the label right
+# after its own push (the delivery run's pushes).
 at_push
 pushed 12:59:59 1
 gate synchronize LABEL_AT_EVENT=true
@@ -999,6 +999,20 @@ fork
 gate synchronize LABEL_AT_EVENT=true HEAD_REPO=someone/appliance
 expect "a fork's push whose event holds a label set 1 s after it: the reason of #130, one removal" \
     "remove-label|status new failure a push from a fork: $again" "$(log)"
+
+# The exemption is for a head in this repository, by the ids the pull request
+# has when the job runs: the fork rule of #130 goes by the name in the event,
+# which can be this repository's while the head is in another one. Here the
+# label is a second older than the fork's push, so only the comparison of the
+# ids in measured() keeps it from the exemption: without it this case comes
+# out pending (traced against the stub, where pulls/7 answers the ids 10 and
+# 20 and the activity of 20 names `new` since 13:00:01; not run locally).
+at_push
+pushed 13:00:01 2 new someone
+fork
+gate synchronize LABEL_AT_EVENT=true
+expect "a push with an older label, the head in another repository by its id: no exemption, no pending" \
+    "$soon removed" "$(last new) $(label)"
 
 # The rules of #130 come first and give their own reason; the label is
 # removed once.

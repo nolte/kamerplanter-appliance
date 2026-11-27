@@ -80,8 +80,9 @@ name: vm-gate
 # of it; a label of the same second or younger is judged as on `labeled`.
 # So a push's run with the label needs the two records as well, and loses
 # the label when they cannot be read; it reads them six times before it
-# gives up, since it starts seconds after the push and nobody sets a label
-# again that Renovate's rebase lost. Both times and both accounts are
+# gives up, since it starts seconds after the push, and whether Renovate
+# sets a label again that its rebase lost is not established (#158), so
+# someone may have to set it by hand. Both times and both accounts are
 # GitHub's own records, none of them the commit's: the newest `labeled`
 # event of vm-tests and the newest `reopened` event in the pull request's
 # events (pull-requests: read), and the newest entry of the head branch in
