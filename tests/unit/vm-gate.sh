@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the scripts of .github/workflows/vm-gate.yml and
-# .github/workflows/vm-gate-finalize.yml, as the workflow files hold them,
+# .github/workflows/vm-gate-finalize.yml and the script of the job consent of
+# .github/workflows/vm-tests.yml, as the workflow files hold them,
 # against a stub of gh, and checks what they decide (#145, #130, #151): the
 # label vm-tests is read from the API and not from the event, a push
 # withdraws it when the head is in a fork, when the push changes the pull
@@ -9,7 +10,9 @@
 # removed again, and vm-gate-finalize writes a result only on a commit that
 # vm-gate accepted and while the label is set. Both workflows run as develop
 # has them, so a pull request never runs its own version of them: this test
-# is what runs a change to them before the merge.
+# is what runs a change to them before the merge. The job consent ends a run
+# of the VM tests whose label is gone or whose head vm-gate has not accepted
+# (#152), and vm-gate-finalize reads such a run as one that tested nothing.
 #
 # The stub keeps the pull request in files: its labels and events, the
 # vm-gate statuses of each commit, the activity of the head repository, and
@@ -49,11 +52,12 @@ import sys
 import yaml
 
 root, work = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-for name, job in (("vm-gate", "gate"), ("vm-gate-finalize", "finalize")):
+for name, job, script in (("vm-gate", "gate", "vm-gate"), ("vm-gate-finalize", "finalize", "vm-gate-finalize"),
+                          ("vm-tests", "consent", "vm-tests-consent")):
     doc = yaml.safe_load((root / ".github" / "workflows" / f"{name}.yml").read_text())
     runs = [s["run"] for s in doc["jobs"][job]["steps"] if "run" in s]
-    assert len(runs) == 1, f"{name}.yml: expected one script, found {len(runs)}"
-    (work / f"{name}.sh").write_text(runs[0])
+    assert len(runs) == 1, f"{name}.yml: the job {job}: expected one script, found {len(runs)}"
+    (work / f"{script}.sh").write_text(runs[0])
 EOF
 
 # --- the stub of gh:
@@ -115,6 +119,7 @@ pages() {
 }
 case "$method $path" in
     "GET issues/7/labels")
+        [ ! -e "$STATE/labels-gone" ] || exit 1
         jq -R -s 'split("\n") | map(select(. != "") | {name: .})' "$STATE/labels" | pages ;;
     "DELETE issues/7/labels/vm-tests")
         echo "remove-label" >>"$STATE/log"
@@ -152,12 +157,15 @@ case "$method $path" in
         [ -n "$sha" ] && [ ! -e "$STATE/gone-$sha" ] || exit 1
         touch "$STATE/status-$sha"
         # Newest first, as the API lists them, with the statuses of another
-        # context in front: one, or as many as $STATE/others-<sha> says.
+        # context in front: one, or as many as $STATE/others-<sha> says. A
+        # status is from 11:00 unless its line names a time.
         tac "$STATE/status-$sha" |
             jq -R -s --argjson others "$(cat "$STATE/others-$sha" 2>/dev/null || echo 1)" \
-                '[range($others) | {context: "other", state: "failure", description: "not vm-gate \(.)"}] +
+                '[range($others) | {context: "other", state: "failure", description: "not vm-gate \(.)",
+                    created_at: "2026-01-01T14:00:00Z"}] +
                 (split("\n") | map(select(. != "") | split("\t")
-                    | {context: "vm-gate", state: .[0], description: .[1]}))' | pages ;;
+                    | {context: "vm-gate", state: .[0], description: .[1],
+                       created_at: "2026-01-01T\(.[2] // "11:00:00")Z"}))' | pages ;;
     "POST statuses/"*)
         sha=${path#statuses/}
         [ ${#description} -le 140 ] || { echo "gh stub: description over 140 characters" >&2; exit 1; }
@@ -258,6 +266,11 @@ tree() {
             | {path: .[0], mode: .[1], type: "blob"}))}' >"$work/state/tree-$commit"
 }
 had() { printf '%s\t%s\n' "$2" "$3" >>"$work/state/status-$1"; }  # had COMMIT STATE DESCRIPTION
+# had_at COMMIT TIME STATE DESCRIPTION: a status written at TIME (of 2026-01-01).
+had_at() { printf '%s\t%s\t%s\n' "$3" "$4" "$2" >>"$work/state/status-$1"; }
+# unlabelled TIME ACCOUNT: the newest event of #7 says that ACCOUNT removed
+# the label vm-tests at TIME (of 2026-01-01).
+unlabelled() { printf 'unlabeled\tvm-tests\t2026-01-01T%sZ\t%s\n' "$1" "$2" >>"$work/state/events"; }
 # others COMMIT N: N statuses of another context are newer than vm-gate's.
 others() { echo "$2" >"$work/state/others-$1"; }
 label() { grep -qx vm-tests "$work/state/labels" && echo set || echo removed; }
@@ -1043,6 +1056,219 @@ for name in 'build\tsuccess' 'x\nbuild\tsuccess'; do
     expect "a failed job named $name: no result of the build" \
         "failure the VM tests of this commit did not pass (build: missing)" "$(last new)"
 done
+
+# The run that the job consent of vm-tests.yml ended (#152): the job itself
+# succeeded and every other job was skipped, so the run concluded success.
+tested vm-tests
+had new pending "waiting"
+jq -n '{jobs: ([{name: "consent", status: "completed", conclusion: "success"}]
+    + [("build", "boot", "update", "data-disk", "report") | {name: ., status: "completed", conclusion: "skipped"}])}' \
+    >"$work/state/jobs"
+finalize
+expect "a run that the job consent ended, the label set again since: nothing written" "" "$(log)"
+expect "a run that the job consent ended: the run says why" \
+    "vm-gate: unchanged (the vm-tests run skipped the build and tested nothing)" "$(cat "$work/out")"
+
+# A job consent that failed leaves the build skipped as well.
+jq '.jobs[0].conclusion = "failure"' "$work/state/jobs" >"$work/state/jobs.new" && mv "$work/state/jobs.new" "$work/state/jobs"
+finalize
+expect "a run whose job consent failed: nothing written" "" "$(log)"
+
+# --- vm-tests.yml, the job consent ---
+# consent ACTION [NAME=VALUE]...: one run of the job's script for the head
+# `new` of #7, on a pull request's event from 13:00:00, the second the label
+# of `reset vm-tests` was set; the exit code is in $code and what the job
+# hands to the build in $work/output. ACTION only names the event the case
+# is about: the script decides the same for a push and for a label.
+consent_script=$work/vm-tests-consent.sh
+consent() {
+    shift
+    : >"$work/output"
+    env PATH="$work/bin:$PATH" STATE="$work/state" GH_TOKEN=none GITHUB_OUTPUT="$work/output" \
+        GITHUB_STEP_SUMMARY="$work/summary" REPO=example/appliance EVENT=pull_request \
+        NUMBER=7 SHA=new SINCE=2026-01-01T13:00:00Z VM_TESTS_PAUSE=0 VM_TESTS_TRIES=3 "$@" \
+        bash "$consent_script" >"$work/out" 2>&1 </dev/null
+    code=$?
+}
+ran() { echo "$code $(cat "$work/output")"; }
+
+echo "# vm-tests.yml: the run goes on only with the label and on a head vm-gate accepted (#152)"
+reset
+consent '' EVENT=push NUMBER='' SHA='' SINCE=''
+expect "a push to develop: the tests run, nothing is read" "0 run=true" "$(ran)"
+consent '' EVENT=workflow_dispatch NUMBER='' SHA='' SINCE=''
+expect "a run by hand: the tests run" "0 run=true" "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
+consent labeled
+expect "the label set, vm-gate pending since: the tests run" "0 run=true" "$(ran)"
+consent synchronize
+expect "a push that kept the label, vm-gate pending since: the tests run" "0 run=true" "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 success "no change the VM tests cover"
+consent labeled
+expect "the label on a pull request that changes nothing covered: the tests run" "0 run=true" "$(ran)"
+
+# A new attempt of a run whose tests failed.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+had_at new 13:30:00 failure "the VM tests of this commit did not pass (boot: failure)"
+consent labeled
+expect "a result of the VM tests since the event: the tests run again" "0 run=true" "$(ran)"
+
+# vm-gate.yml withdrew the label on the push that started the run.
+reset automerge
+labelled 12:00:00 1
+unlabelled 13:00:09 3
+had_at new 13:00:10 failure "a push that changes what the VM tests run: $again"
+consent synchronize
+expect "a push whose label was withdrawn: the run ends, green" "0 run=false" "$(ran)"
+expect "a push whose label was withdrawn: the summary says why" \
+    "The VM tests did not run: #7 does not have the label vm-tests any more." "$(cat "$work/summary")"
+rm -f "$work/summary"
+
+# The label was set again before the job looked: the label's own run tests
+# the head, and this one must not run the suites a second time.
+reset vm-tests
+: >"$work/state/events"
+labelled 12:00:00 1
+unlabelled 13:00:09 3
+labelled 13:00:20 1
+had_at new 13:00:10 failure "a push that changes what the VM tests run: $again"
+had_at new 13:00:28 pending "waiting"
+consent synchronize
+expect "a push whose label was withdrawn and set again at once: the run ends" "0 run=false" "$(ran)"
+consent labeled SINCE=2026-01-01T13:00:20Z
+expect "the run of the label that was set again: the tests run" "0 run=true" "$(ran)"
+
+# A label that was set too soon and removed again (#151), and set once more.
+reset vm-tests
+unlabelled 13:00:09 3
+labelled 13:06:00 1
+had_at new 13:00:10 failure "the label was set less than 5 minutes after a push or a reopening: $again"
+had_at new 13:06:08 pending "waiting"
+consent labeled
+expect "the run of a label that was removed again and set once more: the run ends" "0 run=false" "$(ran)"
+
+# Removed and set by hand in the same second: the event that set it has that
+# time, and the removal is not after it.
+reset vm-tests
+: >"$work/state/events"
+labelled 12:00:00 1
+unlabelled 13:00:00 1
+labelled 13:00:00 1
+had_at new 13:00:08 pending "waiting"
+consent labeled
+expect "the label removed and set in the second of the event: the tests run" "0 run=true" "$(ran)"
+
+reset vm-tests
+: >"$work/state/events"
+labelled 12:00:00 1
+unlabelled 12:30:00 1
+labelled 13:00:00 1
+had_at new 13:00:08 pending "waiting"
+consent labeled
+expect "a removal from before the event: the tests run" "0 run=true" "$(ran)"
+
+# The removal is on the second page of the events, which come oldest first.
+reset vm-tests
+: >"$work/state/events"
+for _ in $(seq 100); do labelled 12:20:00 1 automerge; done
+unlabelled 13:00:09 3
+labelled 13:00:20 1
+had_at new 13:00:28 pending "waiting"
+consent synchronize
+expect "the removal behind 100 older events: the run ends" "0 run=false" "$(ran)"
+# The same events read as one page: the copy of the script must come out
+# differently, or the case above does not test the pages.
+sed 's|gh api --paginate \(.*/events?\)|gh api \1|' "$work/vm-tests-consent.sh" >"$work/changed.sh"
+consent_script=$work/changed.sh
+consent synchronize
+expect "the events read as one page: the removal is not seen" "0 run=true" "$(ran)"
+consent_script=$work/vm-tests-consent.sh
+
+echo "# vm-tests.yml: no decision of vm-gate for this event, no tests (#152)"
+# The commit was the head before and was accepted then; vm-gate.yml has not
+# decided about this event yet.
+reset vm-tests
+had_at new 11:00:00 pending "waiting"
+consent labeled
+expect "an accepted status from before the event: the job fails, the tests do not run" "1 " "$(ran)"
+expect "an accepted status from before the event: the run says what it waited for" \
+    "::error::vm-gate has not accepted this commit for the VM tests (vm-gate: no status since the event): the VM tests do not run. Remove the label vm-tests and set it again, or run the failed jobs again once vm-gate has accepted the commit." \
+    "$(tail -n1 "$work/out")"
+
+for refused in "changes the image, build or boot tests: add the label vm-tests" \
+    "no VM test result for this commit: remove the label vm-tests and set it again" \
+    "no VM test result for this commit: it is not the head of the pull request any more"; do
+    reset vm-tests
+    had_at new 13:00:08 failure "$refused"
+    consent labeled
+    expect "vm-gate failed with '${refused%%:*}', the label set: the tests do not run" "1 " "$(ran)"
+done
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+had_at new 13:00:30 failure "no VM test result for this commit: remove the label vm-tests and set it again"
+consent labeled
+expect "pending, and a failure of vm-gate.yml after it: the tests do not run" "1 " "$(ran)"
+
+reset vm-tests
+consent labeled
+expect "no vm-gate status on the commit: the tests do not run" "1 " "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+others new 100
+consent labeled
+expect "pending behind 100 newer statuses of other contexts: the tests run" "0 run=true" "$(ran)"
+
+# What cannot be read is no consent.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+touch "$work/state/gone-new"
+consent labeled
+expect "the statuses cannot be read: the tests do not run" "1 " "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+touch "$work/state/events-gone"
+consent labeled
+expect "the events cannot be read: the tests do not run" "1 " "$(ran)"
+
+reset "${filler[@]}" vm-tests
+had_at new 13:00:08 pending "waiting"
+consent labeled
+expect "the label as the 41st of the pull request: the tests run" "0 run=true" "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+touch "$work/state/labels-gone"
+consent labeled
+expect "the labels cannot be read: the tests do not run" "1 " "$(ran)"
+
+# Without the event's time every status would be one since the event, and
+# every removal one after it.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+consent labeled SINCE=''
+expect "an event without a time, vm-gate pending: the tests do not run" "1 " "$(ran)"
+reset vm-tests
+: >"$work/state/events"
+labelled 12:00:00 1
+unlabelled 12:30:00 1
+labelled 13:00:00 1
+consent labeled SINCE=''
+expect "an event without a time, a removal from before it: the job fails, it does not end green" "1 " "$(ran)"
+
+# vm-gate.yml takes this one back for no later event: the job does not wait.
+reset vm-tests
+had_at new 13:00:08 failure "$(cut -d' ' -f2- <<<"$moved")"
+consent labeled
+expect "a commit that is not the head any more: the job fails at once" \
+    "1 ::error::this commit is not the head of #7 any more (vm-gate): the VM tests do not run." "$code $(tail -n1 "$work/out")"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

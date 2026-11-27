@@ -21,7 +21,10 @@
 # reads it from the API and not from the event (#145), is the only workflow
 # that removes it, no workflow sets it, and vm-gate-finalize.yml writes its
 # result only after it has read vm-gate's status of the commit and the
-# label. What the two scripts decide is checked by tests/unit/vm-gate.sh.
+# label. And the runs of the VM tests (#152): every job of vm-tests.yml waits
+# for the job consent, which reads the label from the API with a token that
+# only reads, and runs on the same statuses of vm-gate as the other two
+# scripts. What the three scripts decide is checked by tests/unit/vm-gate.sh.
 # Reads the YAML files and the scripts only; needs PyYAML.
 #
 # Usage: tests/unit/workflows.sh
@@ -407,6 +410,86 @@ else:
 
 vm_doc = load(workflows / "vm-tests.yml")
 vm_jobs = vm_doc.get("jobs") or {}
+
+# #152: the label in the event that starts a run of the VM tests is older
+# than what vm-gate.yml decides about it. The job consent reads the label
+# and vm-gate's status from the API, and nothing is built or booted before
+# it has said that the run goes on. A text check, as above: a pull request
+# runs its own vm-tests.yml, so this keeps an honest change from taking the
+# job out of the way, and vm-gate-finalize.yml is what keeps the result.
+# What the file says outside its comments.
+vm_text = "\n".join(line for line in (workflows / "vm-tests.yml").read_text().splitlines()
+                    if not line.lstrip().startswith("#"))
+consent = vm_jobs.get("consent") or {}
+consent_script = scripts(consent)
+if re.search(r'gh api "repos/\$REPO/issues/\$NUMBER/labels[?"]', consent_script):
+    print("ok vm-tests.yml: the job consent reads the pull request's labels from the API")
+else:
+    print("FAIL vm-tests.yml: the job consent does not read the pull request's labels from the API")
+# The event's labels only sort out, in the condition of consent, the events
+# that never start the tests; no other job and no script decides on them.
+if len(re.findall(r"github\.event\.pull_request\.labels", vm_text)) == 1 and \
+        "github.event.pull_request.labels" in str(consent.get("if", "")) and \
+        "GITHUB_EVENT_PATH" not in vm_text:
+    print("ok vm-tests.yml takes the event's labels only in the condition of the job consent")
+else:
+    print("FAIL vm-tests.yml decides on the labels of the event outside the condition of the job consent")
+build = vm_jobs.get("build") or {}
+build_needs = build.get("needs") or []
+build_if = str(build.get("if", ""))
+if "consent" in ([build_needs] if isinstance(build_needs, str) else build_needs) and \
+        re.fullmatch(r"\s*needs\.consent\.outputs\.run == 'true'\s*", build_if):
+    print("ok vm-tests.yml: the build runs only when the job consent says so")
+else:
+    print(f"FAIL vm-tests.yml: the build does not depend on the job consent alone (needs {build_needs}, if {build_if!r})")
+
+
+def after_build(job_id, seen=()):
+    # Whether the job needs the build, directly or through another job.
+    needs = (vm_jobs.get(job_id) or {}).get("needs") or []
+    needs = [needs] if isinstance(needs, str) else needs
+    return "build" in needs or any(after_build(n, seen + (job_id,)) for n in needs if n not in seen)
+
+
+loose = sorted(j for j in vm_jobs if j not in ("consent", "build") and not after_build(j))
+if loose:
+    print(f"FAIL vm-tests.yml: the job(s) {', '.join(loose)} run without the build, so without the job consent")
+else:
+    print("ok vm-tests.yml: every job but consent is the build or needs it")
+# A job with a status function in its condition runs although the build was
+# skipped, unless the condition says otherwise: only the report job's
+# condition, as a whole, is known to (an `||` beside it would not be).
+eager = sorted(j for j, job in vm_jobs.items() if j not in ("consent", "build")
+               and re.search(r"always\(|cancelled\(|failure\(|success\(", str((job or {}).get("if", "")))
+               and " ".join(str(job.get("if", "")).split()) != "always() && needs.build.result != 'skipped'")
+if eager:
+    print(f"FAIL vm-tests.yml: the job(s) {', '.join(eager)} run also when the build was skipped")
+else:
+    print("ok vm-tests.yml: no job runs when the build was skipped")
+if consent.get("permissions") == {"pull-requests": "read", "statuses": "read"}:
+    print("ok vm-tests.yml: the job consent may read the pull request and commit statuses, and nothing else")
+else:
+    print(f"FAIL vm-tests.yml: the permissions of the job consent are {consent.get('permissions')}: "
+          "only pull-requests: read and statuses: read")
+if "${{" in consent_script or any("uses" in s for s in consent.get("steps") or []):
+    print("FAIL vm-tests.yml: the job consent expands an expression inside its script or uses an action")
+else:
+    print("ok vm-tests.yml: the job consent passes the event through env and uses no action")
+# The three scripts agree on what an accepted commit is: vm-gate.yml sets
+# it, vm-gate-finalize.yml writes a result on it, and consent runs on it.
+ACCEPTED = r"pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*)"
+for name, script in (("vm-gate.yml", gate_script), ("vm-gate-finalize.yml", finalize_script),
+                     ("vm-tests.yml (consent)", consent_script)):
+    if script.count(ACCEPTED) == 1:
+        print(f"ok {name} takes pending, green and a result of the VM tests as an accepted commit")
+    else:
+        print(f"FAIL {name} does not name the accepted statuses as the other scripts do ({ACCEPTED})")
+# The one refusal of vm-gate.yml on which consent gives up at once.
+MOVED = "no VM test result for this commit: it is not the head of the pull request any more"
+if gate_script.count(f'status failure "{MOVED}"') == 1 and consent_script.count(f"failure$'\\t''{MOVED}')") == 1:
+    print("ok vm-tests.yml (consent) gives up on the text vm-gate.yml writes for a commit that is not the head any more")
+else:
+    print("FAIL vm-tests.yml (consent) and vm-gate.yml do not name a commit that is not the head any more alike")
 for job_id, script in (("boot", "run.sh"), ("update", "update.sh"), ("data-disk", "data-disk.sh")):
     globs = []
     for step in (vm_jobs.get(job_id) or {}).get("steps") or []:
