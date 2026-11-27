@@ -30,9 +30,9 @@ name: vm-tests
 # if the label was removed after the run's event. This saves the runners of a
 # head nobody consented to; it protects nothing, since a pull request can
 # rewrite this file. What protects the result is vm-gate-finalize.yml, which
-# counts none of a commit vm-gate did not accept. The job also ends a run
-# whose commit is not the head of the pull request any more, which a new
-# attempt of an old run is (#180).
+# counts none of a commit vm-gate did not accept. The job also fails, before
+# the build, on a run whose commit is not the head of the pull request any
+# more, which a new attempt of an old run is (#180).
 #
 # consent decides once, before the build, so every job of the three suites
 # reads the label once more in its first step and fails there when the
@@ -45,8 +45,9 @@ name: vm-tests
 # test result and says so; vm-gate-finalize.yml writes none of it while the
 # label is gone. What these reads do not see (#180):
 #   - a label that is removed after a suite job has read it: that job runs
-#     to its end (17 minutes at most, measured), and vm-gate-finalize.yml
-#     writes no result while the label is gone;
+#     to its end (17 minutes at most in the runs measured; the timeouts
+#     are 75 to 120), and vm-gate-finalize.yml writes no result while the
+#     label is gone;
 #   - a label that is removed and set again while a run builds or tests: the
 #     run of the new `labeled` event waits for the running one and then
 #     builds and tests the same head a second time, also when the first
@@ -114,7 +115,9 @@ jobs:
   #     run, whose event is the one of the first attempt, or a run that the
   #     newer push is about to cancel. The job fails at once, as it does on
   #     vm-gate's own word for the same fact below, and says that this
-  #     commit has no tests to run: the head has a run of its own;
+  #     commit has no tests to run: the head has a run of its own. One
+  #     answer that names another head is enough, as it is for vm-gate.yml,
+  #     which reads the same and does not ask twice;
   #   - the label vm-tests, from the API;
   #   - whether it was removed after this run's event (the pull request's
   #     events): the run of a push whose label vm-gate.yml withdrew ends
@@ -341,7 +344,8 @@ jobs:
   #     the label is back, which the run of that new label then replaces
   #     with its own result. The steps that report results (`always()`)
   #     are left out, so the job shows this one error and no missing
-  #     results file;
+  #     results file, and the job's summary says why the table of the
+  #     report job has no row of it;
   #   - the label cannot be read (six tries, 10 s apart): the job goes on
   #     with a warning. consent fails when it cannot read, since nothing
   #     has been spent then and no consent is known; here the build is
@@ -410,6 +414,7 @@ jobs:
                 exit 0 ;;
               false)
                 echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
                 echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
                 exit 1 ;;
             esac
@@ -518,6 +523,7 @@ jobs:
                 exit 0 ;;
               false)
                 echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
                 echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
                 exit 1 ;;
             esac
@@ -640,6 +646,7 @@ jobs:
                 exit 0 ;;
               false)
                 echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
                 echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
                 exit 1 ;;
             esac

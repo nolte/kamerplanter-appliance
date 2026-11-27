@@ -14,7 +14,7 @@
 # is what runs a change to them before the merge. The job consent ends a run
 # of the VM tests whose label is gone or whose head vm-gate has not accepted
 # (#152), and vm-gate-finalize reads such a run as one that tested nothing.
-# It also ends a run whose commit is not the head of the pull request any
+# It also fails on a run whose commit is not the head of the pull request any
 # more, and the first step of the suite jobs of vm-tests.yml, which reads
 # the label again after the build, fails the job when the label is gone
 # (#180); vm-gate-finalize takes that failure for no result while the label
@@ -1600,7 +1600,9 @@ expect "the pull request cannot be read: the run says so" \
 label_script=$work/vm-tests-label.sh
 suite() {
     : >"$work/output"
+    rm -f "$work/summary"
     env PATH="$work/bin:$PATH" STATE="$work/state" GH_TOKEN=none GITHUB_OUTPUT="$work/output" \
+        GITHUB_STEP_SUMMARY="$work/summary" \
         REPO=example/appliance EVENT=pull_request NUMBER=7 VM_TESTS_PAUSE=0 VM_TESTS_TRIES=3 "$@" \
         bash "$label_script" >"$work/out" 2>&1 </dev/null
     code=$?
@@ -1617,6 +1619,8 @@ reset automerge
 suite
 expect "the label was removed while the build ran: the job fails and says that this is no test result" \
     "$gone" "$code $(cat "$work/output") $(tail -n1 "$work/out")"
+expect "the label was removed while the build ran: the job's summary says that it tested nothing" \
+    "This job tested nothing: #7 does not have the label vm-tests any more." "$(cat "$work/summary")"
 reset
 suite
 expect "no label at all: the job fails" "$gone" "$code $(cat "$work/output") $(tail -n1 "$work/out")"

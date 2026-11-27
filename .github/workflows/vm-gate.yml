@@ -118,7 +118,8 @@ name: vm-gate
 # label runs to its end, and a label that is removed and set again while a
 # run goes on has the head built and tested a second time by the label's
 # own run.
-# The result of such a run does not count. That job reads vm-gate's
+# The result of a run counts only while the label is set when
+# vm-gate-finalize.yml looks. The job consent reads vm-gate's
 # status by its text: it runs on pending and green from here and on a
 # result that vm-gate-finalize.yml wrote, the same three as accepted()
 # below and as vm-gate-finalize.yml, and it gives up at once on "it is not
