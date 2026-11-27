@@ -50,12 +50,14 @@ name: vm-gate-finalize
 # review is required on develop. The label names no commit:
 # vm-gate.yml removes it on a push from a fork and on a push that changes
 # what the jobs run, and it sets pending only on a head the label covers
-# (#130). What remains: the label covers the head the pull request has at
-# the moment it is set, also when a push arrived a moment before; and a
-# push from a branch of this repository that changes only the image keeps
-# the label, since its author could set the label as well. Only runs
-# of .github/workflows/vm-tests.yml count, not another file that calls
-# itself vm-tests.
+# (#130), and a label that is set less than 5 minutes after someone else
+# pushed the head, or after the pull request was reopened, is removed again
+# (#151). What remains: a page that was
+# loaded more than 5 minutes before the label was set and never refreshed
+# still shows the commit before a push; and a push from a branch of this
+# repository that changes only the image keeps the label, since its author
+# could set the label as well. Only runs of .github/workflows/vm-tests.yml
+# count, not another file that calls itself vm-tests.
 #
 # Statuses set with GITHUB_TOKEN start no workflow, so automerge.yaml would
 # not see this result; the automerge job below evaluates the pull request

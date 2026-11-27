@@ -4,7 +4,8 @@ name: vm-gate
 # (.github/settings.yml), on the head of every pull request (#43):
 #   success  the pull request changes nothing the VM tests cover;
 #   failure  it changes what they cover but lacks the label `vm-tests`, or a
-#            push has withdrawn the label (below);
+#            push has withdrawn the label, or the label was set too soon
+#            after a push (both below);
 #   pending  it has the label, and the label covers this head:
 #            vm-gate-finalize.yml sets the result once the vm-tests run of
 #            that commit has completed (#51). A fork's run that awaits
@@ -50,6 +51,39 @@ name: vm-gate
 # set. Running a push's run of this workflow again repeats the withdrawal,
 # also after the label was set again: set the label instead.
 #
+# A label that is set after the head arrived covers that head only when the
+# one who set it can have seen it (#151): a maintainer reads commit A and
+# sets the label, and a push that arrived a moment before has made B the
+# head the label's event names. So on `labeled`, on `opened` and on a
+# `synchronize` whose event did not hold the label yet, the head gets
+# pending only if
+#   - it has been the tip of the head branch, and the pull request open
+#     since it was last reopened, for the grace time (5 minutes) when the
+#     label was set, or
+#   - the head is in this repository and the one who set the label is the
+#     one who pushed it: Renovate on its own pull requests, and whoever
+#     opens a pull request with `gh pr create --label vm-tests` right
+#     after the push. Not for a head in a fork: there the fork's owner
+#     decides which account pushes.
+# Otherwise the label is removed again and vm-gate fails with "the label was
+# set less than 5 minutes after a push or a reopening": look at the head
+# again and set the label again, which counts once the head is 5 minutes
+# old. The status stays when the other of the two runs (the push's and the
+# label's) finds no label afterwards. Both times and both accounts are
+# GitHub's own records, none of them the commit's: the newest `labeled`
+# event of vm-tests and the newest `reopened` event in the pull request's
+# events (pull-requests: read), and the newest entry of the head branch in
+# the activity of the head repository (contents: read; public for a fork),
+# which must name this commit as what the branch points to since then. The
+# head repository is asked for by its id, as the pull request has it when
+# the job runs: a name can be given to another repository after the event.
+# A commit's author, committer and dates are the pusher's to choose and are
+# not read. A record that cannot be read, or that does not name this head
+# after three readings, counts as too new. What the grace time cannot see:
+# a page that was loaded more than 5 minutes before the click and never
+# refreshed, and a head the one who set the label pushed without reading
+# what it merged (the button "Update branch").
+#
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the
 # GitHub API is read; the pull request's code is never checked out.
@@ -74,6 +108,12 @@ permissions:
 # finds. A dropped run leaves its head without a status, or with the one
 # an earlier run wrote; only `opened`, `synchronize` and the label's own
 # `labeled` event ever set pending, so no later event accepts that head.
+# The run of a push and the run of a label that was set right after it can
+# come in either order, or the push's run is the one dropped: whichever of
+# them finds a label that the push's event did not hold reads the same
+# records (#151) and decides the same, and the one that comes after a
+# removal finds no label and leaves the status that says why. A push whose
+# event already held the label is for the rules of #130 alone.
 concurrency:
   group: vm-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -91,6 +131,8 @@ jobs:
       BASE: ${{ github.event.pull_request.base.sha }}
       BASE_REF: ${{ github.event.pull_request.base.ref }}
       HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      # The pull request's to choose: only ever a value of a request, below.
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
       BEFORE: ${{ github.event.before }}
       ACTION: ${{ github.event.action }}
       LABEL: ${{ github.event.label.name }}
@@ -155,12 +197,78 @@ jobs:
             jq -c --argjson modes "$(tail -n +2 <<<"$modes")" '. + [$modes[.[2]]]' <<<"$files" | sort
           }
 
+          # Takes the label away for the reason $1. The label first, the
+          # status after it (the caller sets it): vm-gate-finalize.yml
+          # checks the label right before it writes.
+          withdraw() {
+            gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/vm-tests" >/dev/null || true
+            has_label=$(labelled)
+            if [ "$has_label" = true ]; then
+              status failure "$1: the label vm-tests could not be removed, remove it by hand"
+              exit 1
+            fi
+            echo "vm-gate: removed the label vm-tests from #$NUMBER ($1)"
+          }
+          # Whether a label that was set after this head arrived covers it
+          # (#151): the head was the tip of its branch, and the pull request
+          # open, for the grace time when the label was set, or the head is
+          # in this repository and the one who set the label pushed it. If
+          # not, $late says why. The label's time and account are those of
+          # the newest `labeled` event of vm-tests, on whichever page of the
+          # events it is; the push's are those of the newest entry of the
+          # head branch in the activity of the head repository $head_repo
+          # (its id), which counts only if it names this commit as the tip.
+          # An account that is gone (null) equals no other. One reading:
+          grace=300
+          unread="the time of the push or of the label could not be read"
+          measured() {
+            local label push label_at reopened_at label_by push_at push_by
+            late=$unread
+            [ -n "$head_repo" ] || return 1
+            label=$(gh api --paginate "repos/$REPO/issues/$NUMBER/events?per_page=100" |
+              jq -rs '[.[][]] | ([.[] | select(.event == "labeled" and .label.name == "vm-tests")] | last) as $set
+                | ([.[] | select(.event == "reopened")] | last) as $back
+                | if $set == null then empty else [($set.created_at | fromdateiso8601),
+                    (if $back == null then 0 else $back.created_at | fromdateiso8601 end),
+                    ($set.actor.id // "")] | @tsv end') || return 1
+            push=$(gh api -X GET "repositories/$head_repo/activity" -f ref="refs/heads/$HEAD_REF" -f per_page=1 |
+              jq -r --arg ref "refs/heads/$HEAD_REF" --arg sha "$SHA" '.[0] | select(.ref == $ref and .after == $sha)
+                | [(.timestamp | fromdateiso8601), (.actor.id // "")] | @tsv') || return 1
+            # The field that can be empty is the last one of each line.
+            IFS=$'\t' read -r label_at reopened_at label_by <<<"$label"
+            IFS=$'\t' read -r push_at push_by <<<"$push"
+            [ -n "$label_at" ] && [ -n "$push_at" ] || return 1
+            if [ "$head_repo" = "$base_repo" ] && [ -n "$label_by" ] && [ "$label_by" = "$push_by" ]; then
+              return 0
+            fi
+            # A head that was pushed while the pull request was closed
+            # shows since the pull request was reopened.
+            [ "$reopened_at" -le "$push_at" ] || push_at=$reopened_at
+            [ $((label_at - push_at)) -lt "$grace" ] || return 0
+            late="the label was set less than $((grace / 60)) minutes after a push or a reopening"
+            return 1
+          }
+          # Three readings, a pause between them, when a record is missing or
+          # does not name this head yet: the run of `opened` can be faster
+          # than the lists (the unit test sets the pause to 0).
+          timely() {
+            local try
+            for try in 1 2 3; do
+              ! measured || return 0
+              [ "$late" = "$unread" ] && [ "$try" != 3 ] || return 1
+              sleep "${VM_GATE_PAUSE:-5}"
+            done
+          }
+
           has_label=$(labelled)
+          # Whether a push found the label set, by its event.
+          at_push=false
+          [ "$ACTION" != synchronize ] || [ "$LABEL_AT_EVENT" != true ] || at_push=true
 
           # A push withdraws the consent the label stands for (#130). A label
-          # that was set after the push arrived covers this head and stays.
+          # that was set after the push arrived is for the grace time below.
           withdrawn=
-          if [ "$ACTION" = synchronize ] && [ "$has_label" = true ] && [ "$LABEL_AT_EVENT" = true ]; then
+          if [ "$at_push" = true ] && [ "$has_label" = true ]; then
             if [ "$HEAD_REPO" != "$REPO" ]; then
               withdrawn="a push from a fork"
             elif ! accepted "$(latest "$BEFORE" 2>/dev/null || true)"; then
@@ -168,17 +276,7 @@ jobs:
             elif ! is=$(own "$SHA") || ! was=$(own "$BEFORE") || [ "$is" != "$was" ]; then
               withdrawn="a push that changes what the VM tests run"
             fi
-            if [ -n "$withdrawn" ]; then
-              # The label first, the status after it: vm-gate-finalize.yml
-              # checks the label right before it writes.
-              gh api -X DELETE "repos/$REPO/issues/$NUMBER/labels/vm-tests" >/dev/null || true
-              has_label=$(labelled)
-              if [ "$has_label" = true ]; then
-                status failure "$withdrawn: the label vm-tests could not be removed, remove it by hand"
-                exit 1
-              fi
-              echo "vm-gate: removed the label vm-tests from #$NUMBER ($withdrawn)"
-            fi
+            [ -z "$withdrawn" ] || withdraw "$withdrawn"
           fi
 
           # The files of exactly this head, not of whatever the pull request
@@ -195,7 +293,15 @@ jobs:
           elif [ -n "$withdrawn" ]; then
             status failure "$withdrawn: the label vm-tests was removed, add the label vm-tests again after review"
           elif [ "$has_label" != true ]; then
-            status failure "changes the image, build or boot tests: add the label vm-tests"
+            # A status that says why the label was removed stays: of the
+            # push's run and the label's, the second one finds no label
+            # after the first one took it away (#151).
+            case $(latest "$SHA") in
+              failure$'\t'*': the label vm-tests was removed, add the label vm-tests again after review')
+                echo "vm-gate: unchanged (the status says why the label was removed)" ;;
+              *)
+                status failure "changes the image, build or boot tests: add the label vm-tests" ;;
+            esac
           elif [ "$ACTION" = opened ] || [ "$ACTION" = synchronize ] ||
             { [ "$ACTION" = labeled ] && [ "$LABEL" = vm-tests ]; }; then
             # A new head or the label just set: the VM tests start now, and
@@ -203,10 +309,21 @@ jobs:
             # Only for the commit that is the head right now: a run that
             # waited while the head moved on reads a label that was set on
             # another commit, and pending here would accept this one.
-            if [ "$(gh api "repos/$REPO/pulls/$NUMBER" --jq .head.sha)" = "$SHA" ]; then
-              status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
-            else
+            # The repositories by their ids, the head's last: it is gone
+            # (empty) when the fork was deleted.
+            now=$(gh api "repos/$REPO/pulls/$NUMBER" --jq '[.head.sha, .base.repo.id, (.head.repo.id // "")] | @tsv')
+            IFS=$'\t' read -r head base_repo head_repo <<<"$now"
+            if [ "$head" != "$SHA" ]; then
               status failure "no VM test result for this commit: it is not the head of the pull request any more"
+            elif [ "$at_push" != true ] && ! timely; then
+              # The label was set after this head arrived, and too soon
+              # after it for the one who set it to have seen this head
+              # (#151). A label the push found set has passed the rules
+              # above instead.
+              withdraw "$late"
+              status failure "$late: the label vm-tests was removed, add the label vm-tests again after review"
+            else
+              status pending "waiting for the VM tests of this commit (vm-gate-finalize sets the result)"
             fi
           else
             # Reopened, or another label changed: nothing starts the VM tests

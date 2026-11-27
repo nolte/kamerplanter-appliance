@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # Runs the scripts of .github/workflows/vm-gate.yml and
 # .github/workflows/vm-gate-finalize.yml, as the workflow files hold them,
-# against a stub of gh, and checks what they decide (#145, #130): the label
-# vm-tests is read from the API and not from the event, a push withdraws it
-# when the head is in a fork, when the push changes the pull request's own
-# version of what the VM jobs run, or when the commit before it was not
-# accepted, and vm-gate-finalize writes a result only on a commit that
+# against a stub of gh, and checks what they decide (#145, #130, #151): the
+# label vm-tests is read from the API and not from the event, a push
+# withdraws it when the head is in a fork, when the push changes the pull
+# request's own version of what the VM jobs run, or when the commit before it
+# was not accepted, a label that is set too soon after someone else's push is
+# removed again, and vm-gate-finalize writes a result only on a commit that
 # vm-gate accepted and while the label is set. Both workflows run as develop
 # has them, so a pull request never runs its own version of them: this test
 # is what runs a change to them before the merge.
 #
-# The stub keeps the pull request in files: its labels, the vm-gate statuses
-# of each commit, and the comparisons and trees the API would answer. It
-# answers a call as the API would, as far as the scripts depend on it (#167):
-# a list comes in pages of `per_page` entries (30 without it), the first one
-# only unless the call says --paginate; a tree holds the top level only
-# without `recursive=1`; and a status is written under the context the call
-# names, where only vm-gate counts. jq is the real one and runs the
-# workflows' own filters. Needs PyYAML and jq; no network, no token.
+# The stub keeps the pull request in files: its labels and events, the
+# vm-gate statuses of each commit, the activity of the head repository, and
+# the comparisons and trees the API would answer. It answers a call as the
+# API would, as far as the scripts depend on it (#167): a list comes in pages
+# of `per_page` entries (30 without it), the first one only unless the call
+# says --paginate; a call with fields is a POST unless it names its method;
+# the activity lists the branch the call names, or every branch; a tree
+# holds the top level only without `recursive=1`; and a status is written
+# under the context the call names, where only vm-gate counts. jq is the
+# real one and runs the workflows' own filters. Needs PyYAML and jq; no
+# network, no token.
 #
 # Usage: tests/unit/vm-gate.sh
 set -uo pipefail
@@ -61,22 +65,31 @@ cat >"$work/bin/gh" <<'EOF'
 set -euo pipefail
 [ "$1" = api ] || { echo "gh stub: unexpected command $1" >&2; exit 2; }
 shift
-method=GET path='' filter='' state='' description='' context='' paginate=false
+method='' path='' filter='' state='' description='' context='' paginate=false
+ref='' fields=false field_per_page=''
 while [ $# -gt 0 ]; do
     case $1 in
         -X) method=$2; shift 2 ;;
         --jq) filter=$2; shift 2 ;;
         -f)
+            fields=true
             case $2 in
                 state=*) state=${2#state=} ;;
                 description=*) description=${2#description=} ;;
                 context=*) context=${2#context=} ;;
+                ref=*) ref=${2#ref=} ;;
+                per_page=*) field_per_page=${2#per_page=} ;;
             esac
             shift 2 ;;
         --paginate) paginate=true; shift ;;
         *) path=$1; shift ;;
     esac
 done
+# As gh has it: fields make a call a POST unless it names its method, and
+# the fields of a GET are its query.
+if [ -z "$method" ]; then
+    if [ "$fields" = true ]; then method=POST; else method=GET; fi
+fi
 path=${path#repos/example/appliance/}
 query=''
 case $path in
@@ -86,6 +99,7 @@ per_page=30
 case "&$query&" in
     *"&per_page="*) per_page=${query##*per_page=}; per_page=${per_page%%&*} ;;
 esac
+if [ "$method" = GET ] && [ -n "$field_per_page" ]; then per_page=$field_per_page; fi
 answer() {  # the JSON on stdin, through the filter if there is one
     if [ -n "$filter" ]; then jq -r "$filter"; else cat; fi
 }
@@ -107,6 +121,31 @@ case "$method $path" in
         [ ! -e "$STATE/label-stays" ] || exit 1
         grep -vx vm-tests "$STATE/labels" >"$STATE/labels.new" || true
         mv "$STATE/labels.new" "$STATE/labels" ;;
+    "GET issues/7/events")
+        # The events of #7, oldest first, as the API lists them: one line
+        # each of event, label, time and the account's id (- if it is gone).
+        [ ! -e "$STATE/events-gone" ] || exit 1
+        touch "$STATE/events"
+        jq -R -s '[split("\n")[] | select(. != "") | split("\t")
+            | {event: .[0], created_at: .[2], actor: (if .[3] == "-" then null else {id: (.[3] | tonumber)} end)}
+              + (if .[1] != "" then {label: {name: .[1]}} else {} end)]' "$STATE/events" | pages ;;
+    "GET repositories/"*"/activity")
+        # The activity of a repository, newest first: one line each of ref,
+        # the commit it points to since, time and the account's id. The
+        # repository is the one whose id the call names: 10 is this one, 20
+        # the fork someone/appliance. A list that lags answers nothing once.
+        case $path in
+            repositories/10/activity) owner=example ;;
+            repositories/20/activity) owner=someone ;;
+            *) exit 1 ;;
+        esac
+        [ ! -e "$STATE/activity-gone" ] || exit 1
+        if [ -e "$STATE/activity-lags" ]; then rm "$STATE/activity-lags"; echo '[]'; exit 0; fi
+        touch "$STATE/activity-$owner"
+        jq -R -s --arg ref "$ref" '[split("\n")[] | select(. != "") | split("\t")
+            | {ref: .[0], after: .[1], timestamp: .[2], activity_type: "push",
+               actor: (if .[3] == "-" then null else {id: (.[3] | tonumber)} end)}
+            | select($ref == "" or .ref == $ref)]' "$STATE/activity-$owner" | pages ;;
     "GET commits/"*/statuses)
         sha=${path#commits/}; sha=${sha%/statuses}
         [ -n "$sha" ] && [ ! -e "$STATE/gone-$sha" ] || exit 1
@@ -145,8 +184,12 @@ case "$method $path" in
     "GET pulls")
         answer <"$STATE/pulls" ;;
     "GET pulls/7")
-        # The head of #7 right now: `new`, unless a test moved it on.
-        jq -n --arg sha "$(cat "$STATE/head" 2>/dev/null || echo new)" '{head: {sha: $sha}}' | answer ;;
+        # The head of #7 right now: `new`, unless a test moved it on, in
+        # this repository (10) unless a test says another one, or none.
+        jq -n --arg sha "$(cat "$STATE/head" 2>/dev/null || echo new)" \
+            --arg repo "$(cat "$STATE/head-repo" 2>/dev/null || echo 10)" \
+            '{head: {sha: $sha, repo: (if $repo == "" then null else {id: ($repo | tonumber)} end)},
+              base: {repo: {id: 10}}}' | answer ;;
     "GET actions/runs/"*)
         answer <"$STATE/jobs" ;;
     *)
@@ -157,13 +200,38 @@ EOF
 chmod +x "$work/bin/gh"
 
 # --- the pull request #7 of the stub ---
-# reset LABEL...: a new state with these labels.
+# reset LABEL...: a new state with these labels. The head `new` is the tip of
+# the branch fix/x since noon, pushed by the account 2, in this repository
+# and in the fork someone/appliance alike; the label vm-tests, if it is among
+# the labels, was set an hour later by the account 1.
 reset() {
     rm -rf "$work/state"
     mkdir -p "$work/state"
     : >"$work/state/log"
     printf '%s\n' "$@" >"$work/state/labels"
+    pushed 12:00:00 2
+    case " $* " in
+        *" vm-tests "*) labelled 13:00:00 1 ;;
+    esac
 }
+# pushed TIME ACCOUNT [COMMIT [OWNER [BRANCH]]]: the newest entry of the
+# activity of OWNER's repository says that BRANCH points to COMMIT since
+# TIME (of 2026-01-01), pushed by ACCOUNT. Without OWNER, in this repository
+# and in the fork alike.
+pushed() {
+    local owner
+    for owner in ${4:-example someone}; do
+        touch "$work/state/activity-$owner"
+        { printf 'refs/heads/%s\t%s\t2026-01-01T%sZ\t%s\n' "${5:-fix/x}" "${3:-new}" "$1" "$2"
+          cat "$work/state/activity-$owner"; } >"$work/state/activity.new"
+        mv "$work/state/activity.new" "$work/state/activity-$owner"
+    done
+}
+# labelled TIME ACCOUNT [LABEL]: the newest event of #7 says that ACCOUNT set
+# LABEL (vm-tests) at TIME (of 2026-01-01).
+labelled() { printf 'labeled\t%s\t2026-01-01T%sZ\t%s\n' "${3:-vm-tests}" "$1" "$2" >>"$work/state/events"; }
+# fork [ID]: the head of #7 is in the repository ID (the fork's, 20).
+fork() { echo "${1-20}" >"$work/state/head-repo"; }
 # compare BASE COMMIT [FILE=BLOB[=STATUS[=PREVIOUS]]]...: what the API answers
 # for BASE...COMMIT.
 compare() {
@@ -198,6 +266,8 @@ log() { paste -sd'|' "$work/state/log"; }
 pending='pending waiting for the VM tests of this commit (vm-gate-finalize sets the result)'
 missing='failure changes the image, build or boot tests: add the label vm-tests'
 again='the label vm-tests was removed, add the label vm-tests again after review'
+soon="failure the label was set less than 5 minutes after a push or a reopening: $again"
+unread="failure the time of the push or of the label could not be read: $again"
 
 # gate ACTION [NAME=VALUE]...: one run of vm-gate.yml on the head `new` of #7,
 # pushed onto `old`; the exit code is in $code. $gate_script is the script
@@ -208,8 +278,8 @@ gate() {
     shift
     env PATH="$work/bin:$PATH" STATE="$work/state" GH_TOKEN=none \
         REPO=example/appliance NUMBER=7 SHA=new BASE=base BASE_REF=develop \
-        HEAD_REPO=example/appliance BEFORE=old ACTION="$action" LABEL='' LABEL_AT_EVENT=false \
-        RUN_URL=https://example.invalid/run "$@" \
+        HEAD_REPO=example/appliance HEAD_REF=fix/x BEFORE=old ACTION="$action" LABEL='' LABEL_AT_EVENT=false \
+        RUN_URL=https://example.invalid/run VM_GATE_PAUSE=0 "$@" \
         bash "$gate_script" >"$work/out" 2>&1 </dev/null
     code=$?
 }
@@ -531,6 +601,265 @@ compare base new image/Containerfile=a1
 gate opened
 expect "the label as the 41st of the pull request: pending" "$pending" "$(last new)"
 
+echo "# vm-gate.yml: a label set too soon after a push is removed again (#151)"
+# A maintainer (the account 1) read the commit before, and the author (the
+# account 2) pushed `new` a moment before the label was set: on the label's
+# own event, and on the push's run when it finds the label that was set
+# after the push arrived.
+for event in "labeled LABEL=vm-tests LABEL_AT_EVENT=true" "synchronize LABEL_AT_EVENT=false" "opened"; do
+    read -r -a run <<<"$event"
+    reset vm-tests
+    compare base new image/Containerfile=a1
+    pushed 12:59:30 2
+    gate "${run[@]}"
+    expect "${run[0]}, the head pushed 30 s before the label: the label is removed, no pending" \
+        "remove-label|status new $soon" "$(log)"
+    expect "${run[0]}, the head pushed 30 s before the label: the label is gone" removed "$(label)"
+
+    reset vm-tests
+    compare base new image/Containerfile=a1
+    pushed 12:55:01 2
+    gate "${run[@]}"
+    expect "${run[0]}, the head pushed 299 s before the label: no pending" "$soon" "$(last new)"
+
+    reset vm-tests
+    compare base new image/Containerfile=a1
+    pushed 12:55:00 2
+    gate "${run[@]}"
+    expect "${run[0]}, the head pushed 300 s before the label: pending" "status new $pending" "$(log)"
+    expect "${run[0]}, the head pushed 300 s before the label: the label stays" set "$(label)"
+done
+
+# The second action of the maintainer: the label set again once the head is
+# old enough. The status of the removal is on the commit by then.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+echo vm-tests >>"$work/state/labels"
+labelled 13:01:00 1
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label set again 90 s after the push: removed again" "$soon" "$(last new)"
+echo vm-tests >>"$work/state/labels"
+labelled 13:04:30 1
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label set again 5 minutes after the push: pending" "$pending" "$(last new)"
+expect "the label set again 5 minutes after the push: the label stays" set "$(label)"
+
+# Whoever pushed the head has seen it: Renovate on its own pull requests, and
+# `gh pr create --label vm-tests` right after the push (the event of opened,
+# then the label's own).
+reset vm-tests
+compare base new build/tools.Containerfile=b2
+pushed 12:59:58 1
+gate opened
+expect "opened with the label, set 2 s after the push by the one who pushed: pending" "status new $pending" "$(log)"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "its label's event: pending again, the label stays" "$pending set" "$(last new) $(label)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:58 2
+labelled 13:00:01 2
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label set twice, the second time by the one who pushed: pending" "$pending" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:58 1
+labelled 13:00:01 3
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label set again by another account than the one who pushed: no pending" "$soon" "$(last new)"
+
+# An account that is gone is nobody's: two of them are not the same one.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:58 -
+labelled 13:00:01 -
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label and the push by accounts that are gone: no pending" "$soon" "$(last new)"
+
+# The newest entry of the branch decides, also for a commit that was the head
+# before: `new` came back a moment ago, by a push whose own run was dropped.
+reset vm-tests
+compare base new image/Containerfile=a1
+had new success "the VM tests of this commit passed"
+pushed 12:30:00 2 other
+pushed 12:59:30 2 new
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "a commit that became the head again a moment before the label: no pending" "$soon" "$(last new)"
+
+# The push is read from the repository the head is in, and of its branch.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2 new someone
+fork
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true HEAD_REPO=someone/appliance
+expect "a fork's head pushed 30 s before the label: no pending" "$soon" "$(last new)"
+expect "a fork's head pushed 30 s before the label: the label is gone" removed "$(label)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2 new example
+fork
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true HEAD_REPO=someone/appliance
+expect "a fork's head, a branch of the same name here pushed a moment ago: pending" "$pending" "$(last new)"
+
+# The fork is asked for by the id the pull request names, not by the name of
+# the event, which its owner can give to another repository since: under the
+# name there is a branch that looks old enough.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2 new someone
+fork
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true HEAD_REPO=example/appliance
+expect "a fork's head, the event's name is another repository's by now: no pending" "$soon" "$(last new)"
+
+# In a fork its owner decides which account pushes: the one who set the
+# label counts as the pusher only for a head in this repository.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:58 1
+fork
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true HEAD_REPO=someone/appliance
+expect "a fork's head pushed by the account that set the label, 2 s before: no pending" "$soon" "$(last new)"
+
+# A head that was pushed while the pull request was closed shows since the
+# pull request was reopened.
+reset vm-tests
+compare base new image/Containerfile=a1
+printf 'reopened\t\t2026-01-01T12:59:30Z\t2\n' >>"$work/state/events"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the head pushed an hour ago, the pull request reopened 30 s before the label: no pending" "$soon" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+printf 'reopened\t\t2026-01-01T12:55:00Z\t2\n' >>"$work/state/events"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the pull request reopened 300 s before the label: pending" "$pending" "$(last new)"
+
+# The push's run and the label's, in this order: the second one finds no
+# label and leaves the status that says why.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+gate synchronize LABEL_AT_EVENT=false
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the push's run removed the label, the label's run after it: the reason stays" \
+    "remove-label|status new $soon" "$(log)"
+gate unlabeled LABEL=cicd
+expect "another label removed after it: the reason stays" "$soon" "$(last new)"
+
+# The activity is behind the run once: the next reading has the push.
+reset vm-tests
+compare base new image/Containerfile=a1
+touch "$work/state/activity-lags"
+gate opened
+expect "the activity does not have the push at the first reading: pending" "status new $pending" "$(log)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 1 new example other
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "another branch pushed a moment ago, by the one who set the label: pending by the head's own push" \
+    "$pending" "$(last new)"
+
+# A label older than the head: the label's event waited, and the commit came
+# back as the head meanwhile.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 13:20:00 2
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the head pushed after the label was set: no pending" "$soon" "$(last new)"
+
+# What cannot be read counts as too new.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 13:10:00 2 newer
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the activity does not name this commit as the tip of the branch: no pending" "$unread" "$(last new)"
+expect "the activity does not name this commit: the label is removed" removed "$(label)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+: >"$work/state/activity-example"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "no activity of the branch: no pending" "$unread" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+touch "$work/state/activity-gone"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the activity cannot be read: no pending" "$unread" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+fork ''
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true HEAD_REPO=''
+expect "the head's repository is gone: no pending" "$unread" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+touch "$work/state/events-gone"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the events cannot be read: no pending" "$unread" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+: >"$work/state/events"
+gate opened
+expect "no event that set the label: no pending" "$unread" "$(last new)"
+
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+touch "$work/state/label-stays"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "too soon, and the label cannot be removed: the run fails" 1 "$code"
+expect "too soon, and the label cannot be removed: failure, not pending" \
+    "failure the label was set less than 5 minutes after a push or a reopening: the label vm-tests could not be removed, remove it by hand" \
+    "$(last new)"
+
+# The grace time is for a label that was set after the head arrived. A label
+# the push found set has passed the rules of #130, and a pull request that
+# changes nothing the VM tests cover needs no label.
+reset vm-tests
+compare base new image/Containerfile=a2
+compare develop new image/Containerfile=a2
+compare develop old image/Containerfile=a1
+had old pending "waiting"
+pushed 13:30:00 2
+gate synchronize LABEL_AT_EVENT=true
+expect "a push that found the label set: pending, whatever the times" "status new $pending" "$(log)"
+
+reset vm-tests
+compare base new docs/en/index.md=a1
+pushed 12:59:30 2
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "nothing the VM tests cover, the label set a moment after the push: success, the label stays" \
+    "success no change the VM tests cover set" "$(last new) $(label)"
+
+# The run of the label's event waited while the head moved on: the label is
+# not this commit's to lose.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+echo newer >"$work/state/head"
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "too soon, on a commit that is not the head any more: the label stays" "$moved set" "$(last new) $(label)"
+
+# The label's event is the newest of more than a page of events: an older one
+# of the label, from before it was removed by hand, was the pusher's own.
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+: >"$work/state/events"
+labelled 12:10:00 2
+for _ in $(seq 100); do labelled 12:20:00 1 automerge; done
+labelled 13:00:00 1
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the label's event behind 101 older events: no pending" "$soon" "$(last new)"
+
 echo "# the stub answers as the API would: a call that lost a parameter fails (#167)"
 # Each changed copy of the script must come out differently; a copy that the
 # sed did not change comes out like the workflow's and fails here.
@@ -555,6 +884,30 @@ others new 30
 gate reopened LABEL_AT_EVENT=true
 expect "the statuses read as one page of 30: the result behind them is not seen" \
     "failure no VM test result for this commit: remove the label vm-tests and set it again" "$(last new)"
+
+sed 's|gh api --paginate \(.*/events?\)|gh api \1|' "$work/vm-gate.sh" >"$work/changed.sh"
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 2
+: >"$work/state/events"
+labelled 12:10:00 2
+for _ in $(seq 100); do labelled 12:20:00 1 automerge; done
+labelled 13:00:00 1
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the events read as one page: the label's newest event is not seen" "$pending" "$(last new)"
+
+sed 's|-f ref="[^"]*" ||' "$work/vm-gate.sh" >"$work/changed.sh"
+reset vm-tests
+compare base new image/Containerfile=a1
+pushed 12:59:30 1 new example other
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the activity read without the branch: another branch's push hides the head's" "$unread" "$(last new)"
+
+sed 's|gh api -X GET \(.*/activity"\)|gh api \1|' "$work/vm-gate.sh" >"$work/changed.sh"
+reset vm-tests
+compare base new image/Containerfile=a1
+gate labeled LABEL=vm-tests LABEL_AT_EVENT=true
+expect "the activity asked for without -X GET: a POST, which the API refuses" "$unread" "$(last new)"
 
 sed 's/?recursive=1//' "$work/vm-gate.sh" >"$work/changed.sh"
 reset vm-tests
