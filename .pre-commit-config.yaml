@@ -76,6 +76,24 @@ repos:
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
         types: [file]
 
+      # A file name may hold a newline: a search that prints names one per
+      # line hands its reader two names for one, and a reader that deletes
+      # per line deleted another entry and left the one named (#168, #176).
+      # The shipped scripts print a name or a link target from find ended by
+      # a NUL and read it into an array through list. This refuses a find
+      # whose -printf format holds a name or link target (%f, %p, %P, %h, %l)
+      # and a "\n", on one line, also in a comment. The one exception is the
+      # legacy checksum of a backup (backup_checksums in env.sh, the line
+      # that appends to "$tmp/list"), which stays byte for byte as earlier
+      # releases compute it. Names printed line by line some other way (a
+      # glob with echo or printf, -print, ls) are not seen.
+      - id: no-newline-ended-names-from-find
+        name: No find that prints file names ended by a newline in the image's scripts
+        language: pygrep
+        entry: '\bfind\s.*-printf\s+["''][^"'']*%[fpPhl][^"'']*\\n(?!.*>>"\$tmp/list")'
+        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        types: [file]
+
       # A rename onto a name that is a directory moves the file into that
       # directory and succeeds: the write is reported, the file not replaced
       # (#144, #162). The shipped scripts rename with "mv -fT -- " (replace in
