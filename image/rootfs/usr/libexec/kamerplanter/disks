@@ -616,33 +616,53 @@ top_entries() {
     [ ${#tops[@]} -eq 0 ] || printf '%s\0' "${tops[@]}" | sort -z
 }
 
-# tree_listing DIR: type, mode, owner and, for files and links, size and
-# target of everything below DIR, one record each, sorted, each ended by a
-# NUL: a name or a link target with a newline stays in its record, so two
-# different trees never list the same (#176). The copy of a move is compared
-# by it (same_tree). Fails when DIR cannot be searched through (both searches
-# are read through list): a listing that is not whole is not compared. DIR/.
-# is searched, so a DIR that is a link to a directory is listed as the
-# directory, and the paths are those below DIR (%P).
+# tree_listing DIR FILE: writes to FILE the type, mode, owner and, for files
+# and links, size and target of everything below DIR: one record each, ended
+# by a NUL and sorted byte by byte. The copy of a move is compared by it
+# (same_tree). Two trees have the same FILE only when they hold the same
+# entries (#176):
+# - a record ends at its NUL, which no name and no link target holds, so one
+#   with a newline stays in its record;
+# - the records of the first search begin with "E ", those of the second
+#   with "T ", so none of one search equals one of the other (without that,
+#   a file named "UID:GID a" and one named "a -> " could trade a size for a
+#   mode);
+# - in an E record the path is all that follows the owner, the three fields
+#   before it holding no blank, so it names one entry with one type, mode
+#   and owner;
+# - in a T record of a file the target is empty and the path all before the
+#   final " -> "; of a link the size is the length of the target, which says
+#   where the path ends, and the E records say which paths there are.
+# Neither search runs in a pipe or a substitution: each one's exit status is
+# read, and so is that of the write and of the sort, whose temporary files
+# stay beside FILE. Fails when DIR cannot be searched through or FILE not be
+# written: a listing that is not whole is not compared. DIR/. is searched, so
+# a DIR that is a link to a directory is listed as the directory, and the
+# paths are those below DIR (%P).
 tree_listing() {
-    local entries=() targets=()
-    list entries find "$1/." -mindepth 1 -printf '%y %m %U:%G %P\0' || return 1
-    list targets find "$1/." -mindepth 1 \( -type f -o -type l \) -printf '%y %s %P -> %l\0' || return 1
-    [ $((${#entries[@]} + ${#targets[@]})) -eq 0 ] ||
-        printf '%s\0' ${entries[@]+"${entries[@]}"} ${targets[@]+"${targets[@]}"} | LC_ALL=C sort -z
+    local raw=$2.unsorted
+    find "$1/." -mindepth 1 -printf 'E %y %m %U:%G %P\0' >"$raw" || return 1
+    find "$1/." -mindepth 1 \( -type f -o -type l \) -printf 'T %y %s %P -> %l\0' >>"$raw" || return 1
+    LC_ALL=C sort -z -T "${2%/*}" -o "$2" -- "$raw" || return 1
 }
 
-# same_tree A B: whether the directories A and B hold the same tree: the
-# records of tree_listing, compared one by one. Fails as well when one of
-# them cannot be listed whole.
+# same_tree A B: whether the directories A and B hold the same tree: their
+# listings (tree_listing), compared byte for byte. The listings hold the
+# names of the data, and a large volume has many: they are written to a
+# directory of their own that only root can enter, in the records on the
+# system disk (not in memory, and not on the disk that is being filled), and
+# it is removed whatever the result. One that a run left when it was killed
+# goes at the next comparison; the lock of the disk service is held, so no
+# other comparison runs. Not the same, never the same, when a tree cannot be
+# listed whole, or the directory or a listing cannot be written or removed;
+# two trees that hold nothing are the same once both were searched.
 same_tree() {
-    local ours=() theirs=() i
-    list ours tree_listing "$1" || return 1
-    list theirs tree_listing "$2" || return 1
-    [ ${#ours[@]} -eq ${#theirs[@]} ] || return 1
-    for i in "${!ours[@]}"; do
-        [ "${ours[i]}" = "${theirs[i]}" ] || return 1
-    done
+    local dir rc=0
+    rm -rf -- "${records:?}"/.tree.* || return 1
+    dir=$(mktemp -d "$records/.tree.XXXXXX") || return 1
+    tree_listing "$1" "$dir/a" && tree_listing "$2" "$dir/b" && cmp -s -- "$dir/a" "$dir/b" || rc=1
+    rm -rf -- "$dir" || rc=1
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------

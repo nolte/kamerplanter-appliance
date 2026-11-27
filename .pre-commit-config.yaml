@@ -80,18 +80,31 @@ repos:
       # line hands its reader two names for one, and a reader that deletes
       # per line deleted another entry and left the one named (#168, #176).
       # The shipped scripts print a name or a link target from find ended by
-      # a NUL and read it into an array through list. This refuses a find
-      # whose -printf format holds a name or link target (%f, %p, %P, %h, %l)
-      # and a "\n", on one line, also in a comment. The one exception is the
-      # legacy checksum of a backup (backup_checksums in env.sh, the line
-      # that appends to "$tmp/list"), which stays byte for byte as earlier
-      # releases compute it. Names printed line by line some other way (a
-      # glob with echo or printf, -print, ls) are not seen.
+      # a NUL and read it into an array through list, or write it to a file.
+      # This refuses a find whose -printf format, in quotes, holds a name or
+      # link target (%f, %p, %P, %h, %l) and a "\n", on one line, also in a
+      # comment. Not seen: a directive with a width (%10f), -fprintf, a
+      # format without quotes or in a variable, a -printf on a line after its
+      # find, and names printed line by line some other way (a glob with echo
+      # or printf, -print, ls). Refused although it prints no name: a format
+      # with "%%f" (a literal %f) and a "\n".
       - id: no-newline-ended-names-from-find
         name: No find that prints file names ended by a newline in the image's scripts
         language: pygrep
-        entry: '\bfind\s.*-printf\s+["''][^"'']*%[fpPhl][^"'']*\\n(?!.*>>"\$tmp/list")'
+        entry: '\bfind\s.*-printf\s+["''][^"'']*%[fpPhl][^"'']*\\n'
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        exclude: '^image/rootfs/usr/lib/kamerplanter/env\.sh$'
+        types: [file]
+
+      # The same in env.sh, with its one exception: the legacy checksum of a
+      # backup (backup_checksums, the line that appends to "$tmp/list") stays
+      # byte for byte as earlier releases compute it. Any line of env.sh that
+      # holds >>"$tmp/list" after the format is let through, also a comment.
+      - id: no-newline-ended-names-from-find-env
+        name: No find that prints file names ended by a newline in env.sh, the legacy checksum aside
+        language: pygrep
+        entry: '\bfind\s.*-printf\s+["''][^"'']*%[fpPhl][^"'']*\\n(?!.*>>"\$tmp/list")'
+        files: '^image/rootfs/usr/lib/kamerplanter/env\.sh$'
         types: [file]
 
       # A rename onto a name that is a directory moves the file into that

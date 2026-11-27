@@ -841,7 +841,16 @@ expect "top entries: everything else, sorted" "[etc][release]" "$(touch "$t/rele
 expect "top entries: a name with a newline is one name, and lost+found stays left out (#176)" $'[a\nlost+found][etc][release]' \
     "$(mkdir "$t/"$'a\nlost+found'; tops "$t")"
 rmdir "$t/"$'a\nlost+found'
-tree() { if same_tree "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi; }
+# same_tree writes its two listings below the records of the disk service
+# and removes them: here below $work/tree-records, which must be empty after
+# every comparison.
+tree() {  # tree A B: whether same_tree holds for A and B
+    (
+        records=$work/tree-records
+        mkdir -p "$records"
+        if same_tree "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi
+    )
+}
 a=$(mktemp -d "$work/tree.XXXXXX"); b=$(mktemp -d "$work/tree.XXXXXX")
 mkdir -p "$a/_data/sub"; printf 'x' >"$a/_data/sub/f"; ln -s target "$a/_data/l"; chmod 0750 "$a/_data"
 cp -a "$a/." "$b/"
@@ -862,6 +871,22 @@ expect "tree listing: a copy with newlines in a name and a link target lists the
 expect "tree listing: a directory that is missing is not the same" differs "$(tree "$a" "$work/no-such-tree")"
 e1=$(mktemp -d "$work/tree.XXXXXX"); e2=$(mktemp -d "$work/tree.XXXXXX")
 expect "tree listing: two empty directories are the same" same "$(tree "$e1" "$e2")"
+# A record of the search for types, modes and owners must not pass for one of
+# the search for sizes and targets: without the letter each record begins
+# with, "f 600 UID:GID a -> " is the mode of the file "a -> " in one tree and
+# the size of the file "UID:GID a" in the other, and the two trees listed the
+# same.
+p1=$(mktemp -d "$work/tree.XXXXXX"); p2=$(mktemp -d "$work/tree.XXXXXX")
+own="$(id -u):$(id -g)"
+head -c 600 /dev/zero >"$p1/$own a"; : >"$p1/a -> "; chmod 0640 "$p1/$own a"; chmod 0644 "$p1/a -> "
+head -c 644 /dev/zero >"$p2/$own a"; : >"$p2/a -> "; chmod 0640 "$p2/$own a"; chmod 0600 "$p2/a -> "
+expect "tree listing: a size in one tree that reads like a mode in the other differs" differs "$(tree "$p1" "$p2")"
+expect "tree listing: no listing stays behind, whatever the result" "" "$(find "$work/tree-records" -mindepth 1 -printf '%P\n')"
+expect "tree listing: listings that cannot be written are not the same" differs \
+    "$(records=$work/no-such-records; if same_tree "$e1" "$e2" 2>/dev/null; then echo same; else echo differs; fi)"
+mkdir -p "$work/tree-records/.tree.stale"; touch "$work/tree-records/.tree.stale/a"
+expect "tree listing: a listing left by a run that was killed goes at the next comparison" "same|" \
+    "$(tree "$e1" "$e2")|$(find "$work/tree-records" -mindepth 1 -printf '%P\n')"
 # What copy_place does not move from etc or pinned is named whole, on one
 # line, the name shown (#176).
 notice=$(
@@ -877,7 +902,7 @@ expect "copy place: an entry of etc that is no regular file is named on one line
 # searched through was not compared, so it is not the same (#149).
 same() {  # same DIRECTORY PATH: whether same_place holds, with the disk at $work/moved
     (
-        mnt=$work/moved
+        mnt=$work/moved records=$work/tree-records
         if same_place "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi
     )
 }
