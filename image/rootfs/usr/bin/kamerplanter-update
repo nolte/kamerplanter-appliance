@@ -1374,7 +1374,7 @@ check_health() {
 # that did not complete) is deleted at any location that is available, once
 # its directory is older than that period.
 cleanup() {
-    local keep now protect rec d loc epoch problem base listed
+    local keep now protect rec d loc epoch problem base listed aged
     # Under the lock of the update actions, so that no rollback or activation
     # relies on a backup that is being deleted; fetch takes it before.
     if ! update_lock; then
@@ -1417,7 +1417,14 @@ cleanup() {
         for d in ${listed[@]+"${listed[@]}"}; do
             [ "$d" != "${protect-}" ] || continue
             [ "$(record_field LOCATION "$backups/$d")" != "$loc" ] || continue
-            [ -n "$(find "$base/$d" -maxdepth 0 -mtime "+$((keep - 1))")" ] || continue
+            # The age is read with find's exit status (list): a directory
+            # whose age could not be read is kept, as before, and now said
+            # (#169).
+            if ! list aged find "$base/$d" -maxdepth 0 -mtime "+$((keep - 1))" -print0; then
+                log cleanup error "the age of the pre-update backup of $(short "$d") on $(backup_where "$loc") could not be read; it is kept and tried again at the next run"
+                continue
+            fi
+            [ ${#aged[@]} -gt 0 ] || continue
             if backup_delete "$loc" "$d"; then
                 log cleanup ok "deleted the pre-update backup of $(short "$d") from $(backup_where "$loc")"
             else

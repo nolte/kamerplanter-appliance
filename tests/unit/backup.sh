@@ -438,6 +438,30 @@ if [ "$(id -u)" != 0 ]; then
     expect "cleanup: a base that cannot be read is logged, and the cleanup goes on" "yes|cleanup 7 locked" \
         "$(grep -q '"event":"cleanup","result":"error","detail":"the pre-update backups on .* could not all be listed' "$st/log.jsonl" 2>/dev/null && echo yes || echo no)|$(lines "$SB/disks-calls")"
 fi
+# A backup no record names is deleted once its directory is older than the
+# period; when its age cannot be read (find fails), it is kept, as before,
+# and that is said now, and the cleanup goes on (#169: in a command
+# substitution the failed search passed for "not old enough", silently).
+unrecorded_old() {
+    new_sandbox backup-locations; due_backup
+    rm -f "$st/backups/$OLD"
+    touch -d 2000-01-01T00:00:00Z "$st/backup/$OLD"
+}
+aged_logged() { grep -q '"event":"cleanup","result":"error","detail":"the age of the pre-update backup of .* could not be read' "$st/log.jsonl" 2>/dev/null && echo yes || echo no; }
+unrecorded_old
+tool fetch >/dev/null
+expect "cleanup: an unrecorded backup older than the period is deleted" "no|no|cleanup 7 locked" \
+    "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(aged_logged)|$(lines "$SB/disks-calls")"
+unrecorded_old
+# shellcheck disable=SC2329 # called by the tool it is exported to
+find() {
+    case " $* " in *" -maxdepth 0 "*) echo "find: the age cannot be read" >&2; return 1 ;; esac
+    command find "$@"
+}
+(export -f find; tool fetch >/dev/null)
+unset -f find
+expect "cleanup: an unrecorded backup whose age cannot be read is kept and said, and the cleanup goes on" "yes|yes|cleanup 7 locked" \
+    "$([ -d "$st/backup/$OLD" ] && echo yes || echo no)|$(aged_logged)|$(lines "$SB/disks-calls")"
 
 # apply-now keeps set -e inside the fetch: bootc failing after the download
 # stops it, instead of recording a staged update that is not known.
