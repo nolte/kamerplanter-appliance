@@ -283,19 +283,32 @@ expect_rec() {
 # grep below would see. The same holds for the SSH host key message
 # (21_clhm_ssh_host_keys.issue), staged the same way, where its unit
 # (console-login-helper-messages-gensnippet-ssh-keys.service) is enabled
-# (enabled or enabled-runtime).
+# (enabled or enabled-runtime). Root logs in before the boot has finished
+# (pam_nologin does not hold root back), so the check first waits until that
+# unit has no job left, running or queued, for about two minutes at most
+# (#146). The callers of today come after systemd had no job left (wait_up,
+# settled) unless their own wait ran out, so the wait here ends at once.
 # A denial reaches the journal twice, from the kernel ring buffer
 # ("audit: type=1400 audit(TIME:SERIAL): avc:  denied ...") and from the audit
-# socket (without that prefix); each is counted once, from "avc:" on.
+# socket (without that prefix); each is counted once, from "avc:" on. So are
+# two denials with the same text (process, object and fields; only the serial
+# differs): the count is of distinct denials, not of events (#146).
 # Whether FILE was written before systemd-tmpfiles-setup.service (labelled
 # by the Z line of kamerplanter-issue.conf) or after it (labelled by its
 # directory) depends on the boot; both times go to the report. The labels,
 # the denials and those times go to $OUT/NAME.console.txt.
 check_console() {
     local name=$1 file=$2 labels denials wrong staging clhm keys order
+    keys=$(guest 'systemctl is-enabled console-login-helper-messages-gensnippet-ssh-keys.service 2>/dev/null' || true)
+    if [[ $keys = enabled* ]]; then
+        # shellcheck disable=SC2016 # expanded in the guest
+        guest 'for _ in $(seq 60); do
+            [ -z "$(systemctl show -p Job --value console-login-helper-messages-gensnippet-ssh-keys.service 2>/dev/null)" ] && break
+            sleep 2
+        done' || true
+    fi
     labels=$(guest "stat -c '%C %n' /run/issue.d /run/issue.d/* 2>&1")
     clhm=$(guest '[ -e /usr/lib/console-login-helper-messages/libutil.sh ] && echo yes || echo no')
-    keys=$(guest 'systemctl is-enabled console-login-helper-messages-gensnippet-ssh-keys.service 2>/dev/null' || true)
     staging=$(guest "stat -c '%C %n' /run/console-login-helper-messages 2>&1")
     denials=$(guest 'journalctl -b -k -g "avc:  denied" --no-pager -o cat 2>/dev/null; journalctl -b _TRANSPORT=audit -g "avc:  denied" --no-pager -o cat 2>/dev/null' |
         grep -E 'name="[^"]*issue|scontext=[^ ]*:(kmscon|getty|NetworkManager_dispatcher[a-z_]*)_t:' |
@@ -315,7 +328,7 @@ check_console() {
     elif [ "$clhm" = yes ] && [[ $keys = enabled* ]] && ! grep -q ' /run/issue.d/21_clhm_ssh_host_keys\.issue$' <<<"$labels"; then
         record "$name" FAIL - "no SSH host key message (21_clhm_ssh_host_keys.issue) in /run/issue.d, though its unit is enabled"
     elif [ -n "$denials" ]; then
-        record "$name" FAIL - "$(grep -c . <<<"$denials") SELinux denials for the console messages, see $name.console.txt"
+        record "$name" FAIL - "$(grep -c . <<<"$denials") distinct SELinux denials for the console messages (the same denial repeated counts once), see $name.console.txt"
     elif [ "$clhm" = yes ]; then
         record "$name" PASS - "console messages ($file, 22_clhm_*$([[ $keys = enabled* ]] && echo ', 21_clhm_ssh_host_keys')) and the staging directory labelled systemd_ssh_issue_var_run_t; no denial for the console or the dispatcher"
         return 0
@@ -605,8 +618,10 @@ echo "$user|$ctr|$([ "${out:-0}" -gt 0 ] && echo yes || echo "output counted ${o
         same=yes
     else
         # comm and sort (coreutils), which the tool container has for certain.
-        same="differs: $(comm -3 <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$listing" | sort) <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$reloaded" | sort) |
-            sed 's/^\t/> /; t; s/^/< /' | head -n 20 | tr -s '\t ' ' ' | paste -sd ';')"
+        same=$(comm -3 <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$listing" | sort) <(awk '{ sub(/^[[:space:]]+/, ""); print }' <<<"$reloaded" | sort) |
+            sed 's/^\t/> /; t; s/^/< /' | head -n 20 | tr -s '\t ' ' ' | paste -sd ';')
+        # The same lines on both sides: sorted, they hide what differs (#146).
+        same="differs: ${same:-in the order or the indentation of its lines only}"
     fi
     expect_rec run9-guard-flush "yes|0|yes|$invocations" \
         "$(grep -q reject <<<"$listing" && echo yes)|$flushed|$same|$(guest "systemctl show -p InvocationID --value kamerplanter-metadata-guard.service kamerplanter-backend.service | grep . | paste -sd ,")" \

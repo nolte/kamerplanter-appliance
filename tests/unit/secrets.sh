@@ -419,9 +419,27 @@ new_appliance
 run_configure >/dev/null
 echo damaged >"$(pins_dir)/.key"
 other_key=$(printf 'ab%.0s' {1..32})
+# The lock the check takes is the one held here: its path reaches the sandbox
+# only because /run/kamerplanter, which sandbox_install rewrites, is the
+# beginning of its name (#146).
+pins_lock=$SB/run/kamerplanter-pins.lock
+expect "keyed: the lock of the pins lies in the sandbox" "pin_key_lock=$pins_lock" \
+    "$(grep '^pin_key_lock=' "$SB/usr/libexec/kamerplanter/configure")"
+# waits_for_lock: whether a `flock -w 30`, as the check starts it, has that
+# lock open. By the file and not by the command line alone, which every other
+# flock on this machine with those options shares (#146).
+waits_for_lock() {
+    local pid fd
+    for pid in $(pgrep -f '^flock -w 30 '); do
+        for fd in "/proc/$pid/fd"/*; do
+            [ "$fd" -ef "$pins_lock" ] && return 0
+        done
+    done
+    return 1
+}
 rm -f "$work/held" "$work/release"
 # shellcheck disable=SC2016 # expanded by the holder, from its arguments
-flock "$SB/run/kamerplanter-pins.lock" bash -c '
+flock "$pins_lock" bash -c '
     touch "$3/held"
     while [ ! -e "$3/release" ]; do sleep 0.1; done
     printf "%s\n" "$2" >"$1/var/lib/kamerplanter/pinned/.key"' _ "$SB" "$other_key" "$work" &
@@ -429,11 +447,12 @@ holder=$!
 for _ in $(seq 100); do [ -e "$work/held" ] && break; sleep 0.1; done
 run_pin FERNET_KEY >"$work/pin-rc" &
 pinner=$!
-# Released only once the pinner waits for the lock (its flock is running),
-# so the case also fails where a run does not wait at all.
+# Released only once the pinner waits for the lock (its flock is running
+# with the lock open), so the case also fails where a run does not wait at
+# all.
 waited=no
 for _ in $(seq 100); do
-    if pgrep -f "^flock -w 30 " >/dev/null; then waited=yes; break; fi
+    if waits_for_lock; then waited=yes; break; fi
     sleep 0.1
 done
 touch "$work/release"

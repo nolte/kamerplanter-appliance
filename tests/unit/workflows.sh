@@ -298,6 +298,31 @@ for name in listened:
 # log was named but never uploaded). Each script is checked against the job
 # that runs it; a helper of run.sh that update.sh or data-disk.sh call is
 # checked against the boot job only.
+def named_files(text):
+    # The names after a "see", up to the end of the logical line: a line
+    # that ends in a backslash continues on the next one, and so does a
+    # message that breaks right after its "see" (#146: a name on the line
+    # after its "see" was not looked at).
+    text = re.sub(r"\\\n[ \t]*", "", text)
+    text = re.sub(r"\bsee[ \t]*\n[ \t]*", "see ", text)
+    named = set()
+    for line in text.splitlines():
+        _, see, rest = line.partition("see ")
+        if see:
+            named.update(re.findall(r"[\w${}-]+(?:\.[\w-]+)*\.(?:txt|log|ppm)\b", rest))
+    return named
+
+
+sample = (
+    'record a FAIL - "failed, see $name.console.txt and " \\\n        "a.late.log"\n'
+    'fail b "the disk build failed, see\n    b.disk.log"\n'
+    'guest true >"$OUT/c.unnamed.txt"\n'
+)
+if named_files(sample) == {"$name.console.txt", "a.late.log", "b.disk.log"}:
+    print('ok a file named on the line after its "see" is found, and one that no "see" names is not')
+else:
+    print(f"FAIL the rule for the files a failure names finds {sorted(named_files(sample))} in its sample")
+
 vm_doc = load(workflows / "vm-tests.yml")
 vm_jobs = vm_doc.get("jobs") or {}
 for job_id, script in (("boot", "run.sh"), ("update", "update.sh"), ("data-disk", "data-disk.sh")):
@@ -306,11 +331,7 @@ for job_id, script in (("boot", "run.sh"), ("update", "update.sh"), ("data-disk"
         if str(step.get("uses", "")).startswith("actions/upload-artifact@") and \
                 str((step.get("with") or {}).get("name", "")).startswith("vm-results-"):
             globs += str(step["with"].get("path", "")).split()
-    named = set()
-    for line in (root / "tests" / "boot" / script).read_text().splitlines():
-        _, see, rest = line.partition("see ")
-        if see:
-            named.update(re.findall(r"[\w${}-]+(?:\.[\w-]+)*\.(?:txt|log|ppm)\b", rest))
+    named = named_files((root / "tests" / "boot" / script).read_text())
     for f in sorted(named):
         example = ".build/boot/" + re.sub(r"\$\{?\w+\}?", "x", f)
         if any(fnmatch.fnmatch(example, g) for g in globs):

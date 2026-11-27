@@ -738,6 +738,11 @@ write_issue() {
     text+=$'\n\n'
     # agetty shows a changed message only on --reload, which redraws every
     # login prompt not yet in use: only when the message changed (#117).
+    # So an unchanged message keeps its file, and with it the SELinux label
+    # that file has: one created before systemd-tmpfiles-setup has the type
+    # of /run until the Z line of kamerplanter-issue.conf gives it the
+    # policy's, and only a changed message replaces a file that line missed
+    # (#146). check_console of tests/boot/run.sh reports such a label.
     if [ -f "$issue" ] && printf '%s' "$text" | cmp -s -- - "$issue"; then
         return 0
     fi

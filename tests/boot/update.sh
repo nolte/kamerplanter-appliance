@@ -218,7 +218,7 @@ step_window() {
     guest "echo UPDATE_WINDOW=$window >>/etc/kamerplanter/kamerplanter.env && systemctl daemon-reload"
     mount_state u2 "staged, window at $window"
     guest kamerplanter-update status >"$OUT/u2.status-before.txt" 2>&1
-    id=$(boot_id)
+    id=$(boot_id) && [ -n "$id" ] || { fail u2 "the boot id could not be read before the window at $window"; return 1; }
     wait_reboot "$id" 600 >/dev/null || { fail u2 "no reboot within the window at $window"; return 1; }
     wait_decided 1800 || { fail u2 "the health check did not decide"; return 1; }
     if [ "$(booted_digest)" = "$next" ] && has_event health ok &&
@@ -295,7 +295,7 @@ step_manual() {
         return 0
     fi
     guest "touch $VOLUME/WRITTEN_AFTER_UPDATE"
-    id=$(boot_id)
+    id=$(boot_id) && [ -n "$id" ] || { fail u4 "the boot id could not be read before the rollback command"; return 1; }
     guest "kamerplanter-update rollback </dev/null" >"$OUT/u4.rollback.txt" 2>&1
     wait_reboot "$id" 600 >/dev/null || { fail u4 "no reboot after the rollback command"; return 1; }
     wait_up "$REBOOT_TIMEOUT" >/dev/null || { fail u4 "previous version did not come up"; return 1; }
@@ -328,7 +328,7 @@ auto_rollback() {
     publish localhost/kamerplanter-appliance:test-broken trusted >"$WORK/broken.digest" ||
         { record "$step" FAIL - "push failed"; return 1; }
     guest "rm -f $VOLUME/WRITTEN_BY_BROKEN"
-    id=$(boot_id)
+    id=$(boot_id) && [ -n "$id" ] || { fail "$step" "the boot id could not be read before the broken release is applied"; return 1; }
     guest kamerplanter-update apply-now >"$OUT/$step.apply.txt" 2>&1
     id=$(wait_reboot "$id" 900) || { fail "$step" "no reboot into the broken release"; return 1; }
     # Health budget, then the rollback reboot.
