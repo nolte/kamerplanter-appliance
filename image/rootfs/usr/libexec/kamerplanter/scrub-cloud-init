@@ -46,9 +46,8 @@
 # ascii, the repr of its UTF-8 bytes and json.dumps, with an apostrophe both
 # bare and escaped, and each of those as it stands inside a JSON text, as in
 # an error message in cloud-init's status. They are learned from this boot's
-# combined
-# cloud-config and from every copy of the user-data that cloud-init keeps per
-# instance: cloud-config.txt (YAML), user-data.txt.i (MIME, its
+# combined cloud-config and from every copy of the user-data that cloud-init
+# keeps per instance: cloud-config.txt (YAML), user-data.txt.i (MIME, its
 # text/cloud-config parts) and user-data.txt (as the source supplied it:
 # #cloud-config, MIME or gzip), all read before anything is deleted. A copy
 # that holds no cloud-config, such as a shell script, is read with nothing
@@ -57,35 +56,38 @@
 # for its values and for whether it can be read (#76). The copies are deleted
 # last: a boot that ends before the scrub is through leaves them, and a later
 # boot learns the values from them even when the source is gone by then and
-# cloud-init does not run (#30, #46).
+# cloud-init does not run (#30, #46). Of an instance's copies, those that
+# could be read go last: what a boot that ends in between leaves is not an
+# instance whose secrets are unknown (#120).
 #
 # The copies are kept, and the unit fails, whenever the scrub is not through
 # (#76): when jq cannot run or fails on the combined cloud-config or on a
 # copy, so that the values in it are not known (without jq none are, and
 # nothing is scrubbed, as without Python's YAML module); when jq or Python
-# fails to make the values into their forms, so that none is searched for;
-# and when there is
-# something to scrub and /var/log is a symbolic link, which is not entered,
-# or one of cloud-init's logs is, which is not rewritten through it, or
-# /var/lib/cloud/data or the status or result in it is, which are not
-# scrubbed through it; and whenever /var/lib/cloud, its instances/, an
-# instance directory in it, /run/cloud-init or a copy is a symbolic link,
-# behind which copies could lie unread (#93). Each such link is named once.
-# The next boot retries. A copy that cannot be deleted is named, and the unit
-# fails, and so does a log that cannot be deleted when it is to be (see
-# below). The services do not wait for the scrub, and the update's health
-# check does not look at it: a failed scrub stops nothing.
+# fails to make the values into their forms, or Python makes none, so that
+# none is searched for; and when there is something to scrub and /var/log is
+# a symbolic link, which is not entered, or one of cloud-init's logs is, which
+# is not rewritten through it, or /var/lib/cloud/data or the status or result
+# in it is, which are not scrubbed through it; and whenever /var/lib/cloud,
+# its instances/, an instance directory in it, /run/cloud-init or a copy is a
+# symbolic link, behind which copies could lie unread (#93). Each such link is
+# named once. So when the logs go (see below) and the file system of
+# /var/lib/cloud/data is another or cannot be told: the status and result in
+# it are not rewritten. The next boot retries. A copy that cannot be deleted
+# is named, and the unit fails, and so does a log that cannot be deleted when
+# it is to be (see below). The services do not wait for the scrub, and the
+# update's health check does not look at it: a failed scrub stops nothing.
 #
 # When an instance has copies but none of them can be read, its secrets are
 # not known; so when it holds only an obj.pkl, which is not read here, or
 # only copies that are not read (#120). Then cloud-init's logs are deleted
-# instead, rotated ones
-# included, and every error message in cloud-init's status and result
-# (/var/lib/cloud/data/{status,result}.json, and the regular files of the
-# same names in /run/cloud-init) is replaced by "REDACTED": an error message
-# can quote the cloud-config. The files stay JSON with their stages, times
-# and number of errors, so that `cloud-init status` and cloud-init's record
-# of the instance are kept; one that is not JSON is left alone and named.
+# instead, rotated ones included, and every error message in cloud-init's
+# status and result (/var/lib/cloud/data/{status,result}.json, and the
+# regular files of the same names in /run/cloud-init) is replaced by
+# "REDACTED": an error message can quote the cloud-config. The files stay
+# JSON with their stages, times and number of errors, so that
+# `cloud-init status` and cloud-init's record of the instance are kept; one
+# that is not JSON is left alone and named.
 #
 # A compressed log (gzip, xz, bzip2) is not rewritten but deleted when it
 # holds a value; one that cannot be read is deleted. Whether the image rotates
@@ -104,11 +106,15 @@
 # place (#119). An instance directory on another file system keeps the copies
 # and fails the unit, like a link in its place; any other directory on another
 # file system under /var/lib/cloud (the seed files apart) or /run/cloud-init
-# does when there is something to scrub, and is only named otherwise. A search
-# that fails (find's exit status; find names what it could not read) always
-# does. A file that is gone by the time find looks at it is no failure. Values
-# are never printed, passed on a command line or written to a file of their
-# own: they go from jq to Python through pipes only.
+# does when there is something to scrub, and is only named otherwise; the
+# status and result in a /var/lib/cloud/data on another file system are not
+# rewritten. A search that fails (find's exit status; find names what it could
+# not read) always does, and is named once: a place within one that is named,
+# or around it, is not named again. A file that is gone by the time find looks
+# at it is no failure, nor is a directory that find listed and that is gone
+# when its file system is asked for. Values are never printed, passed on a
+# command line or written to a file of their own: they go from jq to Python
+# through pipes only.
 set -euo pipefail
 umask 077
 
@@ -191,7 +197,8 @@ is_config() {
 # directory and does not enter it, so nothing in it is read, rewritten or
 # deleted (#119). EXPRESSION goes before the test for a directory, such as
 # -maxdepth 1 or a -prune with its -o. Fails when the search fails or a
-# directory's file system cannot be told.
+# directory's file system cannot be told. A directory that is gone by then
+# (gone) is on none: -ignore_readdir_race covers find alone.
 foreign() {
     local start=$1 dev other d dirs=() rc=0
     shift
@@ -200,11 +207,27 @@ foreign() {
     for d in "${dirs[@]}"; do
         if other=$(stat -c %d -- "$d" 2>/dev/null); then
             [ "$other" = "$dev" ] || printf '%s\0' "$d"
-        else
+        elif ! gone "$d"; then
             rc=1
         fi
     done
     return "$rc"
+}
+
+# gone PATH: whether nothing is at PATH any more. Only "no such file" counts:
+# a PATH that cannot be looked at for another reason, such as a file system
+# that refuses root, is not gone.
+gone() {
+    python3 -I -c '
+import os, sys
+try:
+    os.lstat(sys.argv[1])
+except (FileNotFoundError, NotADirectoryError):
+    sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+' "$1" 2>/dev/null
 }
 
 # linked_instances: the symbolic links in /var/lib/cloud/instances, each in
@@ -239,17 +262,16 @@ linked_copies() {
 # as JSON, one mapping per line, every scalar as text (BaseLoader), so a date
 # or a tag that JSON does not know reads all the same; merge keys (<<) are
 # resolved, as cloud-init resolves them (SafeLoader), and a plain << that is
-# no key stays text. cloud-config.txt is
-# read whole as YAML, whatever its first line. Of user-data.txt and
-# user-data.txt.i, a gzip copy is decompressed; a copy whose first line is
-# #cloud-config is one document; a MIME message gives one for each of its
-# text/cloud-config parts; a shell script, a boothook, a part handler or an
-# empty copy gives none. A document that is not a mapping gives none. Fails
-# when FILE cannot be read, is not a regular file, or holds anything else: a
-# Jinja template, an #include, a cloud-config archive or patch, a MIME message
-# with a defect or a part of another type, or a cloud-config that cannot be
-# read. The values in such a copy are not known from it. Nothing of it is
-# printed on an error.
+# no key stays text. cloud-config.txt is read whole as YAML, whatever its
+# first line. Of user-data.txt and user-data.txt.i, a gzip copy is
+# decompressed; a copy whose first line is #cloud-config is one document; a
+# MIME message gives one for each of its text/cloud-config parts; a shell
+# script, a boothook, a part handler or an empty copy gives none. A document
+# that is not a mapping gives none. Fails when FILE cannot be read, is not a
+# regular file, or holds anything else: a Jinja template, an #include, a
+# cloud-config archive or patch, a MIME message with a defect or a part of
+# another type, or a cloud-config that cannot be read. The values in such a
+# copy are not known from it. Nothing of it is printed on an error.
 as_json() {
     python3 -I -c '
 import email, gzip, json, os, re, stat, sys
@@ -318,16 +340,18 @@ except Exception:
 #              known: those with a copy of the user-data none of which can
 #              be read (as_json), and so those with nothing but an obj.pkl,
 #              which is not read at all and is deleted with the others
-#              (#120). Where cloud-config.txt is there but cannot
-#              be read, a copy of the user-data counts only when it gives a
+#              (#120). Where cloud-config.txt is there but cannot be read, a
+#              copy of the user-data counts only when it gives a
 #              cloud-config: one that gives none, such as a shell script,
 #              says nothing about what cloud-config.txt holds;
 #   unlearned  the files that can be read but whose secrets jq could not
-#              take out (take_pairs).
+#              take out (take_pairs);
+#   readable   the copies that can be read (as_json), for delete_copies.
 learn() {
     local f dir json
     local -A seen=() known=()
     pairs=() unknown=() unlearned=()
+    declare -gA readable=()
     if own_dir "$cloud_run" && [ -f "$combined" ] && [ ! -L "$combined" ]; then
         take_pairs <"$combined" || unlearned+=("$combined")
     fi
@@ -336,6 +360,7 @@ learn() {
         seen[$dir]=1
         is_config "$f" || continue
         json=$(as_json "$f") || continue
+        readable[$f]=1
         if [ -n "$json" ]; then
             take_pairs < <(printf '%s\n' "$json") || unlearned+=("$f")
         fi
@@ -350,14 +375,27 @@ learn() {
 }
 
 # status_files: cloud-init's status and result, NUL-separated: the regular
-# files of status_names in /var/lib/cloud/data and in /run/cloud-init.
+# files of status_names in /var/lib/cloud/data and in /run/cloud-init. Not
+# those in a /var/lib/cloud/data on another file system than /var/lib/cloud:
+# no search enters it (find -xdev), so nothing in it is rewritten either, and
+# main names it (foreign). Exit status 3 when it is on another file system,
+# 1 when that cannot be told; either way those files are not among them, and
+# the others are.
 status_files() {
-    local name f
+    local name f dev other rc=0
     if own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
-        for name in "${status_names[@]}"; do
-            f=${cloud_lib}data/$name
-            if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi
-        done
+        if dev=$(stat -c %d -- "$cloud_lib" 2>/dev/null) && other=$(stat -c %d -- "${cloud_lib}data" 2>/dev/null); then
+            if [ "$other" = "$dev" ]; then
+                for name in "${status_names[@]}"; do
+                    f=${cloud_lib}data/$name
+                    if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi
+                done
+            else
+                rc=3
+            fi
+        else
+            rc=1
+        fi
     fi
     if own_dir "$cloud_run"; then
         for name in "${status_names[@]}"; do
@@ -365,6 +403,7 @@ status_files() {
             if [ -f "$f" ] && [ ! -L "$f" ]; then printf '%s\0' "$f"; fi
         done
     fi
+    return "$rc"
 }
 
 # forms: reads lines NUL-separated on stdin and prints, NUL-separated, the
@@ -405,7 +444,8 @@ sys.stdout.buffer.write(data)
 # patterns: the strings to search for, NUL-separated, longest first, from
 # pairs (learn): each line of a value, the same as it stands inside a JSON
 # text (jq), and the forms Python prints it in (forms). Names a key whose
-# value is not searched for. Fails, printing nothing, when jq or Python fails.
+# value is not searched for. Fails, printing nothing, when jq or Python fails
+# or Python makes no form.
 patterns() {
     local key value line escaped i lines=() got=()
     local -A seen=()
@@ -653,18 +693,33 @@ log_kind() {
 # when the search for the copies fails, and says so: then not every copy was
 # found (#119).
 delete_copies() {
-    local name f found=() pickles=() others=() count=0 rc=0
+    local name f found=() pickles=() unread=() others=() configs=() count=0 rc=0
     if ! list found instance_copies; then
         echo "${cloud_lib}instances cannot be searched (see find's message); not every copy of the provisioning data in it is deleted" >&2
         rc=1
     fi
     # The pickles first: a boot that ends in between leaves the copies the
     # secrets are learned from, not an instance with nothing but a pickle,
-    # for which the next boot would delete the logs (#120).
+    # for which the next boot would delete the logs (#120). For the same
+    # reason the copies that could not be read (learn) go before those that
+    # could: beside a user-data.txt that is not read here, such as a Jinja
+    # template or an #include, cloud-config.txt is the only copy to learn
+    # from, and beside a cloud-config.txt that cannot be read, user-data.txt
+    # is (#46). Of those that could be read, cloud-config.txt goes last:
+    # without it, a copy of the user-data that gives no cloud-config counts
+    # as all there is to know.
     for f in "${found[@]}"; do
-        if [ "${f##*/}" = obj.pkl ]; then pickles+=("$f"); else others+=("$f"); fi
+        if [ "${f##*/}" = obj.pkl ]; then
+            pickles+=("$f")
+        elif [ -z "${readable[$f]:-}" ]; then
+            unread+=("$f")
+        elif [ "${f##*/}" = cloud-config.txt ]; then
+            configs+=("$f")
+        else
+            others+=("$f")
+        fi
     done
-    for f in "${pickles[@]}" "${others[@]}"; do
+    for f in "${pickles[@]}" "${unread[@]}" "${others[@]}" "${configs[@]}"; do
         if rm -f -- "$f" 2>/dev/null && [ ! -e "$f" ]; then
             count=$((count + 1))
         else
@@ -689,18 +744,30 @@ delete_copies() {
     return "$rc"
 }
 
-# unsearched PLACE: for main, which holds unscrubbed and failed: records, once
-# per PLACE, that a search in PLACE failed, so that the copies are kept and
-# the unit fails. find has named what it could not read (#119).
+# unsearched [PLACE]: for main, which holds unscrubbed and failed: records
+# that a search in PLACE failed, so that the copies are kept and the unit
+# fails. find has named what it could not read (#119), each time it met it;
+# this names a cause once: not a PLACE that is named already, nor one within
+# or around a place that is, such as /var/lib/cloud after its instances/ for
+# the one instance directory that cannot be read. Without PLACE, the search
+# went through every place: named only when none is yet.
 unsearched() {
-    [ -z "${failed[$1]:-}" ] || return 0
-    failed[$1]=1
-    unscrubbed+=("$1 cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted")
+    local place=${1:-} p
+    if [ -z "$place" ]; then
+        [ "${#failed[@]}" -eq 0 ] || return 0
+        place="cloud-init's files and logs"
+    fi
+    for p in "${!failed[@]}"; do
+        case $place/ in "$p"/*) return 0 ;; esac
+        case $p/ in "$place"/*) return 0 ;; esac
+    done
+    failed[$place]=1
+    unscrubbed+=("$place cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted")
 }
 
 main() {
     local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies='' undeleted=''
-    local found=() links=() files=() elsewhere=() got=()
+    local found=() links=() files=() elsewhere=() got=() named
     local -A failed=()
     list found instance_copies || unsearched "${cloud_lib}instances"
     for f in "${found[@]}"; do
@@ -727,7 +794,7 @@ main() {
     mapfile -d '' -t pats < <(patterns)
     if ! wait "$!"; then
         pats=()
-        unscrubbed+=("the provisioned secrets cannot be made into search patterns (jq or Python failed); none is searched for")
+        unscrubbed+=("the provisioned secrets cannot be made into search patterns (jq or Python failed, or Python made none); none is searched for")
     fi
     # A place that is a symbolic link is not entered (own_dir), and a file
     # that is one is not read, rewritten or deleted through it: what lies
@@ -827,7 +894,23 @@ main() {
                 fi
             done
         fi
-        while IFS= read -r -d '' f; do
+        # Not under set -e: the status and result that are not handed out
+        # stay as they are, and so do the copies. main does not rest on
+        # having named the directory above (elsewhere): it is asked again.
+        rc=0
+        list got status_files || rc=$?
+        case $rc in
+            0) ;;
+            3)
+                named=''
+                for d in "${elsewhere[@]}"; do
+                    if [ "$d" = "${cloud_lib}data" ]; then named=yes; fi
+                done
+                [ -n "$named" ] || unscrubbed+=("${cloud_lib}data is on another file system than the directory it is in; the error messages in cloud-init's status and result in it are not replaced")
+                ;;
+            *) unscrubbed+=("the file system of ${cloud_lib}data cannot be told; the error messages in cloud-init's status and result in it are not replaced") ;;
+        esac
+        for f in "${got[@]}"; do
             rc=0
             blank_errors "$f" || rc=$?
             case $rc in
@@ -839,11 +922,11 @@ main() {
                 3 | 4) ;;
                 *) unwritten+=("$f") ;;
             esac
-        done < <(status_files)
+        done
     fi
     if [ "${#pats[@]}" -gt 0 ]; then
         # A search that fails has not found every file: the copies stay.
-        list files scanned || unsearched "cloud-init's files and logs"
+        list files scanned || unsearched
         for f in "${files[@]}"; do
             rc=0
             # shellcheck disable=SC2046 # empty or one word
@@ -865,7 +948,7 @@ main() {
             esac
         done
         # Searched again: a compressed log that was deleted is gone.
-        list files scanned || unsearched "cloud-init's files and logs"
+        list files scanned || unsearched
         for f in "${files[@]}"; do
             # shellcheck disable=SC2046 # empty or one word
             if printf '%s\0' "${pats[@]}" | holds "$f" $(log_kind "$f"); then left+=("$f"); fi

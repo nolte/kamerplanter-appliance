@@ -136,6 +136,19 @@ found() {
 cloud_places() { echo "$SB/var/lib/cloud" "$SB/run/cloud-init" "$SB"/var/log/cloud-init*.log; }
 mode() { stat -c %a "$1" 2>/dev/null; }
 exists() { [ -e "$1" ] || [ -L "$1" ] && echo yes || echo no; }
+# The cases that take a directory's mode away (chmod 0000, 0500) rest on the
+# mode stopping this user. It does not stop root, or anyone who may override
+# it (CAP_DAC_OVERRIDE): measured here, and those cases are skipped then, by
+# name, instead of failing for a reason that is not the scrub's (#155).
+mkdir "$work/mode-probe"
+chmod 0000 "$work/mode-probe"
+if ls "$work/mode-probe" >/dev/null 2>&1; then modes_bind=''; else modes_bind=yes; fi
+chmod 0700 "$work/mode-probe"
+skips=0
+skipped() {  # skipped NAME
+    printf 'skip  %s (a mode does not stop this user)\n' "$1"
+    skips=$((skips + 1))
+}
 
 # --- a boot with provisioning data: the copies go, the record stays (L15) ---
 new_appliance
@@ -298,11 +311,15 @@ i=$SB/var/lib/cloud/instances/iid-1
 printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
 printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
 mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
-chmod 0500 "$SB/var/log"
-rc=$(run_scrub)
-chmod 0700 "$SB/var/log"
-expect "no copy can be read, a log cannot be deleted: the scrub fails, names it, replaces the error messages, keeps the copies" "1|yes|yes|yes|yes|yes" \
-    "$rc|$(has "$SB/var/log/cloud-init.log cannot be deleted; the provisioned secrets in it are not known" "$(out)")|$(has "error messages replaced in $SB/var/lib/cloud/data/status.json" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
+if [ -z "$modes_bind" ]; then
+    skipped "no copy can be read, a log cannot be deleted"
+else
+    chmod 0500 "$SB/var/log"
+    rc=$(run_scrub)
+    chmod 0700 "$SB/var/log"
+    expect "no copy can be read, a log cannot be deleted: the scrub fails, names it, replaces the error messages, keeps the copies" "1|yes|yes|yes|yes|yes" \
+        "$rc|$(has "$SB/var/log/cloud-init.log cannot be deleted; the provisioned secrets in it are not known" "$(out)")|$(has "error messages replaced in $SB/var/lib/cloud/data/status.json" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
+fi
 
 # A status that is not JSON is left alone and named; nothing fails for it.
 new_appliance
@@ -428,7 +445,7 @@ booted iid-1
 stub_jq '*tojson*'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
 expect "jq fails on the search patterns: the scrub fails, says so, keeps the copies" "1|yes|$all_kept" \
-    "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed)" "$(out)")|$(kept_copies)"
+    "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed, or Python made none)" "$(out)")|$(kept_copies)"
 
 # --- each copy is read once (#76) ---
 new_appliance
@@ -642,24 +659,36 @@ booted iid-1
 locked=$SB/var/lib/cloud/instances/iid-locked
 mkdir -p "$locked"
 user_data >"$locked/user-data.txt"
-chmod 0000 "$locked"
-rc=$(run_scrub)
-chmod 0700 "$locked"
-expect "a search that fails: an instance directory that cannot be read is named, the copies are kept, the scrub fails" "1|yes|yes|$all_kept|yes" \
-    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted" "$(out)")|$(has "iid-locked" "$(out)")|$(kept_copies)|$(exists "$locked/user-data.txt")"
-expect "a search that fails: each place is named once, the logs are scrubbed all the same" "1|none" \
-    "$(grep -cF "$SB/var/lib/cloud/instances cannot be searched" "$SB/out")|$(found "$SB"/var/log/cloud-init*.log)"
+if [ -z "$modes_bind" ]; then
+    skipped "a search that fails: an instance directory that cannot be read"
+else
+    chmod 0000 "$locked"
+    rc=$(run_scrub)
+    chmod 0700 "$locked"
+    expect "a search that fails: an instance directory that cannot be read is named, the copies are kept, the scrub fails" "1|yes|yes|$all_kept|yes" \
+        "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched (see find's message); what could not be read there is neither scrubbed nor deleted" "$(out)")|$(has "iid-locked" "$(out)")|$(kept_copies)|$(exists "$locked/user-data.txt")"
+    # One directory that cannot be read fails every search that meets it: of
+    # the instances, of /var/lib/cloud, of all the files. The scrub names the
+    # cause once, by the first place; find names the directory each time
+    # (#155).
+    expect "a search that fails: the scrub names the one cause once, by its first place, the logs are scrubbed all the same" "1|1|none" \
+        "$(grep -cF "cannot be searched (see find's message)" "$SB/out")|$(grep -cF "$SB/var/lib/cloud/instances cannot be searched" "$SB/out")|$(found "$SB"/var/log/cloud-init*.log)"
+fi
 # The same without anything learned: the directory may hold copies, so the
 # scrub fails all the same.
 new_appliance
 locked=$SB/var/lib/cloud/instances/iid-locked
 mkdir -p "$locked"
 user_data >"$locked/user-data.txt"
-chmod 0000 "$locked"
-rc=$(run_scrub)
-chmod 0700 "$locked"
-expect "a search that fails, nothing learned: the scrub still fails, names the place and keeps the copy" "1|yes|yes" \
-    "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched" "$(out)")|$(exists "$locked/user-data.txt")"
+if [ -z "$modes_bind" ]; then
+    skipped "a search that fails, nothing learned"
+else
+    chmod 0000 "$locked"
+    rc=$(run_scrub)
+    chmod 0700 "$locked"
+    expect "a search that fails, nothing learned: the scrub still fails, names the place and keeps the copy" "1|yes|yes" \
+        "$rc|$(has "$SB/var/lib/cloud/instances cannot be searched" "$(out)")|$(exists "$locked/user-data.txt")"
+fi
 # A directory on another file system is not entered (find -xdev). A mount
 # needs root, so the other file system is planted in what stat says of the
 # directory: the scrub tells the file system by it. What is checked is that
@@ -709,6 +738,63 @@ booted iid-1
 stub_stat '*/no-such-directory'
 expect "another file system: none, the scrub succeeds and names none" "0|no" \
     "$(PATH=$SB/stub:$PATH run_scrub)|$(has "another file system" "$(out)")"
+# No copy can be read and /var/lib/cloud/data is on another file system: the
+# status and result in it are not rewritten, as nothing else in it is; it is
+# named, the copies stay, the scrub fails (#155).
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
+mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+stub_stat '*/var/lib/cloud/data'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: /var/lib/cloud/data on one, no copy can be read: the status in it is not rewritten, it is named, the copies are kept, the scrub fails" "1|$status_before|no|yes|yes|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "error messages replaced in" "$(out)")|$(has "$SB/var/lib/cloud/data is on another file system than the directory it is in; the provisioned secrets in it are not scrubbed" "$(out)")|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")"
+# stub_stat_fails PATTERN [COMMAND]: a stat in $SB/stub that fails for a file
+# that matches PATTERN (a case pattern), after running COMMAND, and runs the
+# real one otherwise.
+stub_stat_fails() {
+    mkdir -p "$SB/stub"
+    # shellcheck disable=SC2016 # expanded by the stub, not here
+    printf '#!/usr/bin/env bash\ncase "${!#}" in %s) %s; exit 1 ;; esac\nexec %q "$@"\n' "$1" "${2:-:}" "$(command -v stat)" >"$SB/stub/stat"
+    chmod +x "$SB/stub/stat"
+}
+# The file system of /var/lib/cloud/data cannot be told: the status is not
+# rewritten either, and that is named.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+printf '#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt"
+mime_user_data $'#cloud-config\nkamerplanter: [unclosed\n' >"$i/user-data.txt.i"
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+stub_stat_fails '*/var/lib/cloud/data'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "another file system: that of /var/lib/cloud/data cannot be told, no copy can be read: the status is not rewritten, that is named, the copies are kept, the scrub fails" "1|$status_before|yes|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(has "the file system of $SB/var/lib/cloud/data cannot be told; the error messages in cloud-init's status and result in it are not replaced" "$(out)")|$(exists "$i/cloud-config.txt")"
+# A directory that is gone between the search and the question for its file
+# system is on none: no failure (#155). The stub removes it when asked.
+new_appliance
+booted iid-1
+mkdir -p "$SB/var/lib/cloud/instances/iid-gone"
+# shellcheck disable=SC2016 # expanded by the stub, not here
+stub_stat_fails '*/instances/iid-gone' 'rmdir -- "${!#}"'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a directory that is gone when its file system is asked for: no failure, the scrub succeeds, the copies go" "0|no|no|no" \
+    "$rc|$(exists "$SB/var/lib/cloud/instances/iid-gone")|$(has "cannot be searched" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")"
+# One that is still there but whose file system cannot be told is a failure:
+# named once, the copies stay.
+new_appliance
+booted iid-1
+mkdir -p "$SB/var/lib/cloud/instances/iid-untold"
+stub_stat_fails '*/instances/iid-untold'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a directory whose file system cannot be told: the scrub fails, names the place once, keeps the copies" "1|1|$all_kept" \
+    "$rc|$(grep -cF "cannot be searched (see find's message)" "$SB/out")|$(kept_copies)"
 
 # --- an instance with nothing but an obj.pkl: its secrets are not known (#120) ---
 # The pickle is not read, so nothing is learned from the instance: the logs
@@ -741,11 +827,69 @@ booted iid-1
 rm -rf "$SB/run"
 i=$SB/var/lib/cloud/instances/iid-1
 rm -f "$i/cloud-config.txt" "$i/user-data.txt" "$i/user-data.txt.i"
-chmod 0500 "$SB/var/log"
+if [ -z "$modes_bind" ]; then
+    skipped "only an obj.pkl and a log that cannot be deleted"
+else
+    chmod 0500 "$SB/var/log"
+    rc=$(run_scrub)
+    chmod 0700 "$SB/var/log"
+    expect "only an obj.pkl and a log that cannot be deleted: the pickle is kept, the scrub fails" "1|yes|yes" \
+        "$rc|$(exists "$i/obj.pkl")|$(has "$SB/var/log/cloud-init.log cannot be deleted" "$(out)")"
+fi
+
+# --- of an instance's copies, those that could be read are deleted last (#155) ---
+# stub_rm N: a rm in $SB/stub that notes each file it is asked to delete in
+# $SB/removed and deletes the first N only: after them the run is as a boot
+# that ended in between.
+stub_rm() {
+    mkdir -p "$SB/stub"
+    : >"$SB/removed"
+    # shellcheck disable=SC2016 # expanded by the stub, not here
+    printf '#!/usr/bin/env bash\necho "${!#}" >>%q\n[ "$(wc -l <%q)" -le %q ] || exit 1\nexec %q "$@"\n' \
+        "$SB/removed" "$SB/removed" "$1" "$(command -v rm)" >"$SB/stub/rm"
+    chmod +x "$SB/stub/rm"
+}
+# A Jinja template as user-data.txt is not read here: cloud-config.txt is the
+# only copy to learn from. The run ends after two deletions; what it leaves
+# must not be an instance whose secrets are unknown, or the next boot would
+# delete the logs.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+{ echo '## template: jinja'; user_data; } >"$i/user-data.txt"
+rm -f "$i/user-data.txt.i"
+stub_rm 2
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a run that ends while the copies are deleted: the pickle went first, cloud-config.txt is asked for last and left" "1|obj.pkl user-data.txt cloud-config.txt|no|no|yes" \
+    "$rc|$(sed 's|.*/||' "$SB/removed" | paste -sd ' ')|$(exists "$i/obj.pkl")|$(exists "$i/user-data.txt")|$(exists "$i/cloud-config.txt")"
 rc=$(run_scrub)
-chmod 0700 "$SB/var/log"
-expect "only an obj.pkl and a log that cannot be deleted: the pickle is kept, the scrub fails" "1|yes|yes" \
-    "$rc|$(exists "$i/obj.pkl")|$(has "$SB/var/log/cloud-init.log cannot be deleted" "$(out)")"
+expect "the boot after it: the instance is not unknown, the logs are kept and scrubbed, the last copy goes" "0|no|yes|none|no" \
+    "$rc|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$SB/var/log/cloud-init.log")|$(found "$SB"/var/log/cloud-init*.log)|$(exists "$i/cloud-config.txt")"
+# The other way round (#46): cloud-config.txt cannot be read, user-data.txt
+# can and is the only copy to learn from, so it goes last.
+new_appliance
+booted iid-1
+rm -rf "$SB/run"
+i=$SB/var/lib/cloud/instances/iid-1
+printf 'kamerplanter: [unclosed\n' >"$i/cloud-config.txt"
+rm -f "$i/user-data.txt.i"
+stub_rm 2
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "a run that ends while the copies are deleted, cloud-config.txt unreadable: it goes before user-data.txt, which is left" "1|obj.pkl cloud-config.txt user-data.txt|no|yes" \
+    "$rc|$(sed 's|.*/||' "$SB/removed" | paste -sd ' ')|$(exists "$i/cloud-config.txt")|$(exists "$i/user-data.txt")"
+rc=$(run_scrub)
+expect "the boot after it, cloud-config.txt unreadable: the instance is not unknown, the logs are kept, the last copy goes" "0|no|yes|no" \
+    "$rc|$(has "no copy of the cloud-config can be read" "$(out)")|$(exists "$SB/var/log/cloud-init.log")|$(exists "$i/user-data.txt")"
+# Two instances with every copy, all of them read: all the pickles before any
+# other copy, every cloud-config.txt after the last other copy of an instance.
+new_appliance
+booted iid-0
+booted iid-1
+stub_rm 99
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "the order of deletion over two instances: the pickles first, every cloud-config.txt last" "0|8|yes|yes" \
+    "$rc|$(grep -c '/instances/' "$SB/removed")|$(awk '/\/obj\.pkl$/ { if (other) bad = 1; next } /\/instances\// { other = 1 } END { print bad ? "no" : "yes" }' "$SB/removed")|$(awk '/\/cloud-config\.txt$/ { config = 1; next } /\/instances\// && config { bad = 1 } END { print bad ? "no" : "yes" }' "$SB/removed")"
 
 # --- a value too short to be searched for: named by its key only ---
 new_appliance
@@ -783,68 +927,99 @@ expect "a single NUL in a value, then a short value: the pairs stay aligned, the
 # The copies are not rewritten, so one left behind still holds the values.
 new_appliance
 booted iid-1
-chmod 0500 "$SB/var/lib/cloud/instances/iid-1"
-rc=$(run_scrub)
-chmod 0700 "$SB/var/lib/cloud/instances/iid-1"
-expect "a copy that cannot be deleted: the scrub fails, names it, never the value, and the logs are scrubbed" "1|yes|yes|no|none" \
-    "$rc|$(has "$SB/var/lib/cloud/instances/iid-1/user-data.txt cannot be deleted; it still holds the provisioned secrets" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(has "$jwt" "$(out)")|$(found "$SB"/var/log/cloud-init*.log)"
+if [ -z "$modes_bind" ]; then
+    skipped "a copy that cannot be deleted"
+else
+    chmod 0500 "$SB/var/lib/cloud/instances/iid-1"
+    rc=$(run_scrub)
+    chmod 0700 "$SB/var/lib/cloud/instances/iid-1"
+    expect "a copy that cannot be deleted: the scrub fails, names it, never the value, and the logs are scrubbed" "1|yes|yes|no|none" \
+        "$rc|$(has "$SB/var/lib/cloud/instances/iid-1/user-data.txt cannot be deleted; it still holds the provisioned secrets" "$(out)")|$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(has "$jwt" "$(out)")|$(found "$SB"/var/log/cloud-init*.log)"
+fi
 
 # --- a file that cannot be rewritten: the unit fails and names it ---
 new_appliance
 booted iid-1
-chmod 0500 "$SB/var/lib/cloud/data"
-rc=$(run_scrub)
-chmod 0700 "$SB/var/lib/cloud/data"
-expect "a file that cannot be rewritten: the scrub fails and names it, never the value" "1|yes|no" \
-    "$rc|$(has "$SB/var/lib/cloud/data/status.json still holds provisioned secrets" "$(out)")|$(has "$quoted" "$(out)")"
-expect "a file that cannot be rewritten: the rest is scrubbed, the copies are kept for the next boot to retry" "yes|none|yes" \
-    "$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(found "$SB"/var/log/cloud-init*.log)|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
-# A kept copy keeps its values, or the next boot would learn none from it (#76).
-expect "a file that cannot be rewritten: the kept copies still hold the values to learn" "yes|yes" \
-    "$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/user-data.txt" && echo yes)|$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt" && echo yes)"
+if [ -z "$modes_bind" ]; then
+    skipped "a file that cannot be rewritten"
+else
+    chmod 0500 "$SB/var/lib/cloud/data"
+    rc=$(run_scrub)
+    chmod 0700 "$SB/var/lib/cloud/data"
+    expect "a file that cannot be rewritten: the scrub fails and names it, never the value" "1|yes|no" \
+        "$rc|$(has "$SB/var/lib/cloud/data/status.json still holds provisioned secrets" "$(out)")|$(has "$quoted" "$(out)")"
+    expect "a file that cannot be rewritten: the rest is scrubbed, the copies are kept for the next boot to retry" "yes|none|yes" \
+        "$(exists "$SB/var/lib/cloud/instances/iid-1/user-data.txt")|$(found "$SB"/var/log/cloud-init*.log)|$(has "copies of the provisioning data are kept until the next boot retries" "$(out)")"
+    # A kept copy keeps its values, or the next boot would learn none from it (#76).
+    expect "a file that cannot be rewritten: the kept copies still hold the values to learn" "yes|yes" \
+        "$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/user-data.txt" && echo yes)|$(grep -qF -- "$jwt" "$SB/var/lib/cloud/instances/iid-1/cloud-config.txt" && echo yes)"
+fi
 
 # --- each value is searched for in the forms Python prints it in (SEC-004) ---
 # Each value has an ASCII head and tail that survive every form. form_one
 # holds a quote, an apostrophe, a backslash, a non-ASCII and an astral
 # character; form_two only an apostrophe, so that repr takes double quotes.
+# form_three holds an apostrophe, a control and a non-ASCII character and no
+# quote: alone, repr takes double quotes and leaves the apostrophe bare, and
+# the control character sets each form apart from every other (repr \x01,
+# JSON \u0001), so that every planted line needs the form it shows, and
+# every form the scrub's Python makes is planted (#155). One of them, the
+# value as it stands inside a JSON text, is made by jq as well: without
+# Python's the line would still be redacted.
 form_one_head=scrub-form-one-head
 form_one_tail=form-one-tail-eeeeeeee
 form_two_head=scrub-form-two-head
 form_two_tail=form-two-tail-ffffffff
 form_one="$form_one_head-\"a'ss\\wörd😀-$form_one_tail"
 form_two="$form_two_head-it's-$form_two_tail"
+form_three_head=scrub-form-three-head
+form_three_tail=form-three-tail-iiiiiiii
+form_three="$form_three_head-it's"$'\x01'"wörd-$form_three_tail"
 # plant_forms < VALUES (NUL-separated): one log line per form of each value:
-# repr alone, in a dict, in a longer string, in one that holds a quote too,
-# ascii, the repr of its UTF-8 bytes, json.dumps with and without
-# ensure_ascii, and a JSON text that quotes it by its repr or ascii.
+# repr alone, in a dict, in a longer string, in one that holds a quote too
+# (the apostrophe escaped), ascii and the repr of its UTF-8 bytes, each alone
+# and in a string that holds a quote, json.dumps with and without
+# ensure_ascii, a JSON text that quotes it by its repr or ascii, and each of
+# the six quoted forms as json.dumps prints it, with and without ensure_ascii:
+# 24 lines per value.
 plant_forms() {
     python3 -I -c '
 import json, sys
 for v in sys.stdin.buffer.read().decode("utf-8").split("\0"):
     if not v:
         continue
-    for f in (repr(v), repr({"KEY": v}), repr("text " + v + " text"), repr("say \"" + v + "\""),
-              ascii(v), repr(v.encode("utf-8")), json.dumps(v), json.dumps(v, ensure_ascii=False),
-              json.dumps({"errors": ["rejected: %r" % v]}), json.dumps("say \"%a\"" % v, ensure_ascii=False)):
+    b = v.encode("utf-8")
+    quoted = (repr(v), repr("say \"" + v + "\""), ascii(v), ascii("say \"" + v + "\""),
+              repr(b), repr(b"say \"" + b + b"\""))
+    lines = [repr({"KEY": v}), repr("text " + v + " text"), json.dumps(v), json.dumps(v, ensure_ascii=False),
+             json.dumps({"errors": ["rejected: %r" % v]}), json.dumps("say \"%a\"" % v, ensure_ascii=False)]
+    for q in quoted:
+        lines += [q, json.dumps(q), json.dumps(q, ensure_ascii=False)]
+    for f in lines:
         sys.stdout.buffer.write(("2026-11-16 10:00:03,000 - planted[DEBUG]: " + f + "\n").encode("utf-8"))
 '
 }
-# form_config: the combined cloud-config of booted, with both values added.
+# form_config: the combined cloud-config of booted, with the values added.
 form_config() {
-    combined_config | jq -c --arg one "$form_one" --arg two "$form_two" \
-        '.kamerplanter.secrets.FORM_ONE_SECRET = $one | .kamerplanter.secrets.FORM_TWO_SECRET = $two' \
+    combined_config | jq -c --arg one "$form_one" --arg two "$form_two" --arg three "$form_three" \
+        '.kamerplanter.secrets.FORM_ONE_SECRET = $one | .kamerplanter.secrets.FORM_TWO_SECRET = $two | .kamerplanter.secrets.FORM_THREE_SECRET = $three' \
         >"$SB/run/cloud-init/combined-cloud-config.json"
 }
 # form_left FILE: the lines of FILE that still hold a head or a tail.
-form_left() { grep -cF -e "$form_one_head" -e "$form_one_tail" -e "$form_two_head" -e "$form_two_tail" -- "$1"; }
+form_left() { grep -cF -e "$form_one_head" -e "$form_one_tail" -e "$form_two_head" -e "$form_two_tail" -e "$form_three_head" -e "$form_three_tail" -- "$1"; }
 new_appliance
 booted iid-1
 form_config
 log=$SB/var/log/cloud-init.log
-printf '%s\0' "$form_one" "$form_two" | plant_forms >>"$log"
+printf '%s\0' "$form_one" "$form_two" "$form_three" | plant_forms >>"$log"
 planted=$(grep -c 'planted\[DEBUG\]' "$log")
-expect "the forms: every planted line holds a head and a tail before the scrub (the test can fail)" "20|20" \
-    "$planted|$(grep 'planted\[DEBUG\]' "$log" | grep -F -e "$form_one_head" -e "$form_two_head" | grep -cF -e "$form_one_tail" -e "$form_two_tail")"
+expect "the forms: every planted line holds a head and a tail before the scrub (the test can fail)" "72|72" \
+    "$planted|$(grep 'planted\[DEBUG\]' "$log" | grep -F -e "$form_one_head" -e "$form_two_head" -e "$form_three_head" | grep -cF -e "$form_one_tail" -e "$form_two_tail" -e "$form_three_tail")"
+# Every line needs a form of its own: of form_three no two forms are alike but
+# where Python prints them alike, so a form the scrub stopped making would
+# leave its line.
+expect "the forms: form_three is planted in 16 forms that differ (the test can fail)" 16 \
+    "$(grep 'planted\[DEBUG\]' "$log" | grep -F -e "$form_three_head" | sed -e "s/.*$form_three_head//" -e "s/$form_three_tail.*//" | LC_ALL=C sort -u | wc -l)"
 rc=$(run_scrub)
 expect "the forms: the scrub succeeds, no head or tail is left in the log, every planted line is redacted" "0|0|$planted" \
     "$rc|$(form_left "$log")|$(grep 'planted\[DEBUG\]' "$log" | grep -c REDACTED)"
@@ -860,7 +1035,7 @@ for stub in 'exit 1' 'cat >/dev/null; exit 0'; do
     chmod +x "$SB/stub/python3"
     rc=$(PATH=$SB/stub:$PATH run_scrub)
     expect "the forms cannot be made ($stub): the scrub fails, says so, keeps the copies and the log" "1|yes|$all_kept|yes" \
-        "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed); none is searched for" "$(out)")|$(kept_copies)|$(exists "$SB/var/log/cloud-init.log")"
+        "$rc|$(has "the provisioned secrets cannot be made into search patterns (jq or Python failed, or Python made none); none is searched for" "$(out)")|$(kept_copies)|$(exists "$SB/var/log/cloud-init.log")"
 done
 
 # --- merge keys in a copy are resolved, as cloud-init resolves them (SEC-009) ---
@@ -1082,7 +1257,7 @@ expect "host namespace: the rule finds each planted way in, and passes the harml
 
 # --- no provisioned value in anything the scrub printed (L12) ---
 leaked=none
-for m in "${markers[@]}" short1 short3 nulsoloone nulsolotwo "$form_one_head" "$form_one_tail" "$form_two_head" "$form_two_tail" "$merge_secret" "$merge_setting"; do
+for m in "${markers[@]}" short1 short3 nulsoloone nulsolotwo "$form_one_head" "$form_one_tail" "$form_two_head" "$form_two_tail" "$form_three_head" "$form_three_tail" "$merge_secret" "$merge_setting"; do
     if grep -qF -- "$m" "$all_output"; then leaked=$m; fi
 done
 expect "no provisioned value in anything the scrub printed" "none|yes" "$leaked|$([ -s "$all_output" ] && echo yes)"
@@ -1093,4 +1268,4 @@ if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"
     exit 1
 fi
-echo "all checks passed"
+if [ "$skips" -gt 0 ]; then echo "all checks passed, $skips case(s) skipped"; else echo "all checks passed"; fi
