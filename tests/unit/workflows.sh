@@ -417,7 +417,9 @@ vm_jobs = vm_doc.get("jobs") or {}
 # it has said that the run goes on. A text check, as above: a pull request
 # runs its own vm-tests.yml, so this keeps an honest change from taking the
 # job out of the way, and vm-gate-finalize.yml is what keeps the result.
-vm_text = (workflows / "vm-tests.yml").read_text()
+# What the file says outside its comments.
+vm_text = "\n".join(line for line in (workflows / "vm-tests.yml").read_text().splitlines()
+                    if not line.lstrip().startswith("#"))
 consent = vm_jobs.get("consent") or {}
 consent_script = scripts(consent)
 if re.search(r'gh api "repos/\$REPO/issues/\$NUMBER/labels[?"]', consent_script):
@@ -455,10 +457,11 @@ if loose:
 else:
     print("ok vm-tests.yml: every job but consent is the build or needs it")
 # A job with a status function in its condition runs although the build was
-# skipped, unless the condition says otherwise (the report job).
+# skipped, unless the condition says otherwise: only the report job's
+# condition, as a whole, is known to (an `||` beside it would not be).
 eager = sorted(j for j, job in vm_jobs.items() if j not in ("consent", "build")
-               and re.search(r"always\(\)|cancelled\(\)|failure\(\)", str((job or {}).get("if", "")))
-               and "needs.build.result != 'skipped'" not in str(job.get("if", "")))
+               and re.search(r"always\(|cancelled\(|failure\(|success\(", str((job or {}).get("if", "")))
+               and " ".join(str(job.get("if", "")).split()) != "always() && needs.build.result != 'skipped'")
 if eager:
     print(f"FAIL vm-tests.yml: the job(s) {', '.join(eager)} run also when the build was skipped")
 else:
@@ -481,6 +484,12 @@ for name, script in (("vm-gate.yml", gate_script), ("vm-gate-finalize.yml", fina
         print(f"ok {name} takes pending, green and a result of the VM tests as an accepted commit")
     else:
         print(f"FAIL {name} does not name the accepted statuses as the other scripts do ({ACCEPTED})")
+# The one refusal of vm-gate.yml on which consent gives up at once.
+MOVED = "no VM test result for this commit: it is not the head of the pull request any more"
+if gate_script.count(f'status failure "{MOVED}"') == 1 and consent_script.count(f"failure$'\\t''{MOVED}')") == 1:
+    print("ok vm-tests.yml (consent) gives up on the text vm-gate.yml writes for a commit that is not the head any more")
+else:
+    print("FAIL vm-tests.yml (consent) and vm-gate.yml do not name a commit that is not the head any more alike")
 for job_id, script in (("boot", "run.sh"), ("update", "update.sh"), ("data-disk", "data-disk.sh")):
     globs = []
     for step in (vm_jobs.get(job_id) or {}).get("steps") or []:

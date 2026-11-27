@@ -30,7 +30,13 @@ name: vm-tests
 # if the label was removed after the run's event. This saves the runners of a
 # head nobody consented to; it protects nothing, since a pull request can
 # rewrite this file. What protects the result is vm-gate-finalize.yml, which
-# counts none of a commit vm-gate did not accept.
+# counts none of a commit vm-gate did not accept. The job decides once: a
+# run that it let through is not stopped when the label goes afterwards.
+# That happens without anyone's doing when a label is set a second after a
+# push, so that the push's event already holds it: vm-gate.yml sets pending
+# from the push's run, consent sees it, and the label's run takes it back
+# seconds later (the header of vm-gate.yml). The suites then run that head
+# to the end without a result that counts (#180).
 
 on:
   workflow_dispatch:
@@ -102,7 +108,12 @@ jobs:
   # `updated_at` in the event, GitHub's own record: never later than the
   # event itself, and a label change sets it (measured on #179), so it is
   # not earlier than a removal before the label of this event. The script
-  # prints it.
+  # prints it, and fails at once when the event has none: every status
+  # would count as new and every removal as one after the event. It also
+  # fails at once when vm-gate.yml says that the commit is not the head of
+  # the pull request any more, which no later run of it takes back for
+  # this event; its other refusals can be followed by pending (another
+  # label's run before the run of vm-tests' own event), so the job waits.
   #
   # The job ends green when the consent is gone, and every later job is
   # skipped: vm-gate-finalize.yml reads a skipped build as a run that tested
@@ -142,6 +153,10 @@ jobs:
             exit 0
           }
           [ "$EVENT" = pull_request ] || decide true "a run on $EVENT needs no label"
+          if [ -z "$SINCE" ]; then
+            echo "::error::the event of this run names no time of the pull request (updated_at), so a status or a removal cannot be told from an older one: the VM tests do not run."
+            exit 1
+          fi
 
           echo "vm-tests: the event of this run is from $SINCE"
           waited="no answer from the API"
@@ -159,7 +174,7 @@ jobs:
               jq -rs --arg since "$SINCE" '[.[][] | select(.event == "unlabeled" and .label.name == "vm-tests"
                 and .created_at > $since)] | length > 0') || continue
             [ "$removed" != true ] ||
-              decide false "the label vm-tests was removed from #$NUMBER after this run's event; the run that setting it again started tests this commit"
+              decide false "the label vm-tests was removed from #$NUMBER after this run's event, which ends the consent this run started with; setting the label again starts a run of its own"
             # vm-gate's newest status of the head since the event, as
             # "state<TAB>description". Every page of the list, newest first:
             # the status can sit behind 100 newer ones of other contexts.
@@ -170,6 +185,9 @@ jobs:
             case $gate in
               pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*)
                 decide true "#$NUMBER has the label vm-tests, and vm-gate has accepted this commit" ;;
+              failure$'\t''no VM test result for this commit: it is not the head of the pull request any more')
+                echo "::error::this commit is not the head of #$NUMBER any more (vm-gate): the VM tests do not run."
+                exit 1 ;;
             esac
             waited="vm-gate: ${gate//$'\t'/: }"
           done

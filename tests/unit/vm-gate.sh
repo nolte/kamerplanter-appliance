@@ -119,6 +119,7 @@ pages() {
 }
 case "$method $path" in
     "GET issues/7/labels")
+        [ ! -e "$STATE/labels-gone" ] || exit 1
         jq -R -s 'split("\n") | map(select(. != "") | {name: .})' "$STATE/labels" | pages ;;
     "DELETE issues/7/labels/vm-tests")
         echo "remove-label" >>"$STATE/log"
@@ -1241,6 +1242,33 @@ reset "${filler[@]}" vm-tests
 had_at new 13:00:08 pending "waiting"
 consent labeled
 expect "the label as the 41st of the pull request: the tests run" "0 run=true" "$(ran)"
+
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+touch "$work/state/labels-gone"
+consent labeled
+expect "the labels cannot be read: the tests do not run" "1 " "$(ran)"
+
+# Without the event's time every status would be one since the event, and
+# every removal one after it.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+consent labeled SINCE=''
+expect "an event without a time, vm-gate pending: the tests do not run" "1 " "$(ran)"
+reset vm-tests
+: >"$work/state/events"
+labelled 12:00:00 1
+unlabelled 12:30:00 1
+labelled 13:00:00 1
+consent labeled SINCE=''
+expect "an event without a time, a removal from before it: the job fails, it does not end green" "1 " "$(ran)"
+
+# vm-gate.yml takes this one back for no later event: the job does not wait.
+reset vm-tests
+had_at new 13:00:08 failure "$(cut -d' ' -f2- <<<"$moved")"
+consent labeled
+expect "a commit that is not the head any more: the job fails at once" \
+    "1 ::error::this commit is not the head of #7 any more (vm-gate): the VM tests do not run." "$code $(tail -n1 "$work/out")"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

@@ -100,11 +100,16 @@ name: vm-gate
 # label and this status again and ends the run of a head whose label is
 # taken back here (#152), but it is the pull request's own version of that
 # job, so a pull request that rewrites it still runs that head's code once.
+# And it decides once, on the status it finds: in the gap above (the push's
+# event already holds the label, pending from the push's run, taken back by
+# the label's run) it has seen pending and lets the suites run that head to
+# the end (#180).
 # The result of such a run does not count. That job reads vm-gate's
 # status by its text: it runs on pending and green from here and on a
 # result that vm-gate-finalize.yml wrote, the same three as accepted()
-# below and as vm-gate-finalize.yml (tests/unit/workflows.sh keeps them in
-# step).
+# below and as vm-gate-finalize.yml, and it gives up at once on "it is not
+# the head of the pull request any more" (tests/unit/workflows.sh keeps
+# these texts in step).
 #
 # pull_request_target: the gate runs as develop has it, so a pull request
 # cannot rewrite the gate it is judged by. That is safe here because only the
