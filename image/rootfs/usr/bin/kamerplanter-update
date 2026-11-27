@@ -166,7 +166,10 @@ short() { printf '%s' "${1#sha256:}" | cut -c1-12; }
 # disk with the same comparison (A7).
 
 failed() { [ -n "$1" ] && grep -Fqx -- "$1" "$state/failed" 2>/dev/null; }
-pending() { cat "$state/pending" 2>/dev/null || true; }
+# pending: the record of the update being checked (pending_record in
+# /usr/lib/kamerplanter/env.sh); empty with none, and with one that cannot be
+# read.
+pending() { pending_record "$state/pending" || true; }
 
 volume_bytes() {
     local total=0 name
@@ -467,6 +470,23 @@ take_backup() {
         "$1" "$2" "$(jq -cn --arg l "$where" --argjson s "$skipped_json" '{location: $l, skipped: $s}')"
 }
 
+# console_message FILE: replaces the console message FILE with what stdin
+# delivers. The new text is written to a temporary file of its own, beside
+# FILE and hidden (agetty reads only *.issue), so that runs at the same time,
+# as the guard, a fetch and the timer's issue can be, never move each
+# other's away; a reader sees the old or the new message. Fails, also in a
+# condition, when a step does, and leaves no temporary file.
+console_message() {
+    local file=$1 tmp
+    install -d -m 0755 "${file%/*}" || return 1
+    tmp=$(mktemp "${file%/*}/.${file##*/}.XXXXXX") || return 1
+    if cat >"$tmp" && chmod 0644 "$tmp" && mv -fT -- "$tmp" "$file"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+}
+
 # restore_refused D TO PROBLEM: the backup of D is not restored. The services
 # stay stopped (the guard fails), and the journal, the update record and the
 # console say why. The pending record stays, so the guard tries again when
@@ -495,15 +515,12 @@ restore_refused() {
     esac
     log rollback refused "$message" "$2" "$1"
     echo "$hint" >&2
-    install -d -m 0755 /run/issue.d
     {
         echo "Kamerplanter: $message"
         echo "  $hint"
         echo "  details: systemctl status kamerplanter-update-guard.service"
         echo
-    } >"$restore_issue.tmp"
-    chmod 0644 "$restore_issue.tmp"
-    mv "$restore_issue.tmp" "$restore_issue"
+    } | console_message "$restore_issue"
     agetty --reload >/dev/null 2>&1 || true
 }
 clear_restore_issue() {
@@ -673,15 +690,12 @@ release_check() {
     fi
     log release refused "$message; the services stay stopped"
     echo "$hint" >&2
-    install -d -m 0755 /run/issue.d
     {
         echo "Kamerplanter: $message; the services stay stopped"
         echo "  $hint"
         echo "  details: systemctl status kamerplanter-update-guard.service"
         echo
-    } >"$release_issue.tmp"
-    chmod 0644 "$release_issue.tmp"
-    mv "$release_issue.tmp" "$release_issue"
+    } | console_message "$release_issue"
     agetty --reload >/dev/null 2>&1 || true
     return 1
 }
@@ -709,27 +723,25 @@ raise_marker() {
 }
 
 write_issue() {
-    install -d -m 0755 /run/issue.d
-    local booted staged window
+    local booted staged window text
     booted=$(slot booted version)
     staged=$(slot staged version)
     window=$(next_window)
-    {
+    text=$(
         echo "Kamerplanter appliance ${booted:-unknown version}"
         if [ -n "$staged" ]; then echo "  update to $staged staged, activated in the next maintenance window"; fi
         if [ -n "$window" ]; then echo "  next maintenance window: $window"; fi
         if [ -n "$(pending)" ]; then echo "  an update is being checked"; fi
         echo "  details: kamerplanter-update status"
-        echo
-    } >"$issue.tmp"
-    chmod 0644 "$issue.tmp"
+    )
+    # The empty line after it sets the message off from the login prompt.
+    text+=$'\n\n'
     # agetty shows a changed message only on --reload, which redraws every
     # login prompt not yet in use: only when the message changed (#117).
-    if cmp -s -- "$issue.tmp" "$issue"; then
-        rm -f -- "$issue.tmp"
+    if [ -f "$issue" ] && printf '%s' "$text" | cmp -s -- - "$issue"; then
         return 0
     fi
-    mv "$issue.tmp" "$issue"
+    printf '%s' "$text" | console_message "$issue" || return 1
     agetty --reload >/dev/null 2>&1 || true
 }
 
