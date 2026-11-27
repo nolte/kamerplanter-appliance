@@ -454,6 +454,20 @@ backup_root() {
     esac
 }
 
+# list NAME COMMAND...: reads the NUL-separated output of COMMAND into the
+# array NAME, and fails when COMMAND fails. A search (find) is read through
+# this: in a process substitution or a pipe alone its exit status is lost, and
+# a place it could not read would pass for an empty one (#119, #149; the
+# pre-commit hook no-find-in-process-substitution refuses a find in a process
+# substitution in the image's scripts).
+list() {
+    local -n list_into=$1
+    shift
+    # shellcheck disable=SC2034 # a nameref: the array of the caller
+    mapfile -d '' -t list_into < <("$@")
+    wait "$!"
+}
+
 # Deleting and writing backups. A disk, a USB stick above all, may have been
 # prepared elsewhere: its update-backup, or an entry in it, may be a symbolic
 # link to anywhere on the system, which root would follow. So a backup is
@@ -502,16 +516,20 @@ backup_entry_problem() {
 # backup_entries LOCATION: the names of the backups at LOCATION, one per
 # line: the directories directly in its base, on its file system, named as a
 # backup. Symbolic links, files and other names are not listed; nothing is
-# when the base may not be used.
+# when the base may not be used. Fails, after listing what it found, when the
+# base could not be read through: the list is not whole then (#149).
 backup_entries() {
-    local base dev d name
+    local base dev d name entry found=() rc=0
     [ -z "$(backup_base_problem "$1")" ] || return 0
     base=$(backup_base "$1")
     [ -d "$base" ] || return 0
     dev=$(stat -c %d -- "$base")
-    while IFS=' ' read -r -d '' d name; do
+    list found find "$base" -ignore_readdir_race -mindepth 1 -maxdepth 1 -type d -printf '%D %f\0' || rc=$?
+    for entry in ${found[@]+"${found[@]}"}; do
+        d=${entry%% *} name=${entry#* }
         if [ "$d" = "$dev" ] && backup_name_ok "$name"; then printf '%s\n' "$name"; fi
-    done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%D %f\0')
+    done
+    return "$rc"
 }
 
 # backup_delete LOCATION NAME: deletes the backup NAME at LOCATION, never
