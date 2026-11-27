@@ -62,13 +62,17 @@ repos:
       # A rename onto a name that is a directory moves the file into that
       # directory and succeeds: the write is reported, the file not replaced
       # (#144, #162). The shipped scripts rename with "mv -fT -- " (replace in
-      # /usr/lib/kamerplanter/env.sh for a file's content), or with
-      # "mv -nT -- " where the first writer must win. This refuses every other
-      # mv, on one line, comment lines aside; cp, install and ln onto such a
-      # name, and a mv behind a variable or in quotes, are not seen.
+      # /usr/lib/kamerplanter/env.sh for a file's content). The one
+      # "mv -nT -- " is that of the pin key in configure, where the first
+      # writer must win and the caller reads the key again: -n skips an
+      # existing name with success, so it replaces nothing. This refuses
+      # every other mv, on one line, comment lines aside (a mv named in a
+      # comment after code is refused too: reword it); cp, install and ln
+      # onto such a name, and a mv behind a variable or in quotes, are not
+      # seen.
       - id: no-rename-into-a-directory
         name: No mv without -T in the image's scripts
         language: pygrep
-        entry: '^(?!\s*#)(.*[^\w-])?mv\s(?!-fT -- |-nT -- )'
+        entry: '^(?!\s*#)(.*[^\w-])?mv\s(?!-fT -- |-nT -- "\$tmp" "\$pin_key" )'
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
         types: [file]

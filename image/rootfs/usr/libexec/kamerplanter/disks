@@ -2437,7 +2437,7 @@ cmd_retire() {
     if [ -e "$naming_file" ]; then
         cfg[$key]='' cfg[${key}_FORCE]=''
         write_naming || {
-            echo "the naming file $naming_file could not be written; the disk is unmounted, and still named and set up: it is used again at the next start; nothing else is changed" >&2
+            echo "the naming file $naming_file could not be written; the disk is unmounted and its container closed, and it is still named and set up: until the disk unit starts again or the appliance is rebooted the update tool treats the backup disk as missing; nothing else is changed" >&2
             exit 1
         }
     fi
