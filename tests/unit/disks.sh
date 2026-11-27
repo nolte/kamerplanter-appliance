@@ -560,7 +560,14 @@ set_up_order() {  # set_up_order ACTION [keyed]: the steps set_up takes for the 
         cryptsetup() { step "cryptsetup $1"; echo luks >"$setup_state"; }
         open_disk() { step open; }
         mkfs.ext4() { step "mkfs ${!#}"; echo ext4 >"$setup_state"; }
+        eval "shipped_replace() $(declare -f replace | tail -n +2)"
         replace() { step "replace ${1##*/}"; cat >"$1"; }
+        # forced-dir: the record of the forced formats is a directory, and
+        # replace runs as it ships.
+        if [ "${2-}" = forced-dir ]; then
+            mkdir -p "$records/forced"
+            replace() { shipped_replace "$@"; }
+        fi
         log_event() { :; }
         keep_key() { step keep_key; }
         mount_disk() { step "mount $1"; }
@@ -578,6 +585,11 @@ expect "set_up order: an encrypted format writes the container under the lock, a
 expect "set_up order: an empty container is looked into and formatted under the lock, the disk checked again, naming included (#112)" \
     "settle,in_use,signatures,open,lock,wipefs /dev/mapper/kamerplanter-data,same_disk named,mkfs /dev/mapper/kamerplanter-data,unlock,settle,replace data.env,keep_key,mount /dev/mapper/kamerplanter-data" \
     "$(set_up_order unlock keyed)"
+# Without -T the rename moved the record into a directory in its place and
+# succeeded: the force was never recorded, and applied again (#162).
+expect "set_up order: a force that cannot be recorded (a directory in the record's place) stops before the wipe" \
+    "settle,in_use,signatures,lock,same_disk named,in_use,signatures,die: /dev/disk/by-id/virtio-a (/dev/sdb) is not formatted: the forced format could not be recorded in SB/records/forced; nothing is written to it" \
+    "$(set_up_order wipe forced-dir | sed "s|$work/setup\.[[:alnum:]]*|SB|g")"
 
 # --- no key on the kernel command line (W5) ---
 cmd=$work/cmdline
@@ -827,6 +839,33 @@ if [ "$(id -u)" != 0 ]; then
         "$(if echo new | replace "$ro/f" 2>/dev/null; then echo replaced; else echo failed; fi)|$(cat "$ro/f")"
     chmod 0700 "$ro"
 fi
+# A directory in the file's place: a rename without -T moves the new content
+# into it and succeeds. replace fails, moves nothing into the directory, and
+# leaves no temporary file beside it (#162).
+indir=$(mktemp -d "$work/indir.XXXXXX")
+mkdir "$indir/f"
+expect "replace: a directory in the file's place fails, nothing is moved into it, no temporary file stays" "failed|f" \
+    "$(if echo new | replace "$indir/f" 2>/dev/null; then echo replaced; else echo failed; fi)|$(find "$indir" -mindepth 1 -printf '%P\n' | paste -sd,)"
+# Its caller ends the command: a move whose record cannot be written is not
+# begun (the disk would be bound, empty, over the data, the record never
+# saying copying).
+move_unrecorded() {  # move_unrecorded: move_begin with a directory in the place of move.env: what die says, what lies in the directory, and the exit status
+    (
+        sb=$(mktemp -d "$work/unrecorded.XXXXXX")
+        records=$sb/records data_disk_move=$sb/records/move.env
+        mkdir -p "$data_disk_move"
+        name=/dev/disk/by-id/virtio-a held=etc
+        log_event() { echo "logged: $1"; }
+        die() { printf 'die: %s' "${1//$sb/SB}"; exit 1; }
+        move_begin u 2>/dev/null
+        printf 'went on'
+    )
+    printf '|%s|%s' "$?" "$(find "$work"/unrecorded.*/records/move.env -mindepth 1 -printf '%P\n' | paste -sd,)"
+    rm -rf "$work"/unrecorded.*
+}
+expect "move: a record that cannot be written (a directory in its place) ends the start before the move begins" \
+    "die: the move onto /dev/disk/by-id/virtio-a could not be recorded in SB/records/move.env; nothing is written to it, and nothing is moved|1|" \
+    "$(move_unrecorded)"
 
 # The user file copied onto the data disk names no disk there: its naming is
 # commented out, so the disk service has nothing to report as ignored.
@@ -896,7 +935,10 @@ start_move() {  # start_move CASE: cmd_start data on a disk receiving a move: th
         refresh_window() { :; }
         request_check() { echo check >>"$start_calls"; }
         case $1 in
-            record-fails) replace() { if [ "$1" = "$data_disk_move" ]; then cat >/dev/null; return 1; fi; real_replace "$@"; } ;;
+            record-fails)
+                # shellcheck disable=SC2329 # called by move_write
+                replace() { if [ "$1" = "$data_disk_move" ]; then cat >/dev/null; return 1; fi; real_replace "$@"; }
+                ;;
             no-space) stat() { if [ "$1" = -f ]; then echo '1 * 1'; else command stat "$@"; fi; } ;;
             top-fails)
                 top_entries() { return 1; }

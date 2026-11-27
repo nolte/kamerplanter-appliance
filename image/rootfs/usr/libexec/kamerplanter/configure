@@ -70,21 +70,9 @@ fernet() { head -c 32 /dev/urandom | base64 | tr '+/' '-_'; }
 errors=()
 fail() { errors+=("$1"); }
 
-# Replaces a file with what stdin delivers, durably: a reader sees either the
-# old or the new content, and the new content survives a power loss. Fails,
-# also in a condition, when a step does; also when the file is a directory,
-# into which a plain mv would move the new content and succeed (a link to a
-# directory is replaced, not followed).
-replace() {
-    local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
-    if cat >"$tmp" && sync "$tmp" && mv -fT -- "$tmp" "$1" && sync "$(dirname "$1")"; then
-        return 0
-    fi
-    rm -f -- "$tmp"
-    return 1
-}
-
+# The files are written with replace (/usr/lib/kamerplanter/env.sh): durably,
+# and failing, also in a condition, when a step does or the file is a
+# directory.
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
@@ -133,7 +121,7 @@ keyed_pins() { compgen -G "$pins/*.hmac" >/dev/null; }
 # its key is never given a new one: it could not match any more. Called in
 # a condition, so every step is checked.
 # A new key is renamed into place without replacing one that another run
-# made in the meantime (mv -n, whose exit status pin_key_read stands in
+# made in the meantime (mv -nT, whose exit status pin_key_read stands in
 # for), and never as a second link, which a data disk would refuse; only a
 # damaged key is replaced. The runs that make or replace the key (this one at
 # boot, and configure pin of each service, which may start side by side)
@@ -166,7 +154,7 @@ pin_key_create() {
         hex 32 | replace "$pin_key" || return 1
     else
         tmp=$(mktemp "$pins/.key.XXXXXX") || return 1
-        if hex 32 >"$tmp" && sync "$tmp"; then mv -n -- "$tmp" "$pin_key" 2>/dev/null || true; fi
+        if hex 32 >"$tmp" && sync "$tmp"; then mv -nT -- "$tmp" "$pin_key" 2>/dev/null || true; fi
         rm -f -- "$tmp"
         sync "$pins" || true
     fi

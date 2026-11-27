@@ -58,3 +58,17 @@ repos:
         entry: '<\(\s*(cd\s[^)]*&&\s*)?find\s'
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
         types: [file]
+
+      # A rename onto a name that is a directory moves the file into that
+      # directory and succeeds: the write is reported, the file not replaced
+      # (#144, #162). The shipped scripts rename with "mv -fT -- " (replace in
+      # /usr/lib/kamerplanter/env.sh for a file's content), or with
+      # "mv -nT -- " where the first writer must win. This refuses every other
+      # mv, on one line, comment lines aside; cp, install and ln onto such a
+      # name, and a mv behind a variable or in quotes, are not seen.
+      - id: no-rename-into-a-directory
+        name: No mv without -T in the image's scripts
+        language: pygrep
+        entry: '^(?!\s*#)(.*[^\w-])?mv\s(?!-fT -- |-nT -- )'
+        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        types: [file]

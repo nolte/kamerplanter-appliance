@@ -58,17 +58,6 @@ instance_data=/run/cloud-init/instance-data.json
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
-# Replaces a file with what stdin delivers, durably: a reader sees either the
-# old or the new content, and the new content survives a power loss.
-replace() {
-    local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
-    cat >"$tmp"
-    sync "$tmp"
-    mv "$tmp" "$1"
-    sync "$(dirname "$1")"
-}
-
 # provided: whether cloud-init found provisioning data on this boot: it ran
 # (its combined cloud-config is in /run) with a datasource other than None.
 provided() {
@@ -165,8 +154,9 @@ stage_secrets() {
         return 0
     fi
     printf '%s\n' "$id" >"$provisioning_staging/.instance"
-    mv -- "$provisioning_staging/.instance" "$staged_instance"
-    mv -- "$tmp" "$staged_secrets"
+    # -T: a name that is a directory fails the step; nothing is moved into it.
+    mv -fT -- "$provisioning_staging/.instance" "$staged_instance"
+    mv -fT -- "$tmp" "$staged_secrets"
     count=$(grep -c . "$staged_secrets" || true)
     echo "$count entries of kamerplanter: -> secrets: staged for the configuration check"
 }
@@ -215,7 +205,12 @@ renew() {
         echo "# of the provisioning data on every boot that has provisioning data; edits"
         echo "# are lost. Set your own values in $config_user, which wins."
         [ -z "$lines" ] || printf '%s\n' "$lines"
-    } | replace "$provisioning_settings"
+    } | replace "$provisioning_settings" || {
+        # Fatal: the layer of an earlier boot would stand for this boot's
+        # provisioning data, and the step would report it as renewed (#162).
+        echo "$provisioning_settings could not be written (a directory in its place, or a failed write); the provisioning layer is not renewed, and the services stay stopped" >&2
+        exit 1
+    }
     own_file "$provisioning_settings"
     echo "provisioning layer renewed from the provisioning data: $count entries of kamerplanter: -> settings:"
 }

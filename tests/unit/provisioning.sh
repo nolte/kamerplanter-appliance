@@ -679,6 +679,16 @@ expect "step: a changed map applies on the next boot with data" "0|FRONTEND_URL=
 cloud_init nocloud '{"hostname": "kp"}'
 expect "step: data without kamerplanter: empties the layer" "0||yes" "$(run_step)|$(layer)|$(has '0 entries' "$(cat "$SB/out")")"
 
+# A directory in the layer's place: a rename without -T moved the new layer
+# into it and the step reported it as renewed. The step fails, which keeps
+# the services stopped (kamerplanter-config.service requires it), moves
+# nothing into the directory and leaves no temporary file (#162).
+step_case
+mkdir -p "$SB/var/lib/kamerplanter/provisioning/settings.env"
+cloud_init nocloud '{"kamerplanter": {"settings": {"FRONTEND_URL": "https://map.example.org"}}}'
+expect "step: a directory in the layer's place fails the step, nothing is moved into it, no temporary file stays" "1|settings.env|yes|no" \
+    "$(run_step)|$(find "$SB/var/lib/kamerplanter/provisioning" -mindepth 1 -printf '%P\n' | paste -sd,)|$(has 'could not be written' "$(cat "$SB/out")")|$(has 'renewed from the provisioning data' "$(cat "$SB/out")")"
+
 # Entries that cannot be a line of the layer: the configuration check names them.
 step_case
 cloud_init nocloud '{"kamerplanter": {"settings": {"bad-key": "x", "LIST": [1], "LINES": "a\nINJECTED=1", "OK": "fine"}}}'
