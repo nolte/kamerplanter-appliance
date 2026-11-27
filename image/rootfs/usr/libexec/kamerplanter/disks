@@ -572,17 +572,21 @@ move_transition() {
     esac
 }
 
-# move_target ENTRIES UUID KNOWN: whether a named disk that is adopted, not
-# formatted, may receive the system disk's data. ENTRIES are the names at the
-# top of its file system other than lost+found, one per line, UUID its
-# identity, and KNOWN the identities of the disks earlier moves of this
-# appliance went to (move-targets), one per line: what such a disk holds is a
-# copy of this appliance's own data. Prints ok, or "refuse REASON".
+# move_target UUID KNOWN [ENTRY...]: whether a named disk that is adopted, not
+# formatted, may receive the system disk's data. UUID is its identity, KNOWN
+# the identities of the disks earlier moves of this appliance went to
+# (move-targets), one per line: what such a disk holds is a copy of this
+# appliance's own data. Each ENTRY is a name at the top of its file system
+# other than lost+found, one argument per name (top_entries, read through
+# list): a name may hold a newline, and is shown as one name, the newline
+# replaced (shown), never as two (#176). Prints ok, or "refuse REASON".
 move_target() {
-    if [ -z "$1" ]; then echo ok; return; fi
-    if [ -n "$2" ] && grep -Fqxi -- "$2" <<<"$3"; then echo ok; return; fi
-    local list=${1//$'\n'/, }
-    echo "refuse it holds data of its own ($(shown "$list"))"
+    local uuid=$1 known=$2 entry names=''
+    shift 2
+    if [ $# -eq 0 ]; then echo ok; return; fi
+    if [ -n "$uuid" ] && grep -Fqxi -- "$uuid" <<<"$known"; then echo ok; return; fi
+    for entry in "$@"; do names+="${names:+, }$(shown "$entry")"; done
+    echo "refuse it holds data of its own ($names)"
 }
 
 # naming_ignored STATE IGNORED NAME: whether the naming NAME is not used,
@@ -598,18 +602,67 @@ naming_ignored() {
 # with it when a pre-update backup is deleted.
 
 # top_entries ROOT: the names at the top of the file system mounted at ROOT,
-# other than lost+found, one per line. Fails when the search fails (pipefail
-# keeps find's exit status): the caller reads that, never the output alone.
+# other than lost+found, sorted, each ended by a NUL: the names come from the
+# attached disk, where a name may hold a newline, and one of them read as two
+# lines would name other entries (#176; the pre-commit hook
+# no-newline-ended-names-from-find refuses a find that prints names ended by
+# a newline). The caller reads them into an array through list
+# (/usr/lib/kamerplanter/env.sh), which keeps the exit status:
+# top_entries fails when the search fails (read through list here too, not
+# from a pipe), and the caller reads that, never the output alone.
 top_entries() {
-    find "$1" -mindepth 1 -maxdepth 1 ! -name lost+found -printf '%f\n' | sort
+    local tops=()
+    list tops find "$1" -mindepth 1 -maxdepth 1 ! -name lost+found -printf '%f\0' || return 1
+    [ ${#tops[@]} -eq 0 ] || printf '%s\0' "${tops[@]}" | sort -z
 }
 
-# tree_listing DIR: type, mode, owner and, for files and links, size and
-# target of everything below DIR, one line each, sorted; the copy of a move is
-# compared by it. Fails when DIR cannot be searched through (pipefail keeps
-# find's exit status): a listing that is not whole is not compared.
+# tree_listing DIR FILE: writes to FILE the type, mode, owner and, for files
+# and links, size and target of everything below DIR: one record each, ended
+# by a NUL and sorted byte by byte. The copy of a move is compared by it
+# (same_tree). Two trees have the same FILE only when they hold the same
+# entries (#176):
+# - a record ends at its NUL, which no name and no link target holds, so one
+#   with a newline stays in its record;
+# - the records of the first search begin with "E ", those of the second
+#   with "T ", so none of one search equals one of the other (without that,
+#   a file named "UID:GID a" and one named "a -> " could trade a size for a
+#   mode);
+# - in an E record the path is all that follows the owner, the three fields
+#   before it holding no blank, so it names one entry with one type, mode
+#   and owner;
+# - in a T record of a file the target is empty and the path all before the
+#   final " -> "; of a link the size is the length of the target, which says
+#   where the path ends, and the E records say which paths there are.
+# Neither search runs in a pipe or a substitution: each one's exit status is
+# read, and so is that of the write and of the sort, whose temporary files
+# stay beside FILE. Fails when DIR cannot be searched through or FILE not be
+# written: a listing that is not whole is not compared. DIR/. is searched, so
+# a DIR that is a link to a directory is listed as the directory, and the
+# paths are those below DIR (%P).
 tree_listing() {
-    (cd "$1" && find . -mindepth 1 -printf '%y %m %U:%G %p\n' && find . -mindepth 1 \( -type f -o -type l \) -printf '%y %s %p -> %l\n') | LC_ALL=C sort
+    local raw=$2.unsorted
+    find "$1/." -mindepth 1 -printf 'E %y %m %U:%G %P\0' >"$raw" || return 1
+    find "$1/." -mindepth 1 \( -type f -o -type l \) -printf 'T %y %s %P -> %l\0' >>"$raw" || return 1
+    LC_ALL=C sort -z -T "${2%/*}" -o "$2" -- "$raw" || return 1
+}
+
+# same_tree A B: whether the directories A and B hold the same tree: their
+# listings (tree_listing), compared byte for byte. The listings hold the
+# names of the data, and a large volume has many: they are written to a
+# directory of their own that only root can enter, in the records on the
+# system disk (not in memory, and not on the disk that is being filled), and
+# it is removed whatever the result. One that a run left when it was killed
+# goes at the next comparison; the lock of the disk service is held, so no
+# other comparison runs. Not the same, never the same, when a tree cannot be
+# listed whole, or the directory or a listing cannot be written or removed;
+# two trees that hold nothing are the same once both were searched.
+same_tree() {
+    local dir rc=0
+    rm -rf -- "${records:?}"/.tree.* || return 1
+    dir=$(mktemp -d "$records/.tree.XXXXXX") || return 1
+    tree_listing "$1" "$dir/a" && tree_listing "$2" "$dir/b" && cmp -s -- "$dir/a" "$dir/b" || rc=1
+    rm -rf -- "$dir" || rc=1
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -1415,10 +1468,10 @@ set_up() {
                     die "$name ($dev) is not used as $role disk: its LUKS2 container holds ${fs_type:-an unknown signature}${fs_label:+ labelled $(shown "$fs_label")}, not ext4 labelled $label"
             fi
             if [ -n "$held" ]; then
-                local fs=$dev entries verdict
+                local fs=$dev entries=() verdict
                 if [ "$action" = unlock ]; then fs=$mapper; fi
-                entries=$(target_entries "$fs") || die "$name ($dev) could not be looked into; nothing is moved onto it"
-                verdict=$(move_target "$entries" "$uuid" "$(cat "$records/move-targets" 2>/dev/null || true)")
+                list entries target_entries "$fs" || die "$name ($dev) could not be looked into; nothing is moved onto it"
+                verdict=$(move_target "$uuid" "$(cat "$records/move-targets" 2>/dev/null || true)" ${entries[@]+"${entries[@]}"})
                 [ "$verdict" = ok ] ||
                     die "$name ($dev) is not used as data disk: the system disk holds Kamerplanter data (${held//$'\n'/, }), and ${verdict#refuse }; moving one onto the other would lose data" \
                         "name a blank disk to move the data onto, or remove the naming ($key, in $naming_file or $user, or the credential $cred) to keep the data on the system disk, then run: systemctl restart kamerplanter.target"
@@ -1785,7 +1838,8 @@ move_begin() {
 }
 
 # target_entries DEVICE: top_entries of the ext4 file system on DEVICE,
-# mounted read-only for the look.
+# mounted read-only for the look; each name ended by a NUL, as top_entries
+# prints them, so the caller reads them through list.
 target_entries() {
     local dir=/run/kamerplanter-probe-$role rc=0
     install -d -m 0700 "$dir"
@@ -1822,7 +1876,7 @@ move_bytes() {
 # disk: a volume whole, with owners, modes, links, extended attributes and
 # times; of etc and pinned the regular files only, which is all they hold.
 copy_place() {
-    local dir=$1 path=$2
+    local dir=$1 path=$2 f others=()
     [ -d "$path" ] || return 0
     case $dir in
         volumes/*)
@@ -1831,25 +1885,29 @@ copy_place() {
             ;;
         *)
             install -d -m 0700 "$mnt/$dir" || return 1
-            find "$path" -mindepth 1 -maxdepth 1 ! -type f -printf "$path/%f is not a regular file and is not moved\n" >&2
+            # What is not moved is named, each name read whole and shown
+            # (shown): a name may hold a newline or an escape sequence. A
+            # search that fails is a copy that failed, as the one below.
+            list others find "$path" -mindepth 1 -maxdepth 1 ! -type f -printf '%f\0' || return 1
+            for f in ${others[@]+"${others[@]}"}; do
+                echo "$path/$(shown "$f") is not a regular file and is not moved" >&2
+            done
             find "$path" -mindepth 1 -maxdepth 1 -type f -exec cp -p -t "$mnt/$dir" -- {} + || return 1
             ;;
     esac
 }
 
 # same_place DIRECTORY PATH: whether DIRECTORY on the disk holds what PATH
-# holds after copy_place: a volume the same tree (tree_listing), etc and
+# holds after copy_place: a volume the same tree (same_tree), etc and
 # pinned every regular file; and every file copied the same bytes. Fails as
 # well when PATH, or the copy of a volume, cannot be searched through: files
 # that were not listed were not compared (#149).
 same_place() {
-    local dir=$1 path=$2 f depth=(-maxdepth 1) ours theirs files=()
+    local dir=$1 path=$2 f depth=(-maxdepth 1) files=()
     [ -d "$path" ] || return 0
     case $dir in
         volumes/*)
-            ours=$(tree_listing "$path") || return 1
-            theirs=$(tree_listing "$mnt/$dir") || return 1
-            [ "$ours" = "$theirs" ] || return 1
+            same_tree "$path" "$mnt/$dir" || return 1
             depth=()
             ;;
     esac
@@ -1900,7 +1958,7 @@ abandon_move() {
 # that set -e holds for every step, the record above all: the disk's
 # locations are bound only once it says moved (cmd_start).
 move_in() {
-    local place dir path running entry need free left
+    local place dir path running entry need free left=()
     running=$(services_running)
     if [ -n "$running" ]; then
         undo
@@ -1917,15 +1975,18 @@ move_in() {
     # A copy left by a reset, or an earlier move onto this disk, starts over:
     # everything at the top of the disk but lost+found goes, the release
     # marker too.
-    # A top that cannot be listed is not taken for an empty one (#149).
-    left=$(top_entries "$mnt") || { move_failed "the top of the disk could not be read"; return 0; }
-    if [ -n "$left" ]; then
+    # A top that cannot be listed is not taken for an empty one (#149). The
+    # names are read whole, into an array (list): read line by line, a name
+    # with a newline named other entries, lost+found among them, and stayed
+    # itself (#176).
+    list left top_entries "$mnt" || { move_failed "the top of the disk could not be read"; return 0; }
+    if [ ${#left[@]} -gt 0 ]; then
         log_event move-restarted "the copy left on the disk by an interrupted or an earlier move is removed; the copy starts over from the system disk"
     fi
-    while IFS= read -r entry; do
+    for entry in ${left[@]+"${left[@]}"}; do
         [ -n "$entry" ] || continue
         rm -rf -- "${mnt:?}/$entry" || { move_failed "the copy left on the disk could not be removed"; return 0; }
-    done <<<"$left"
+    done
     sync -f "$mnt" || { move_failed "the disk could not be synced"; return 0; }
     need=$(move_bytes) || { undo; die "the size of the data on the system disk could not be determined; nothing is moved"; }
     # Room for the copy, and 10 % and 32 MiB more for the databases to go on.

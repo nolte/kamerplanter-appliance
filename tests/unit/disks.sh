@@ -794,16 +794,20 @@ expect "move: no fallback once cleaned" refused "$(tr_ cleaned unhealthy)"
 expect "move: nothing returns without a fallback" refused "$(tr_ moved returned)"
 expect "move: unknown state" refused "$(tr_ bogus start)"
 
-expect "move target: blank file system" ok "$(move_target '' "$uuid" '')"
-expect "move target: own earlier target with content" ok "$(move_target $'etc\nvolumes' "$uuid" "$uuid")"
-expect "move target: own earlier target, UUID case-blind" ok "$(move_target 'etc' "${uuid^^}" "$uuid")"
+expect "move target: blank file system" ok "$(move_target "$uuid" '')"
+expect "move target: own earlier target with content" ok "$(move_target "$uuid" "$uuid" etc volumes)"
+expect "move target: own earlier target, UUID case-blind" ok "$(move_target "${uuid^^}" "$uuid" etc)"
 expect "move target: foreign data refused, entries named" "refuse it holds data of its own (etc, release, volumes)" \
-    "$(move_target $'etc\nrelease\nvolumes' "$uuid" '')"
+    "$(move_target "$uuid" '' etc release volumes)"
 expect "move target: another disk's earlier move does not count" "refuse it holds data of its own (notes)" \
-    "$(move_target notes "$uuid" 99999999-8888-7777-6666-555555555555)"
-expect "move target: any earlier target counts" ok "$(move_target etc "$uuid" $'99999999-8888-7777-6666-555555555555\n'"$uuid")"
-expect "move target: no prefix match" "refuse it holds data of its own (etc)" "$(move_target etc "${uuid:0:8}" "$uuid")"
-expect "move target: no identity, no match" "refuse it holds data of its own (etc)" "$(move_target etc '' "$uuid")"
+    "$(move_target "$uuid" 99999999-8888-7777-6666-555555555555 notes)"
+expect "move target: any earlier target counts" ok "$(move_target "$uuid" $'99999999-8888-7777-6666-555555555555\n'"$uuid" etc)"
+expect "move target: no prefix match" "refuse it holds data of its own (etc)" "$(move_target "${uuid:0:8}" "$uuid" etc)"
+expect "move target: no identity, no match" "refuse it holds data of its own (etc)" "$(move_target '' "$uuid" etc)"
+# One name per argument: a name with a newline is one name in the message,
+# its newline replaced, not two names (#176).
+expect "move target: a name with a newline is shown as one name" "refuse it holds data of its own (a?lost+found, etc)" \
+    "$(move_target "$uuid" '' $'a\nlost+found' etc)"
 
 ign() { if naming_ignored "$@"; then echo ignored; else echo used; fi; }
 expect "naming: the naming of a failed move is ignored" ignored "$(ign failed /dev/disk/by-id/a /dev/disk/by-id/a)"
@@ -819,25 +823,86 @@ expect "cleanup: no verification time is never due" kept "$(due '' 7 2000000)"
 expect "cleanup: a damaged time is never due" kept "$(due 'x' 7 2000000)"
 expect "cleanup: no period is never due" kept "$(due 1000000 '' 2000000)"
 
+# The names at the top of a disk are read as top_entries prints them, each
+# ended by a NUL, into an array through list (as move_in and set_up read
+# them): tops prints them between brackets, so a name with a newline shows
+# as one name.
+tops() {  # tops ROOT: the names top_entries prints for ROOT, each in brackets, or "failed"
+    local names=() n
+    if list names top_entries "$1" 2>/dev/null; then
+        for n in ${names[@]+"${names[@]}"}; do printf '[%s]' "$n"; done
+    else
+        echo failed
+    fi
+}
 t=$(mktemp -d "$work/top.XXXXXX")
-expect "top entries: lost+found alone counts as empty" "" "$(mkdir "$t/lost+found"; top_entries "$t")"
-expect "top entries: everything else, sorted" $'etc\nrelease' "$(touch "$t/release"; mkdir "$t/etc"; top_entries "$t")"
+expect "top entries: lost+found alone counts as empty" "" "$(mkdir "$t/lost+found"; tops "$t")"
+expect "top entries: everything else, sorted" "[etc][release]" "$(touch "$t/release"; mkdir "$t/etc"; tops "$t")"
+expect "top entries: a name with a newline is one name, and lost+found stays left out (#176)" $'[a\nlost+found][etc][release]' \
+    "$(mkdir "$t/"$'a\nlost+found'; tops "$t")"
+rmdir "$t/"$'a\nlost+found'
+# same_tree writes its two listings below the records of the disk service
+# and removes them: here below $work/tree-records, which must be empty after
+# every comparison.
+tree() {  # tree A B: whether same_tree holds for A and B
+    (
+        records=$work/tree-records
+        mkdir -p "$records"
+        if same_tree "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi
+    )
+}
 a=$(mktemp -d "$work/tree.XXXXXX"); b=$(mktemp -d "$work/tree.XXXXXX")
 mkdir -p "$a/_data/sub"; printf 'x' >"$a/_data/sub/f"; ln -s target "$a/_data/l"; chmod 0750 "$a/_data"
 cp -a "$a/." "$b/"
-expect "tree listing: a copy lists the same" same "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+expect "tree listing: a copy lists the same" same "$(tree "$a" "$b")"
 chmod 0700 "$b/_data"
-expect "tree listing: another mode differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+expect "tree listing: another mode differs" differs "$(tree "$a" "$b")"
 chmod 0750 "$b/_data"; printf 'xy' >"$b/_data/sub/f"
-expect "tree listing: another size differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+expect "tree listing: another size differs" differs "$(tree "$a" "$b")"
 printf 'x' >"$b/_data/sub/f"; rm "$b/_data/l"; ln -s elsewhere "$b/_data/l"
-expect "tree listing: another link target differs" differs "$([ "$(tree_listing "$a")" = "$(tree_listing "$b")" ] && echo same || echo differs)"
+expect "tree listing: another link target differs" differs "$(tree "$a" "$b")"
+# Listed one line each and sorted, these two link targets gave the same
+# lines ("l 5 ./_data/l -> x", "p", "q"); a record ended by a NUL keeps each
+# target whole (#176).
+rm "$a/_data/l" "$b/_data/l"; ln -s $'x\np\nq' "$a/_data/l"; ln -s $'x\nq\np' "$b/_data/l"
+expect "tree listing: link targets with the same lines in another order differ (#176)" differs "$(tree "$a" "$b")"
+rm "$b/_data/l"; ln -s $'x\np\nq' "$b/_data/l"; mkdir "$a/_data/"$'d\ne'; mkdir "$b/_data/"$'d\ne'
+expect "tree listing: a copy with newlines in a name and a link target lists the same" same "$(tree "$a" "$b")"
+expect "tree listing: a directory that is missing is not the same" differs "$(tree "$a" "$work/no-such-tree")"
+e1=$(mktemp -d "$work/tree.XXXXXX"); e2=$(mktemp -d "$work/tree.XXXXXX")
+expect "tree listing: two empty directories are the same" same "$(tree "$e1" "$e2")"
+# A record of the search for types, modes and owners must not pass for one of
+# the search for sizes and targets: without the letter each record begins
+# with, "f 600 UID:GID a -> " is the mode of the file "a -> " in one tree and
+# the size of the file "UID:GID a" in the other, and the two trees listed the
+# same.
+p1=$(mktemp -d "$work/tree.XXXXXX"); p2=$(mktemp -d "$work/tree.XXXXXX")
+own="$(id -u):$(id -g)"
+head -c 600 /dev/zero >"$p1/$own a"; : >"$p1/a -> "; chmod 0640 "$p1/$own a"; chmod 0644 "$p1/a -> "
+head -c 644 /dev/zero >"$p2/$own a"; : >"$p2/a -> "; chmod 0640 "$p2/$own a"; chmod 0600 "$p2/a -> "
+expect "tree listing: a size in one tree that reads like a mode in the other differs" differs "$(tree "$p1" "$p2")"
+expect "tree listing: no listing stays behind, whatever the result" "" "$(find "$work/tree-records" -mindepth 1 -printf '%P\n')"
+expect "tree listing: listings that cannot be written are not the same" differs \
+    "$(records=$work/no-such-records; if same_tree "$e1" "$e2" 2>/dev/null; then echo same; else echo differs; fi)"
+mkdir -p "$work/tree-records/.tree.stale"; touch "$work/tree-records/.tree.stale/a"
+expect "tree listing: a listing left by a run that was killed goes at the next comparison" "same|" \
+    "$(tree "$e1" "$e2")|$(find "$work/tree-records" -mindepth 1 -printf '%P\n')"
+# What copy_place does not move from etc or pinned is named whole, on one
+# line, the name shown (#176).
+notice=$(
+    mnt=$work/notice
+    mkdir -p "$mnt" "$work/notice-sys/etc/"$'sub\ndir'
+    echo x >"$work/notice-sys/etc/f"
+    copy_place etc "$work/notice-sys/etc" 2>&1 >/dev/null
+)
+expect "copy place: an entry of etc that is no regular file is named on one line, and the files are copied" \
+    "$work/notice-sys/etc/sub?dir is not a regular file and is not moved|x" "$notice|$(cat "$work/notice/etc/f" 2>/dev/null)"
 
 # The comparison after the copy of a move (same_place): what could not be
 # searched through was not compared, so it is not the same (#149).
 same() {  # same DIRECTORY PATH: whether same_place holds, with the disk at $work/moved
     (
-        mnt=$work/moved
+        mnt=$work/moved records=$work/tree-records
         if same_place "$1" "$2" 2>/dev/null; then echo same; else echo differs; fi
     )
 }
@@ -1000,12 +1065,28 @@ start_move() {  # start_move CASE: cmd_start data on a disk receiving a move: th
                 ;;
             no-space) stat() { if [ "$1" = -f ]; then echo '1 * 1'; else command stat "$@"; fi; } ;;
             top-fails)
+                # shellcheck disable=SC2329 # called by move_in, through list
                 top_entries() { return 1; }
                 # shellcheck disable=SC2329 # called by move_failed: the disk still answers
                 data_disk_present() { return 0; }
                 ;;
+            leftover)
+                # What an earlier move left at the top of the disk, one name
+                # with a newline in it. Read line by line, that name deleted
+                # lost+found, which is never part of the copy, and stayed
+                # itself (#176).
+                mkdir -p "$sb/disk/lost+found" "$sb/disk/old/sub" "$sb/disk/"$'a\nlost+found'
+                touch "$sb/disk/lost+found/kept" "$sb/disk/"$'a\nlost+found/f'
+                ;;
         esac
         cmd_start data >/dev/null 2>&1
+        if [ "$1" = leftover ]; then
+            {
+                if [ -e "$sb/disk/lost+found/kept" ]; then echo "lost+found kept"; else echo "lost+found gone"; fi
+                if [ -e "$sb/disk/"$'a\nlost+found' ]; then echo "newline name left"; else echo "newline name gone"; fi
+                if [ -e "$sb/disk/old" ]; then echo "old left"; else echo "old gone"; fi
+            } >>"$start_calls"
+        fi
         printf '%s|%s' "$(move_get STATE)" "$(grep -c '^DATA_DISK=' "$sb/disk/etc/kamerplanter.env" 2>/dev/null)"
     )
     printf '|%s|%s' "$?" "$(paste -sd, "$start_calls")"
@@ -1015,6 +1096,8 @@ expect "move: copied and recorded as moved, then placed and checked; the copied 
 expect "move: the record cannot say moved: the start fails, nothing is placed" "|1|" "$(start_move record-fails)"
 expect "move: abandoned for lack of space: the services start, nothing is placed" "failed||0|" "$(start_move no-space)"
 expect "move: the top of the disk cannot be listed: abandoned, nothing is copied or placed (#149)" "failed||0|" "$(start_move top-fails)"
+expect "move: what an earlier move left is removed whole, also a name with a newline; lost+found stays (#176)" \
+    "moved|0|0|placed,check,lost+found kept,newline name gone,old gone" "$(start_move leftover)"
 
 # Retiring the backup disk: refused with nothing changed while an update is
 # not decided or something other than the naming file names the disk; else
