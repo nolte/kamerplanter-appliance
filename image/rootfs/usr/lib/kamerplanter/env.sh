@@ -468,6 +468,29 @@ list() {
     wait "$!"
 }
 
+# replace FILE: replaces FILE with what stdin delivers, durably: a reader sees
+# either the old or the new content, and the new content survives a power
+# loss. Every step is checked, so it fails also where set -e does not apply
+# (in a condition): a failed step leaves no temporary file behind, and FILE
+# as it was, unless the step is the last one, the sync of the directory
+# after the rename. It fails too when FILE is a directory, into which a
+# rename without -T would move the new content and succeed, the write
+# reported although it did not happen (#144, #162); a link to a directory is
+# replaced, not followed. The configuration check, the disk service and the
+# provisioning step replace their records and settings through this one
+# function; a caller ends its command when it fails. The pre-commit hook
+# no-rename-into-a-directory refuses a rename without -T in the image's
+# scripts.
+replace() {
+    local tmp
+    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
+    if cat >"$tmp" && sync "$tmp" && mv -fT -- "$tmp" "$1" && sync "$(dirname "$1")"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    return 1
+}
+
 # Deleting and writing backups. A disk, a USB stick above all, may have been
 # prepared elsewhere: its update-backup, or an entry in it, may be a symbolic
 # link to anywhere on the system, which root would follow. So a backup is

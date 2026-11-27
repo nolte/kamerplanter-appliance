@@ -58,16 +58,15 @@ instance_data=/run/cloud-init/instance-data.json
 # shellcheck source=image/rootfs/usr/lib/kamerplanter/env.sh
 . /usr/lib/kamerplanter/env.sh
 
-# Replaces a file with what stdin delivers, durably: a reader sees either the
-# old or the new content, and the new content survives a power loss.
-replace() {
-    local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX")
-    cat >"$tmp"
-    sync "$tmp"
-    mv "$tmp" "$1"
-    sync "$(dirname "$1")"
-}
+# A run that fails with provisioning data leaves this mark in /run, so until
+# the next boot. The scrub (kamerplanter-cloud-init-scrub.service) is only
+# ordered after this step: it deletes cloud-init's copies in /run also after
+# a failed run. A restart of the units in the same boot would then find no
+# provisioning data, end well with nothing renewed or staged, and on a first
+# boot the configuration check would generate the secrets the provisioning
+# data was to bring (#162). With the mark and without data the step fails
+# again; only a run that succeeds with provisioning data removes it.
+failed_mark=/run/kamerplanter-provisioning-failed
 
 # provided: whether cloud-init found provisioning data on this boot: it ran
 # (its combined cloud-config is in /run) with a datasource other than None.
@@ -165,8 +164,9 @@ stage_secrets() {
         return 0
     fi
     printf '%s\n' "$id" >"$provisioning_staging/.instance"
-    mv -- "$provisioning_staging/.instance" "$staged_instance"
-    mv -- "$tmp" "$staged_secrets"
+    # -T: a name that is a directory fails the step; nothing is moved into it.
+    mv -fT -- "$provisioning_staging/.instance" "$staged_instance"
+    mv -fT -- "$tmp" "$staged_secrets"
     count=$(grep -c . "$staged_secrets" || true)
     echo "$count entries of kamerplanter: -> secrets: staged for the configuration check"
 }
@@ -215,7 +215,12 @@ renew() {
         echo "# of the provisioning data on every boot that has provisioning data; edits"
         echo "# are lost. Set your own values in $config_user, which wins."
         [ -z "$lines" ] || printf '%s\n' "$lines"
-    } | replace "$provisioning_settings"
+    } | replace "$provisioning_settings" || {
+        # Fatal: the layer of an earlier boot would stand for this boot's
+        # provisioning data, and the step would report it as renewed (#162).
+        echo "$provisioning_settings could not be written (a directory in its place, or a failed write); the provisioning layer is not renewed, and the services stay stopped. Remove what is in its place, then reboot: a restart of the units does not read the provisioning data again" >&2
+        exit 1
+    }
     own_file "$provisioning_settings"
     echo "provisioning layer renewed from the provisioning data: $count entries of kamerplanter: -> settings:"
 }
@@ -234,6 +239,16 @@ refresh_window() {
     fi
 }
 
+had_data=0
+if provided; then had_data=1; fi
+# Fail-closed: when the mark cannot be written, the failure itself stands.
+# shellcheck disable=SC2154 # status is set in the trap
+trap 'status=$?; if [ "$status" != 0 ] && [ "$had_data" = 1 ]; then : >"$failed_mark" 2>/dev/null || true; fi' EXIT
+if [ "$had_data" = 0 ] && { [ -e "$failed_mark" ] || [ -L "$failed_mark" ]; }; then
+    echo "the provisioning step failed earlier in this boot (see: journalctl -b -u kamerplanter-provisioning.service), and the provisioning data of this boot is no longer in /run; a restart of the units is not enough: remove the cause of that failure, then reboot. The services stay stopped" >&2
+    exit 1
+fi
 renew
 stage_secrets
 refresh_window
+if [ "$had_data" = 1 ]; then rm -f -- "$failed_mark"; fi

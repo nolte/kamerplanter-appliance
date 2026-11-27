@@ -674,19 +674,10 @@ log_event() {  # log_event EVENT DETAIL
     echo "$label: $1: $2"
 }
 
-# Replaces a file with what stdin delivers, durably (as configure does).
-# Checked step by step, since it is also called where set -e does not apply
-# (lay_out): a failed step leaves the file as it was, and fails.
-replace() {
-    local tmp
-    tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
-    if cat >"$tmp" && sync "$tmp" && mv "$tmp" "$1"; then
-        sync "$(dirname "$1")"
-        return
-    fi
-    rm -f -- "$tmp"
-    return 1
-}
+# The records are written with replace (/usr/lib/kamerplanter/env.sh, which
+# every command sources first): durably, checked step by step, since it is
+# also called where set -e does not apply (lay_out), and failing when the
+# file is a directory. A record that cannot be written ends the command.
 
 # credential NAME: a system credential imported by the unit; empty without.
 credential() {
@@ -1151,7 +1142,9 @@ keep_key() {
     local f
     if [ -n "${used_key-}" ] && [ "$used_key" != "$key_store" ]; then
         secure_keys
-        replace "$key_store" <"$used_key"
+        replace "$key_store" <"$used_key" ||
+            die "the key that opened the $role disk $label could not be kept in $key_store" \
+                "check $keys on the system disk (free space, and that $key_store is no directory), then run: systemctl restart kamerplanter.target"
         log_event key-stored "the key from $(key_origin "$used_key") is kept in $key_store (root, 0600)"
     fi
     [ -f "$key_store" ] || return 0
@@ -1412,7 +1405,9 @@ set_up() {
                 # Recorded before the wipe, so a crash cannot make the force
                 # apply a second time.
                 install -d -m 0700 "$records"
-                { cat "$records/forced" 2>/dev/null || true; echo "$ident"; } | replace "$records/forced"
+                { cat "$records/forced" 2>/dev/null || true; echo "$ident"; } | replace "$records/forced" ||
+                    die "$name ($dev) is not formatted: the forced format could not be recorded in $records/forced; $(written_note)" \
+                        "check $records on the system disk (free space, and that $records/forced is no directory), then run: systemctl restart kamerplanter.target"
                 # Partitions first, the device itself last.
                 local d
                 while IFS= read -r d; do
@@ -1487,7 +1482,9 @@ set_up() {
         fi
         echo "NAMED=$name"
         echo "SINCE=$(date -u +%FT%TZ)"
-    } | replace "$record"
+    } | replace "$record" ||
+        die "$name ($dev) could not be recorded as $role disk in $record; $(written_note)" \
+            "check $records on the system disk (free space), then run: systemctl restart kamerplanter.target"
     case $action/$encryption in
         adopt/*) log_event adopted "$name ($dev) with file system UUID $uuid" ;;
         unlock/*) log_event adopted "$name ($dev), encrypted, with LUKS2 UUID $uuid" ;;
@@ -1701,7 +1698,10 @@ move_write() {
         for f in "${move_fields[@]}"; do
             if [ -n "${m[$f]-}" ]; then echo "$f=${m[$f]}"; fi
         done
-    } | replace "$data_disk_move"
+    } | replace "$data_disk_move" || {
+        echo "the record of the move $data_disk_move could not be written (a directory in its place, or a failed write)" >&2
+        return 1
+    }
 }
 
 # move_advance EVENT KEY=VALUE...: the move record after EVENT
@@ -1730,9 +1730,13 @@ move_begin() {
         die "a move onto a data disk is recorded as $state already ($data_disk_move), but no data disk is set up" \
             "restore $record from a backup, or delete $data_disk_move to start over, then run: systemctl restart kamerplanter.target"
     if ! grep -Fqxi -- "$1" "$records/move-targets" 2>/dev/null; then
-        { cat "$records/move-targets" 2>/dev/null || true; echo "$1"; } | replace "$records/move-targets"
+        { cat "$records/move-targets" 2>/dev/null || true; echo "$1"; } | replace "$records/move-targets" ||
+            die "the move onto $name could not be recorded in $records/move-targets; $(written_note)" \
+                "check $records on the system disk (free space, and that $records/move-targets is no directory), then run: systemctl restart kamerplanter.target"
     fi
-    move_write --new STATE=copying UUID="$1" NAMED="$name" STARTED="$(now)"
+    move_write --new STATE=copying UUID="$1" NAMED="$name" STARTED="$(now)" ||
+        die "the move onto $name could not be recorded in $data_disk_move; $(written_note), and nothing is moved" \
+            "check $records on the system disk (free space, and that $data_disk_move is no directory), then run: systemctl restart kamerplanter.target"
     log_event move-started "the system disk holds Kamerplanter data (${held//$'\n'/, }); it is copied onto $name before any service starts"
 }
 
@@ -2272,10 +2276,11 @@ cmd_status() {
 }
 
 # write_naming: writes the naming file from cfg (loaded from it, then
-# changed), with the keys of naming_keys that are set; under the lock.
+# changed), with the keys of naming_keys that are set; under the lock. Fails,
+# leaving the file as it was, when it cannot be written.
 write_naming() {
     local k v
-    install -d -m 0700 "$records"
+    install -d -m 0700 "$records" || return 1
     {
         echo "# The disks of this appliance, named on the system disk by"
         echo "# /usr/libexec/kamerplanter/disks name (or by hand, as root); see its comments."
@@ -2312,7 +2317,7 @@ cmd_name() {
     load "$naming_file"
     cfg[$key]=$path
     if [ -n "$force" ]; then cfg[${key}_FORCE]=1; else cfg[${key}_FORCE]=; fi
-    write_naming
+    write_naming || { echo "the naming file $naming_file could not be written; it is not changed" >&2; exit 1; }
     if [ -n "$path" ]; then
         log_event named "$key=$path${force:+, forced once} in $naming_file"
     else
@@ -2431,7 +2436,10 @@ cmd_retire() {
     fi
     if [ -e "$naming_file" ]; then
         cfg[$key]='' cfg[${key}_FORCE]=''
-        write_naming
+        write_naming || {
+            echo "the naming file $naming_file could not be written; the disk is unmounted and its container closed, and it is still named and set up: until the disk unit starts again or the appliance is rebooted the update tool treats the backup disk as missing; nothing else is changed" >&2
+            exit 1
+        }
     fi
     while IFS= read -r d; do
         rm -f -- "${update_backups:?}/${d:?}"
