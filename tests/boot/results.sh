@@ -27,15 +27,16 @@ check() {
 }
 
 summary() {
-    local dir=$1 job file files found rc=0
+    local dir=$1 job file files='' found rc=0
     local -A count=()
     echo "### VM tests"
     echo
     echo "| job | test | result | time | description |"
     echo "| --- | --- | --- | --- | --- |"
     # find's exit status is read: results that could not be searched are not
-    # taken for none (#169).
-    files=$(find "$dir" -name '*.tsv') || { echo "The results below $dir could not be read completely."; rc=1; }
+    # taken for none (#169). No DIR at all is no results: a run whose build
+    # did not finish downloads no artifact.
+    if [ -d "$dir" ]; then files=$(find "$dir" -name '*.tsv') || rc=1; fi
     while IFS= read -r file; do
         [ -n "$file" ] || continue
         job=${file#"$dir"/}
@@ -47,6 +48,7 @@ summary() {
         done <"$file"
     done < <(sort <<<"$files")
     echo
+    [ "$rc" = 0 ] || { echo "The results below $dir could not be read completely."; echo; }
     echo "PASS ${count[PASS]:-0}, FAIL ${count[FAIL]:-0}, SKIP ${count[SKIP]:-0}"
     for job in "$dir"/*/; do
         [ -d "$job" ] || continue

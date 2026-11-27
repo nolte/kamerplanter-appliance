@@ -842,10 +842,9 @@ in_use() {
         if [ -n "$at" ]; then echo "$d is mounted at $at"; return 0; fi
         if awk 'NR > 1 {print $1}' /proc/swaps | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
         # Holders that could not be listed count as in use: the device is
-        # formatted only when nothing is known to hold it (find's message is
-        # in the journal).
+        # formatted only when nothing is known to hold it.
         if ! list holders find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0'; then
-            echo "what holds $d could not be read"
+            echo "what holds $d could not be read (find's message is in the journal)"
             return 0
         fi
         if [ ${#holders[@]} -gt 0 ]; then echo "$d is in use by ${holders[*]}"; return 0; fi

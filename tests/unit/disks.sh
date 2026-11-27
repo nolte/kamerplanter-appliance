@@ -312,7 +312,7 @@ no_device() {  # no_device FUNCTION: FUNCTION of a device sysfs does not know
         printf '%s|%s' "$out" "$rc"
     )
 }
-expect "in_use: holders that cannot be listed count as in use" "what holds /dev/kp-none could not be read|0" "$(no_device in_use)"
+expect "in_use: holders that cannot be listed count as in use" "what holds /dev/kp-none could not be read (find's message is in the journal)|0" "$(no_device in_use)"
 expect "roots: slaves that cannot be listed leave the device a whole disk" "/dev/kp-none|0" "$(no_device roots)"
 
 # Key files (E14): metadata only; owned by root and readable by root only.

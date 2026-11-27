@@ -65,9 +65,10 @@ repos:
       # a find anywhere inside "$(" up to the first ")", on one line, also in
       # a comment, and also the assignment alone (x=$(find ...) || ...), which
       # would keep the status: list reads it the same and needs no exception
-      # here. A find in a pipe, behind a function or a variable, or after an
-      # earlier ")" in the same substitution is not seen; the scripts outside
-      # the image (tests/boot/results.sh assigns alone) are not checked.
+      # here. A find in a pipe, in backticks, behind a function or a variable,
+      # or after an earlier ")" in the same substitution is not seen; the
+      # scripts outside the image (tests/boot/results.sh assigns alone) are
+      # not checked.
       - id: no-find-in-command-substitution
         name: No find in a command substitution in the image's scripts
         language: pygrep
