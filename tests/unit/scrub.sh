@@ -727,10 +727,12 @@ fi
 # stub_find COMMAND: a find in $SB/stub that runs COMMAND, with the place in
 # $1, before the real find when that searches the files of /run/cloud-init, as
 # only the search of the files does; COMMAND fails the search by setting rc.
+# The real find runs under the name find, as the scrub runs it, so that its
+# own messages do not start with the path of the program.
 stub_find() {
     mkdir -p "$SB/stub"
     # shellcheck disable=SC2016 # expanded by the stub, not here
-    printf '#!/usr/bin/env bash\nrc=0\ncase "$1| $* " in */run/cloud-init/"|"*" -type f "*) %s ;; esac\n%q "$@" || rc=$?\nexit "$rc"\n' \
+    printf '#!/usr/bin/env bash\nrc=0\ncase "$1| $* " in */run/cloud-init/"|"*" -type f "*) %s ;; esac\n(exec -a find %q "$@") || rc=$?\nexit "$rc"\n' \
         "$1" "$(command -v find)" >"$SB/stub/find"
     chmod +x "$SB/stub/find"
 }
