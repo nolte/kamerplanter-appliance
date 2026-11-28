@@ -62,18 +62,25 @@ repos:
       # [ -n "$(find DIR ...)" ] is false for a directory that could not be
       # read as for an empty one, and "|| true" inside drops it on purpose
       # (#169). The shipped scripts read a search through list. This refuses
-      # a find anywhere inside "$(" up to the first ")", on one line, also in
-      # a comment, and also the assignment alone (x=$(find ...) || ...), which
-      # would keep the status: list reads it the same and needs no exception
-      # here. A find in a pipe, in backticks, behind a function or a variable,
-      # or after an earlier ")" in the same substitution is not seen; the
-      # scripts outside the image (tests/boot/results.sh assigns alone) are
-      # not checked.
+      # a find inside "$(" before the first ")" that is not in quotes, on one
+      # line, also in a comment, and also the assignment alone
+      # (x=$(find ...) || ...), which would keep the status: list reads it the
+      # same and needs no exception here. A find in a pipe, in backticks,
+      # behind a function or a variable, or after an earlier ")" in the same
+      # substitution is not seen. Nor is a find in a quoted string, so that a
+      # message may hold the word ($(echo "cannot find it"), #189): that lets
+      # through sh -c "find ..." too, and a find after a quote that is not
+      # closed on the line (an apostrophe in a comment, an escaped quote).
+      # Refused although it searches nothing: the word in a message that is
+      # not quoted. Outside the image, tests/image/metadata-guard.sh is
+      # checked, which runs in the image and counts the shipped units; the
+      # other scripts (tests/boot/results.sh assigns alone, tests/unit: #194)
+      # are not.
       - id: no-find-in-command-substitution
-        name: No find in a command substitution in the image's scripts
+        name: No find in a command substitution in the image's scripts or tests/image/metadata-guard.sh
         language: pygrep
-        entry: '\$\([^)]*\bfind\s'
-        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        entry: '\$\((?:[^)"'']|"[^"]*"|''[^'']*'')*\bfind\s'
+        files: '^(image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)|tests/image/metadata-guard\.sh)$'
         types: [file]
 
       # A file name may hold a newline: a search that prints names one per
