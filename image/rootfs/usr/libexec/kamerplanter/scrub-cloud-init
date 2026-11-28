@@ -211,12 +211,14 @@ is_config() {
 # and names them as what they are (#170); among the seed files it only warns
 # of one, as of everything there. Fails only when the search fails. A
 # directory that is gone by then (gone) is on none, START too:
-# -ignore_readdir_race covers find alone.
+# -ignore_readdir_race covers find alone. START is asked for without its
+# trailing slash, as it is printed: with it, a symbolic link in its place
+# would be followed, and one that leads nowhere would pass for gone (#184).
 foreign() {
     local start=$1 dev other d dirs=() rc=0
     shift
     if ! dev=$(stat -c %d -- "$start" 2>/dev/null); then
-        gone "$start" || printf '?%s\0' "${start%/}"
+        gone "${start%/}" || printf '?%s\0' "${start%/}"
         return 0
     fi
     list dirs find "$start" -ignore_readdir_race -xdev -mindepth 1 "$@" -type d -print0 || rc=1
@@ -395,14 +397,17 @@ learn() {
 # those in a /var/lib/cloud/data on another file system than /var/lib/cloud:
 # no search enters it (find -xdev), so nothing in it is rewritten either, and
 # main names it (foreign). Exit status 3 when it is on another file system,
-# 1 when that cannot be told; either way those files are not among them, and
-# the others are. A /var/lib/cloud/data that is gone when its file system is
-# asked for (gone) holds none and is no failure, as for foreign (#170).
+# 4 when its file system cannot be told, 1 when that of /var/lib/cloud cannot,
+# so that the two are not compared: main names each cause by its directory
+# (#184). In each case those files are not among them, and the others are. A
+# /var/lib/cloud/data that is gone when its file system is asked for (gone)
+# holds none and is no failure, as for foreign (#170), nor is a /var/lib/cloud
+# that is gone by then (#184).
 status_files() {
     local name f dev other rc=0
     if own_dir "$cloud_lib" && own_dir "${cloud_lib}data"; then
         if ! dev=$(stat -c %d -- "$cloud_lib" 2>/dev/null); then
-            rc=1
+            gone "${cloud_lib%/}" || rc=1
         elif other=$(stat -c %d -- "${cloud_lib}data" 2>/dev/null); then
             if [ "$other" = "$dev" ]; then
                 for name in "${status_names[@]}"; do
@@ -413,7 +418,7 @@ status_files() {
                 rc=3
             fi
         elif ! gone "${cloud_lib}data"; then
-            rc=1
+            rc=4
         fi
     fi
     if own_dir "$cloud_run"; then
@@ -826,6 +831,8 @@ unsearched() {
 # "?", out of the array NAME, and records each, once, however many searches
 # met it, so that the copies are kept and the unit fails (#170). find printed
 # nothing for it: it is stat that failed, on a directory that is still there.
+# The message does not say that nothing in it is scrubbed: the searches enter
+# it wherever find does, and what they find in it is scrubbed (#184).
 told() {
     local -n told_dirs=$1
     local told_d told_rest=()
@@ -835,7 +842,7 @@ told() {
                 told_d=${told_d#'?'}
                 if [ -z "${untold[$told_d]:-}" ]; then
                     untold[$told_d]=1
-                    unscrubbed+=("the file system of $told_d cannot be told; whether everything in it was searched is not known, and nothing in it counts as scrubbed")
+                    unscrubbed+=("the file system of $told_d cannot be told; whether everything in it was searched is not known")
                 fi
                 ;;
             *) told_rest+=("$told_d") ;;
@@ -980,7 +987,9 @@ main() {
         # stay as they are, and so do the copies. main does not rest on
         # having named the directory above (elsewhere, untold): it is asked
         # again, and named here only when it is not named yet, so that one
-        # cause has one message (#170).
+        # cause has one message (#170). Which of the two file systems cannot
+        # be told is a cause each: /var/lib/cloud named above does not cover
+        # /var/lib/cloud/data here, nor the other way round (#184).
         rc=0
         list got status_files || rc=$?
         case $rc in
@@ -992,8 +1001,12 @@ main() {
                 done
                 [ -n "$named" ] || unscrubbed+=("${cloud_lib}data is on another file system than the directory it is in; the error messages in cloud-init's status and result in it are not replaced")
                 ;;
+            1)
+                [ -n "${untold[${cloud_lib%/}]:-}" ] ||
+                    unscrubbed+=("the file system of ${cloud_lib%/} cannot be told, and so not whether ${cloud_lib}data is on another one; the error messages in cloud-init's status and result in it are not replaced")
+                ;;
             *)
-                [ -n "${untold[${cloud_lib}data]:-}${untold[${cloud_lib%/}]:-}" ] ||
+                [ -n "${untold[${cloud_lib}data]:-}" ] ||
                     unscrubbed+=("whether ${cloud_lib}data is on another file system cannot be told; the error messages in cloud-init's status and result in it are not replaced")
                 ;;
         esac
