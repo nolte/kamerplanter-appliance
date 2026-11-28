@@ -72,7 +72,8 @@
 # its instances/, an instance directory in it, /run/cloud-init or a copy is a
 # symbolic link, behind which copies could lie unread (#93). Each such link is
 # named once. So when the logs go (see below) and the file system of
-# /var/lib/cloud/data is another or cannot be told: the status and result in
+# /var/lib/cloud/data is another or cannot be told, or that of /var/lib/cloud
+# cannot, so that the two are not compared: the status and result in
 # it are not rewritten, and their error messages stay as they are on every
 # such boot, while the logs are deleted and the unit fails all the same. That
 # is decided (#173): they are not replaced through an open of their own that
@@ -234,7 +235,9 @@ foreign() {
 
 # gone PATH: whether nothing is at PATH any more. Only "no such file" counts:
 # a PATH that cannot be looked at for another reason, such as a file system
-# that refuses root, is not gone.
+# that refuses root, is not gone. PATH is looked at without a trailing slash:
+# with one, a symbolic link at PATH would be followed, and one that leads
+# nowhere would pass for gone (#184).
 gone() {
     python3 -I -c '
 import os, sys
@@ -245,7 +248,7 @@ except (FileNotFoundError, NotADirectoryError):
 except Exception:
     pass
 sys.exit(1)
-' "$1" 2>/dev/null
+' "${1%/}" 2>/dev/null
 }
 
 # linked_instances: the symbolic links in /var/lib/cloud/instances, each in
@@ -853,7 +856,7 @@ told() {
 
 main() {
     local pats=() f d rc redacted=0 dropped=0 left=() unwritten=() unscrubbed=() seeded=() deleted copies='' undeleted=''
-    local found=() links=() files=() elsewhere=() got=() named
+    local found=() links=() files=() elsewhere=() got=() named unreplaced
     local -A failed=() untold=()
     list found instance_copies || unsearched "${cloud_lib}instances"
     for f in "${found[@]}"; do
@@ -989,7 +992,10 @@ main() {
         # again, and named here only when it is not named yet, so that one
         # cause has one message (#170). Which of the two file systems cannot
         # be told is a cause each: /var/lib/cloud named above does not cover
-        # /var/lib/cloud/data here, nor the other way round (#184).
+        # /var/lib/cloud/data here, nor the other way round (#184). A cause
+        # that is named above says nothing of the status and result: what
+        # follows from it here is said without naming it again.
+        unreplaced="the error messages in cloud-init's status and result in ${cloud_lib}data are not replaced: whether it is on another file system is not known (see above)"
         rc=0
         list got status_files || rc=$?
         case $rc in
@@ -1002,12 +1008,18 @@ main() {
                 [ -n "$named" ] || unscrubbed+=("${cloud_lib}data is on another file system than the directory it is in; the error messages in cloud-init's status and result in it are not replaced")
                 ;;
             1)
-                [ -n "${untold[${cloud_lib%/}]:-}" ] ||
+                if [ -n "${untold[${cloud_lib%/}]:-}" ]; then
+                    unscrubbed+=("$unreplaced")
+                else
                     unscrubbed+=("the file system of ${cloud_lib%/} cannot be told, and so not whether ${cloud_lib}data is on another one; the error messages in cloud-init's status and result in it are not replaced")
+                fi
                 ;;
             *)
-                [ -n "${untold[${cloud_lib}data]:-}" ] ||
+                if [ -n "${untold[${cloud_lib}data]:-}" ]; then
+                    unscrubbed+=("$unreplaced")
+                else
                     unscrubbed+=("whether ${cloud_lib}data is on another file system cannot be told; the error messages in cloud-init's status and result in it are not replaced")
+                fi
                 ;;
         esac
         for f in "${got[@]}"; do

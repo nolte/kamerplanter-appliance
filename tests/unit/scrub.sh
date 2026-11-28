@@ -865,8 +865,8 @@ unreadable_copies
 status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
 stub_stat_fails '*/var/lib/cloud/data'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
-expect "another file system: that of /var/lib/cloud/data cannot be told, no copy can be read: the status is not rewritten, that is named once and as no failed search, the copies are kept, the scrub fails" "1|$status_before|1|1|no|yes" \
-    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud/data cannot be told; whether everything in it was searched is not known" "$SB/out")|$(has "cannot be searched" "$(out)")|$(exists "$i/cloud-config.txt")"
+expect "another file system: that of /var/lib/cloud/data cannot be told, no copy can be read: the status is not rewritten, that is named once and as no failed search, and that the error messages are not replaced once, the copies are kept, the scrub fails" "1|$status_before|1|1|no|yes|1" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud/data cannot be told; whether everything in it was searched is not known" "$SB/out")|$(has "cannot be searched" "$(out)")|$(exists "$i/cloud-config.txt")|$(grep -cF "the error messages in cloud-init's status and result in $SB/var/lib/cloud/data are not replaced: whether it is on another file system is not known (see above)" "$SB/out")"
 # It cannot be told only by the time the status and result are handed out:
 # named there, once.
 new_appliance
@@ -896,8 +896,8 @@ new_appliance
 booted iid-1
 stub_stat_fails '*/var/lib/cloud/'
 rc=$(PATH=$SB/stub:$PATH run_scrub)
-expect "the file system of /var/lib/cloud cannot be told: the scrub fails, names it once and as no failed search, keeps the copies" "1|1|1|no|$all_kept" \
-    "$rc|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud cannot be told; whether everything in it was searched is not known" "$SB/out")|$(has "cannot be searched" "$(out)")|$(kept_copies)"
+expect "the file system of /var/lib/cloud cannot be told: the scrub fails, names it once, as no failed search and without saying that nothing in it is scrubbed, keeps the copies" "1|1|1|no|no|$all_kept" \
+    "$rc|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud cannot be told; whether everything in it was searched is not known" "$SB/out")|$(has "cannot be searched" "$(out)")|$(has "counts as scrubbed" "$(out)")|$(kept_copies)"
 # A directory that is gone between the search and the question for its file
 # system is on none: no failure (#155). The stub removes it when asked.
 new_appliance
