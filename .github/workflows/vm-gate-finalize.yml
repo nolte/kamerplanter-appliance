@@ -35,7 +35,14 @@ name: vm-gate-finalize
 #     the run and it completes), or it skipped the build (a label other than
 #     vm-tests was added, or the job consent of vm-tests.yml found the label
 #     removed and ended the run, or failed because vm-gate.yml had not
-#     accepted the commit, #152).
+#     accepted the commit, #152, or because the commit is not the head any
+#     more, #180).
+# A suite job of vm-tests.yml that finds the label removed after the build
+# fails without testing (#180). That is a failure like any other here: no
+# status while the label is gone (above), and "did not pass" if the label
+# was set again before this workflow looks, until the run of that label
+# has its own result. Such a job must not end green: it would count as a
+# suite that passed.
 #
 # workflow_run: the workflow runs as develop has it, with the base
 # repository's token, also for a pull request from a fork whose own token is

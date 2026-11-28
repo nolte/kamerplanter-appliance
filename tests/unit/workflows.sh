@@ -24,7 +24,11 @@
 # label. And the runs of the VM tests (#152): every job of vm-tests.yml waits
 # for the job consent, which reads the label from the API with a token that
 # only reads, and runs on the same statuses of vm-gate as the other two
-# scripts. What the three scripts decide is checked by tests/unit/vm-gate.sh.
+# scripts. And what the job consent cannot see (#180): it compares the run's
+# commit with the head of the pull request, every suite job reads the label
+# again in its first step, with a token that reads the code and the pull
+# request and nothing else, and no job of vm-tests.yml may read the runs of
+# Actions. What the scripts decide is checked by tests/unit/vm-gate.sh.
 # Reads the YAML files and the scripts only; needs PyYAML.
 #
 # Usage: tests/unit/workflows.sh
@@ -475,6 +479,75 @@ if "${{" in consent_script or any("uses" in s for s in consent.get("steps") or [
     print("FAIL vm-tests.yml: the job consent expands an expression inside its script or uses an action")
 else:
     print("ok vm-tests.yml: the job consent passes the event through env and uses no action")
+# #180: a new attempt of an old run has the event of its first attempt, so
+# consent asks the API which commit is the head, before anything else.
+head_read = consent_script.find('gh api "repos/$REPO/pulls/$NUMBER"')
+label_read = consent_script.find('gh api "repos/$REPO/issues/$NUMBER/labels')
+if 0 <= head_read < label_read and '[ "$head" != "$SHA" ]' in consent_script:
+    print("ok vm-tests.yml: the job consent compares the run's commit with the head of the pull request, from the API")
+else:
+    print("FAIL vm-tests.yml: the job consent does not compare the run's commit with the head of the pull "
+          "request (pulls/$NUMBER) before it reads the label")
+
+# #180: consent decides before the build, so each suite job reads the label
+# again in its first step and fails when it is gone. The step is the same
+# text in the three jobs, runs on a pull request only, and the steps that
+# report results although a step failed stay out when the label is gone.
+# A job's permissions replace the workflow's: the checkout needs contents,
+# the read of the label pull-requests, and nothing else is given.
+SUITES = ("boot", "update", "data-disk")
+GONE = "steps.label.outputs.gone != 'true'"
+first_steps = []
+for job_id in SUITES:
+    job = vm_jobs.get(job_id) or {}
+    steps = job.get("steps") or []
+    first = steps[0] if steps else {}
+    first_steps.append(first)
+    script = str(first.get("run", ""))
+    if first.get("id") == "label" and \
+            " ".join(str(first.get("if", "")).split()) == "github.event_name == 'pull_request'" and \
+            re.search(r'gh api "repos/\$REPO/issues/\$NUMBER/labels[?"]', script) and \
+            'echo "gone=true" >>"$GITHUB_OUTPUT"' in script and "${{" not in script and "uses" not in first:
+        print(f"ok vm-tests.yml: the job {job_id} reads the label from the API in its first step, on a pull request only")
+    else:
+        print(f"FAIL vm-tests.yml: the first step of the job {job_id} is not the read of the label vm-tests "
+              "(id label, on pull_request only, from the API, the event through env)")
+    if job.get("permissions") == {"contents": "read", "pull-requests": "read"}:
+        print(f"ok vm-tests.yml: the job {job_id} may read the code and the pull request, and nothing else")
+    else:
+        print(f"FAIL vm-tests.yml: the permissions of the job {job_id} are {job.get('permissions')}: "
+              "only contents: read and pull-requests: read")
+    # Whatever runs after a failed step would report on tests that never
+    # started: the check of the results file and the upload of the results.
+    unguarded = [str(s.get("name") or s.get("uses")) for s in steps[1:]
+                 if re.search(r"always\(|failure\(|cancelled\(", str(s.get("if", "")))
+                 and GONE not in str(s.get("if", ""))
+                 and (str(s.get("run", "")).startswith("tests/boot/results.sh")
+                      or str(s.get("uses", "")).startswith("actions/upload-artifact@"))]
+    if unguarded:
+        print(f"FAIL vm-tests.yml: the job {job_id} reports results also when the label is gone ({', '.join(unguarded)})")
+    else:
+        print(f"ok vm-tests.yml: the job {job_id} reports no results when the label is gone")
+if first_steps[0] and all(s == first_steps[0] for s in first_steps):
+    print("ok vm-tests.yml: the three suite jobs read the label with the same step")
+else:
+    print("FAIL vm-tests.yml: the first steps of the jobs boot, update and data-disk differ")
+# The only jobs that may read anything but the code are consent and the
+# suites, and none may read the runs of Actions (#180: telling whether
+# another run of the head already counts was decided against).
+for job_id, job in vm_jobs.items():
+    perms = (job or {}).get("permissions", vm_doc.get("permissions"))
+    allowed = {"consent": {"pull-requests": "read", "statuses": "read"}}.get(
+        job_id, {"contents": "read", "pull-requests": "read"} if job_id in SUITES else {"contents": "read"})
+    if perms != allowed:
+        print(f"FAIL vm-tests.yml: the permissions of the job {job_id} are {perms}, not {allowed}")
+if vm_doc.get("permissions") == {"contents": "read"} and \
+        not any("actions" in ((job or {}).get("permissions") or {}) for job in vm_jobs.values()) and \
+        not re.search(r"^\s*actions:", vm_text, re.M):
+    print("ok vm-tests.yml: the workflow's token reads the code, and no job may read the runs of Actions")
+else:
+    print("FAIL vm-tests.yml: the workflow's permissions are not contents: read alone, or a job names actions:")
+
 # The three scripts agree on what an accepted commit is: vm-gate.yml sets
 # it, vm-gate-finalize.yml writes a result on it, and consent runs on it.
 ACCEPTED = r"pending$'\t'* | success$'\t'* | failure$'\t''the VM tests of this commit'*)"

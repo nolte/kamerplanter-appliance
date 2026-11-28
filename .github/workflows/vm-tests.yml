@@ -30,11 +30,35 @@ name: vm-tests
 # if the label was removed after the run's event. This saves the runners of a
 # head nobody consented to; it protects nothing, since a pull request can
 # rewrite this file. What protects the result is vm-gate-finalize.yml, which
-# counts none of a commit vm-gate did not accept. The job decides once: a
-# run that it let through is not stopped when the label goes afterwards
-# (#180). A label that is set a second after a push, so that the push's
-# event already holds it, is not such a case as a rule: the push's own run
-# of vm-gate.yml refuses it before it sets pending (#182; the header of
+# counts none of a commit vm-gate did not accept. The job also fails, before
+# the build, on a run whose commit is not the head of the pull request any
+# more, which a new attempt of an old run is (#180).
+#
+# consent decides once, before the build, so every job of the three suites
+# reads the label once more in its first step and fails there when the
+# label is gone (#180): a label that is removed while the build runs (about
+# 5 minutes, measured on develop) ends the 13 suite jobs within seconds of
+# their start, which is where about 115 of a run's runner minutes go. The
+# job fails and does not end green: a suite that ended green without
+# testing would read as passed to vm-gate-finalize.yml, which must never
+# hold, also when the label is set again a moment later. The failure is no
+# test result and says so; vm-gate-finalize.yml writes none of it while the
+# label is gone. What these reads do not see (#180):
+#   - a label that is removed after a suite job has read it: that job runs
+#     to its end (17 minutes at most in the runs measured; the timeouts
+#     are 75 to 120), and vm-gate-finalize.yml writes no result while the
+#     label is gone;
+#   - a label that is removed and set again while a run builds or tests: the
+#     run of the new `labeled` event waits for the running one and then
+#     builds and tests the same head a second time, also when the first
+#     run's result already counts. Telling that would take a look at the
+#     other run (actions: read), which no job here may;
+#   - a withdrawal between the reads of consent on a head that changes
+#     nothing covered (vm-gate stays green): the build runs, and the suites'
+#     read ends the run after it.
+# A label that is set a second after a push, so that the push's event
+# already holds it, is no such case as a rule: the push's own run of
+# vm-gate.yml refuses it before it sets pending (#182; the header of
 # vm-gate.yml names when it cannot tell).
 
 on:
@@ -85,6 +109,15 @@ jobs:
   # condition sorts out, without a runner, the events that never start the
   # tests: a push that found no label, and another label that was added.
   # The script then reads the live state, for a pull request only:
+  #   - the head of the pull request, from the API (#180): the commit of
+  #     this run's event must still be it. A push after the event cancels
+  #     the run (concurrency above), so this is the new attempt of an old
+  #     run, whose event is the one of the first attempt, or a run that the
+  #     newer push is about to cancel. The job fails at once, as it does on
+  #     vm-gate's own word for the same fact below, and says that this
+  #     commit has no tests to run: the head has a run of its own. One
+  #     answer that names another head is enough, as it is for vm-gate.yml,
+  #     which reads the same and does not ask twice;
   #   - the label vm-tests, from the API;
   #   - whether it was removed after this run's event (the pull request's
   #     events): the run of a push whose label vm-gate.yml withdrew ends
@@ -117,8 +150,10 @@ jobs:
   # The job ends green when the consent is gone, and every later job is
   # skipped: vm-gate-finalize.yml reads a skipped build as a run that tested
   # nothing and leaves vm-gate as vm-gate.yml set it. The token only reads
-  # (the labels and events of the pull request, the statuses of the head),
-  # as it does for a pull request from a fork; no code is checked out.
+  # (the pull request with its labels and events, the statuses of the head),
+  # as it does for a pull request from a fork; no code is checked out. The
+  # head is compared as text and never run; for a head in a fork it is the
+  # fork's commit, as the event has it.
   # tests/unit/vm-gate.sh runs the script against a stub of gh.
   consent:
     name: consent
@@ -161,6 +196,13 @@ jobs:
           waited="no answer from the API"
           for try in $(seq "${VM_TESTS_TRIES:-60}"); do
             [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
+            # Whether this run's commit is still the head (#180): a new
+            # attempt of an old run has the event of its first attempt.
+            head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq '.head.sha') || continue
+            if [ "$head" != "$SHA" ]; then
+              echo "::error::this commit is not the head of #$NUMBER any more: the VM tests do not run. The head has a run of its own."
+              exit 1
+            fi
             # Whether the pull request has the label right now.
             has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
               --jq '[.[].name] | index("vm-tests") != null') || continue
@@ -286,12 +328,46 @@ jobs:
   # disk and run 6 the running VM of run 5, so they stay with run 1. Runs 9
   # to 12 boot with provisioning data (NoCloud drive, seed URL); 10 to 12
   # wait only for SSH and cloud-init, so they share a job.
+  #
+  # The first step of every suite job (boot, update, data-disk; the same
+  # text in all three, which tests/unit/workflows.sh checks) reads the label
+  # vm-tests once more (#180): the job consent decided before the build, and
+  # the label can have been taken away since. On a pull request only: a run
+  # on a push to develop or by hand has no label, the step is skipped, and
+  # the jobs run as they did.
+  #   - the label is there: the job goes on;
+  #   - the label is gone: the step fails, and with it the job, before
+  #     anything is downloaded or booted. Not green: vm-gate-finalize.yml
+  #     takes a suite whose jobs all succeeded for one that passed, and it
+  #     would say so if the label were set again before it looks. Failed,
+  #     it writes nothing while the label is gone, and "did not pass" if
+  #     the label is back, which the run of that new label then replaces
+  #     with its own result. The steps that report results (`always()`)
+  #     are left out, so the job shows this one error and no missing
+  #     results file, and the job's summary says why the table of the
+  #     report job has no row of it;
+  #   - the label cannot be read (six tries, 10 s apart): the job goes on
+  #     with a warning. consent fails when it cannot read, since nothing
+  #     has been spent then and no consent is known; here the build is
+  #     spent, consent has read the label minutes ago, and stopping would
+  #     throw the run away for an API that did not answer. Running costs
+  #     runner time at worst: vm-gate-finalize.yml reads the label itself
+  #     before it writes a result.
+  # The read is the API's answer about the pull request the event names;
+  # nothing of it is run, and jq only compares the names of the labels with
+  # a fixed one. The token may read the pull request, and the code for the
+  # checkout, and nothing else: a job's permissions replace the
+  # workflow's. As consent, the step is the pull request's own version: it
+  # saves runners and protects nothing.
   boot:
     name: boot (${{ matrix.name }})
     needs: build
     if: contains(fromJSON('["all", "boot"]'), inputs.suites || 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -315,6 +391,36 @@ jobs:
             id: run10
             runs: 10 11 12
     steps:
+      # The consent again, right after the build (#180); the comment above
+      # the job boot says what the step does.
+      - name: Read the label vm-tests again
+        id: label
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ "$EVENT" = pull_request ] || { echo "vm-tests: a run on $EVENT needs no label"; exit 0; }
+          for try in $(seq "${VM_TESTS_TRIES:-6}"); do
+            [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
+            has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
+              --jq '[.[].name] | index("vm-tests") != null') || continue
+            case $has in
+              true)
+                echo "vm-tests: #$NUMBER has the label vm-tests"
+                exit 0 ;;
+              false)
+                echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
+                echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
+                exit 1 ;;
+            esac
+          done
+          echo "::warning::the label vm-tests of #$NUMBER could not be read: the tests run on the consent the job consent found."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Give the runner user access to KVM
@@ -351,12 +457,12 @@ jobs:
           build/in-tools.sh tests/boot/run.sh "${args[@]}"
 
       - name: Check the results
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         run: tests/boot/results.sh .build/boot/results.tsv
 
       # Results, serial consoles and diagnoses only: never the SSH key next to them.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         with:
           name: vm-results-boot-${{ matrix.id }}
           path: |
@@ -377,6 +483,9 @@ jobs:
     if: contains(fromJSON('["all", "update"]'), inputs.suites || 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -391,6 +500,36 @@ jobs:
             id: c
             steps: install uefi
     steps:
+      # The consent again, right after the build (#180); the comment above
+      # the job boot says what the step does.
+      - name: Read the label vm-tests again
+        id: label
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ "$EVENT" = pull_request ] || { echo "vm-tests: a run on $EVENT needs no label"; exit 0; }
+          for try in $(seq "${VM_TESTS_TRIES:-6}"); do
+            [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
+            has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
+              --jq '[.[].name] | index("vm-tests") != null') || continue
+            case $has in
+              true)
+                echo "vm-tests: #$NUMBER has the label vm-tests"
+                exit 0 ;;
+              false)
+                echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
+                echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
+                exit 1 ;;
+            esac
+          done
+          echo "::warning::the label vm-tests of #$NUMBER could not be read: the tests run on the consent the job consent found."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Give the runner user access to KVM
@@ -429,13 +568,13 @@ jobs:
           build/in-tools.sh tests/boot/update.sh "${args[@]}"
 
       - name: Check the results
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         run: tests/boot/results.sh .build/boot/update-results.tsv
 
       # Results, serial consoles and diagnoses only: the run's signing keys and their
       # passphrases lie in .build/update and stay there.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         with:
           name: vm-results-update-${{ matrix.id }}
           path: |
@@ -460,6 +599,9 @@ jobs:
     if: contains(fromJSON('["all", "data-disk"]'), inputs.suites || 'all')
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -481,6 +623,36 @@ jobs:
             steps: build none luks
             dev-disk: false
     steps:
+      # The consent again, right after the build (#180); the comment above
+      # the job boot says what the step does.
+      - name: Read the label vm-tests again
+        id: label
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [ "$EVENT" = pull_request ] || { echo "vm-tests: a run on $EVENT needs no label"; exit 0; }
+          for try in $(seq "${VM_TESTS_TRIES:-6}"); do
+            [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
+            has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
+              --jq '[.[].name] | index("vm-tests") != null') || continue
+            case $has in
+              true)
+                echo "vm-tests: #$NUMBER has the label vm-tests"
+                exit 0 ;;
+              false)
+                echo "gone=true" >>"$GITHUB_OUTPUT"
+                echo "This job tested nothing: #$NUMBER does not have the label vm-tests any more." >>"$GITHUB_STEP_SUMMARY"
+                echo "::error title=No test result::#$NUMBER does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own."
+                exit 1 ;;
+            esac
+          done
+          echo "::warning::the label vm-tests of #$NUMBER could not be read: the tests run on the consent the job consent found."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Give the runner user access to KVM
@@ -528,13 +700,13 @@ jobs:
           build/in-tools.sh tests/boot/data-disk.sh "${args[@]}"
 
       - name: Check the results
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         run: tests/boot/results.sh .build/boot/data-disk-results.tsv
 
       # Results, serial consoles and diagnoses only: the login token and the disks lie
       # in .build/data-disk and stay there.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.label.outputs.gone != 'true'
         with:
           name: vm-results-data-disk-${{ matrix.id }}
           path: |

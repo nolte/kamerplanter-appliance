@@ -14,6 +14,11 @@
 # is what runs a change to them before the merge. The job consent ends a run
 # of the VM tests whose label is gone or whose head vm-gate has not accepted
 # (#152), and vm-gate-finalize reads such a run as one that tested nothing.
+# It also fails on a run whose commit is not the head of the pull request any
+# more, and the first step of the suite jobs of vm-tests.yml, which reads
+# the label again after the build, fails the job when the label is gone
+# (#180); vm-gate-finalize takes that failure for no result while the label
+# is gone.
 #
 # The stub keeps the pull request in files: its labels and events, the
 # vm-gate statuses of each commit, the activity of the head repository, and
@@ -59,6 +64,12 @@ for name, job, script in (("vm-gate", "gate", "vm-gate"), ("vm-gate-finalize", "
     runs = [s["run"] for s in doc["jobs"][job]["steps"] if "run" in s]
     assert len(runs) == 1, f"{name}.yml: the job {job}: expected one script, found {len(runs)}"
     (work / f"{script}.sh").write_text(runs[0])
+# The first step of the suite jobs of vm-tests.yml, which is the same in
+# the three of them (#180).
+jobs = yaml.safe_load((root / ".github" / "workflows" / "vm-tests.yml").read_text())["jobs"]
+first = {jobs[job]["steps"][0].get("run", "") for job in ("boot", "update", "data-disk")}
+assert len(first) == 1 and "" not in first, "vm-tests.yml: the first steps of boot, update and data-disk differ or run no script"
+(work / "vm-tests-label.sh").write_text(first.pop())
 EOF
 
 # --- the stub of gh:
@@ -203,6 +214,7 @@ case "$method $path" in
     "GET pulls/7")
         # The head of #7 right now: `new`, unless a test moved it on, in
         # this repository (10) unless a test says another one, or none.
+        [ ! -e "$STATE/pull-gone" ] || exit 1
         jq -n --arg sha "$(cat "$STATE/head" 2>/dev/null || echo new)" \
             --arg repo "$(cat "$STATE/head-repo" 2>/dev/null || echo 10)" \
             '{head: {sha: $sha, repo: (if $repo == "" then null else {id: ($repo | tonumber)} end)},
@@ -1307,6 +1319,38 @@ jq '.jobs[0].conclusion = "failure"' "$work/state/jobs" >"$work/state/jobs.new" 
 finalize
 expect "a run whose job consent failed: nothing written" "" "$(log)"
 
+# The run whose suite jobs found the label removed after the build (#180):
+# the build succeeded, every suite job failed in its first step, and the
+# report had nothing to list. vm-gate.yml has written its failure on the
+# removal.
+ended() {
+    jq -n '{jobs: ([("consent", "build", "report") | {name: ., status: "completed", conclusion: "success"}]
+        + [("boot (1)", "boot (2)", "update (a)", "data-disk (move)") | {name: ., status: "completed", conclusion: "failure"}])}' \
+        >"$work/state/jobs"
+}
+tested automerge
+had new pending "waiting"
+had new failure "changes the image, build or boot tests: add the label vm-tests"
+ended
+finalize
+expect "a run whose suites ended on the removed label: nothing written" "" "$(log)"
+expect "a run whose suites ended on the removed label: the run says why" \
+    "vm-gate: unchanged (the pull request lacks the label vm-tests)" "$(cat "$work/out")"
+# The label was set again before the run completed, and vm-gate.yml accepted
+# the head for it: the failure is written, never a pass, and the run of the
+# new label replaces it. (Had the jobs ended green, this would be the case
+# "pending and the label: the result is written" above, a pass of tests
+# that never ran, which is why they fail.)
+tested vm-tests
+had new failure "changes the image, build or boot tests: add the label vm-tests"
+had new pending "waiting"
+ended
+finalize
+expect "a run whose suites ended on the removed label, the label set again: did not pass" \
+    "failure the VM tests of this commit did not pass (boot: failure)" "$(last new)"
+expect "a run whose suites ended on the removed label, the label set again: no state for automerge to merge on" \
+    "state=failure" "$(cat "$work/output")"
+
 # --- vm-tests.yml, the job consent ---
 # consent ACTION [NAME=VALUE]...: one run of the job's script for the head
 # `new` of #7, on a pull request's event from 13:00:00, the second the label
@@ -1502,6 +1546,128 @@ had_at new 13:00:08 failure "$(cut -d' ' -f2- <<<"$moved")"
 consent labeled
 expect "a commit that is not the head any more: the job fails at once" \
     "1 ::error::this commit is not the head of #7 any more (vm-gate): the VM tests do not run." "$code $(tail -n1 "$work/out")"
+
+echo "# vm-tests.yml: a run whose commit is not the head any more builds nothing (#180)"
+# A new attempt of an old run: its event names the commit `new`, and the
+# head of #7 has moved on. The label and vm-gate's status of `new` are as
+# they were when the first attempt ran.
+moved_on='1 ::error::this commit is not the head of #7 any more: the VM tests do not run. The head has a run of its own.'
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+echo newer >"$work/state/head"
+consent labeled
+expect "a new attempt on a commit that is not the head any more: the job fails at once" \
+    "$moved_on" "$code $(tail -n1 "$work/out")"
+expect "a new attempt on a commit that is not the head any more: nothing for the build" "" "$(cat "$work/output")"
+# The script without the comparison must come out differently, or the case
+# above would pass on something else.
+# shellcheck disable=SC2016  # the script's own variables, not this one's
+sed 's|\[ "$head" != "$SHA" \]|[ "$head" != "$head" ]|' "$work/vm-tests-consent.sh" >"$work/changed.sh"
+consent_script=$work/changed.sh
+consent labeled
+expect "the script without the comparison of the head: the tests run" "0 run=true" "$(ran)"
+consent_script=$work/vm-tests-consent.sh
+
+# The head comes first: the label of the pull request says nothing about a
+# commit that is not its head.
+reset automerge
+echo newer >"$work/state/head"
+consent synchronize
+expect "not the head any more, and the label gone: the job fails, it does not end green" \
+    "$moved_on" "$code $(tail -n1 "$work/out")"
+
+# A commit that is the head a second time (a force push back to it).
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+echo new >"$work/state/head"
+consent labeled
+expect "the commit is the head: the tests run" "0 run=true" "$(ran)"
+
+# What cannot be read is no consent.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+touch "$work/state/pull-gone"
+consent labeled
+expect "the pull request cannot be read: the tests do not run" "1 " "$(ran)"
+expect "the pull request cannot be read: the run says so" \
+    "::error::vm-gate has not accepted this commit for the VM tests (no answer from the API): the VM tests do not run. Remove the label vm-tests and set it again, or run the failed jobs again once vm-gate has accepted the commit." \
+    "$(tail -n1 "$work/out")"
+
+# --- vm-tests.yml, the first step of the suite jobs ---
+# suite [NAME=VALUE]...: one run of the step's script in a job of a pull
+# request's run on #7; the exit code is in $code and what the step hands to
+# the later steps in $work/output.
+label_script=$work/vm-tests-label.sh
+suite() {
+    : >"$work/output"
+    rm -f "$work/summary"
+    env PATH="$work/bin:$PATH" STATE="$work/state" GH_TOKEN=none GITHUB_OUTPUT="$work/output" \
+        GITHUB_STEP_SUMMARY="$work/summary" \
+        REPO=example/appliance EVENT=pull_request NUMBER=7 VM_TESTS_PAUSE=0 VM_TESTS_TRIES=3 "$@" \
+        bash "$label_script" >"$work/out" 2>&1 </dev/null
+    code=$?
+}
+gone='1 gone=true ::error title=No test result::#7 does not have the label vm-tests any more: this job ends before it tests anything, and its failure is no result of the VM tests. Setting the label again starts a run of its own.'
+
+echo "# vm-tests.yml: a suite job tests only while the pull request has the label (#180)"
+reset vm-tests automerge
+suite
+expect "the label is there after the build: the job goes on" "0  vm-tests: #7 has the label vm-tests" \
+    "$code $(cat "$work/output") $(cat "$work/out")"
+
+reset automerge
+suite
+expect "the label was removed while the build ran: the job fails and says that this is no test result" \
+    "$gone" "$code $(cat "$work/output") $(tail -n1 "$work/out")"
+expect "the label was removed while the build ran: the job's summary says that it tested nothing" \
+    "This job tested nothing: #7 does not have the label vm-tests any more." "$(cat "$work/summary")"
+reset
+suite
+expect "no label at all: the job fails" "$gone" "$code $(cat "$work/output") $(tail -n1 "$work/out")"
+
+# Removed and set again before the job looked: the consent is there.
+reset vm-tests
+unlabelled 13:10:00 1
+labelled 13:10:30 1
+suite
+expect "the label removed and set again before the job looked: the job goes on" "0 " "$code $(cat "$work/output")"
+
+reset "${filler[@]}" vm-tests
+suite
+expect "the label as the 41st of the pull request: the job goes on" "0 " "$code $(cat "$work/output")"
+# The same labels read as a page of 30: the copy of the script must come out
+# differently, or the case above does not test the page.
+sed 's|/labels?per_page=100"|/labels"|' "$work/vm-tests-label.sh" >"$work/changed.sh"
+label_script=$work/changed.sh
+suite
+expect "the labels read as a page of 30: the label is not seen" "1 gone=true" "$code $(cat "$work/output")"
+label_script=$work/vm-tests-label.sh
+
+# The build is spent and the job consent has read the label: an API that
+# does not answer does not throw the run away.
+reset vm-tests
+touch "$work/state/labels-gone"
+suite
+expect "the labels cannot be read: the job goes on, with a warning" \
+    "0  ::warning::the label vm-tests of #7 could not be read: the tests run on the consent the job consent found." \
+    "$code $(cat "$work/output") $(tail -n1 "$work/out")"
+reset
+touch "$work/state/labels-gone"
+suite
+expect "the labels cannot be read and the label is gone: the job goes on (the finalizer reads the label itself)" \
+    "0 " "$code $(cat "$work/output")"
+
+# A run on a push to develop or by hand has no pull request and no label:
+# the step's condition leaves it out, and the script asks nothing either
+# (the stub would fail the call).
+reset
+touch "$work/state/labels-gone"
+suite EVENT=push NUMBER=''
+expect "a push to develop: nothing is read, the job goes on" "0  vm-tests: a run on push needs no label" \
+    "$code $(cat "$work/output") $(cat "$work/out")"
+suite EVENT=workflow_dispatch NUMBER=''
+expect "a run by hand: nothing is read, the job goes on" "0  vm-tests: a run on workflow_dispatch needs no label" \
+    "$code $(cat "$work/output") $(cat "$work/out")"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed"

@@ -112,9 +112,14 @@ name: vm-gate
 # taken back here (#152), but it is the pull request's own version of that
 # job, so a pull request that rewrites it still runs that head's code once.
 # And it decides once, on the status it finds: a label that is taken away
-# after it let a run through does not stop that run (#180), as in the case
-# of the two clocks above.
-# The result of such a run does not count. That job reads vm-gate's
+# after it let a run through, as in the case of the two clocks above, ends
+# that run only where it reads the label again, which is the first step of
+# each suite job, after the build (#180). A suite job that has read the
+# label runs to its end, and a label that is removed and set again while a
+# run goes on has the head built and tested a second time by the label's
+# own run.
+# The result of a run counts only while the label is set when
+# vm-gate-finalize.yml looks. The job consent reads vm-gate's
 # status by its text: it runs on pending and green from here and on a
 # result that vm-gate-finalize.yml wrote, the same three as accepted()
 # below and as vm-gate-finalize.yml, and it gives up at once on "it is not
