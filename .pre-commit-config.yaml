@@ -116,6 +116,23 @@ repos:
         files: '^image/rootfs/usr/lib/kamerplanter/env\.sh$'
         types: [file]
 
+      # In a listing with paths (lsblk -p, --paths) the kernel name is a path
+      # as well: KNAME and PKNAME read /dev/sdb, and a sysfs path built from
+      # them (/sys/class/block//dev/sdb/holders) never exists, so the search
+      # in it finds nothing: no holder, no partition, no device below (#185).
+      # The shipped scripts list paths with the column NAME and ask for the
+      # kernel name of one device without paths (kname in
+      # /usr/libexec/kamerplanter/disks). This refuses an lsblk call with a p
+      # among its short options, or --paths, that names KNAME or PKNAME, on
+      # one line, also in a comment. Not seen: columns named on another line
+      # or held in a variable, and a kernel name cut out of the column NAME.
+      - id: no-kernel-name-from-lsblk-paths
+        name: No KNAME or PKNAME from an lsblk listing with paths in the image's scripts
+        language: pygrep
+        entry: '\blsblk\b[^|;)]*\s(-[A-Za-z]*p[A-Za-z]*|--paths)\b[^|;)]*\bP?KNAME\b'
+        files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
+        types: [file]
+
       # A rename onto a name that is a directory moves the file into that
       # directory and succeeds: the write is reported, the file not replaced
       # (#144, #162). The shipped scripts rename with "mv -fT -- " (replace in
