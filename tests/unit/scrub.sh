@@ -968,6 +968,17 @@ stub_stat_fails '*/var/lib/cloud/' : 2
 rc=$(PATH=$SB/stub:$PATH run_scrub)
 expect "the file system of /var/lib/cloud cannot be told only when the status is handed out: the status is not rewritten, that is named once, the copies are kept, the scrub fails" "1|$status_before|1|1|yes" \
     "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud cannot be told, and so not whether $SB/var/lib/cloud/data is on another one; the error messages in cloud-init's status and result in it are not replaced" "$SB/out")|$(exists "$i/cloud-config.txt")"
+# It cannot be told at all: named once, where the directories on another file
+# system are looked for, and where the status and result are handed out only
+# what follows for them is said, once (#184).
+new_appliance
+booted iid-1
+unreadable_copies
+status_before=$(md5sum <"$SB/var/lib/cloud/data/status.json")
+stub_stat_fails '*/var/lib/cloud/'
+rc=$(PATH=$SB/stub:$PATH run_scrub)
+expect "the file system of /var/lib/cloud cannot be told, no copy can be read: the status is not rewritten, the cause is named once and that the error messages are not replaced once, the copies are kept, the scrub fails" "1|$status_before|1|1|1|yes" \
+    "$rc|$(md5sum <"$SB/var/lib/cloud/data/status.json")|$(grep -cF "cannot be told" "$SB/out")|$(grep -cF "the file system of $SB/var/lib/cloud cannot be told; whether everything in it was searched is not known" "$SB/out")|$(grep -cF "the error messages in cloud-init's status and result in $SB/var/lib/cloud/data are not replaced: whether it is on another file system is not known (see above)" "$SB/out")|$(exists "$i/cloud-config.txt")"
 # Two causes, two messages: the file system of /var/lib/cloud cannot be told
 # when the directories on another one are looked for (asked the first time),
 # and that of /var/lib/cloud/data cannot when the status and result are handed

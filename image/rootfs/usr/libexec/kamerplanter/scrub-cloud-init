@@ -74,14 +74,15 @@
 # named once. So when the logs go (see below) and the file system of
 # /var/lib/cloud/data is another or cannot be told, or that of /var/lib/cloud
 # cannot, so that the two are not compared: the status and result in
-# it are not rewritten, and their error messages stay as they are on every
-# such boot, while the logs are deleted and the unit fails all the same. That
-# is decided (#173): they are not replaced through an open of their own that
-# follows no link, since no search enters that directory and nothing else in
-# it is rewritten either. The next boot retries. A copy that cannot be deleted
-# is named, and the unit fails, and so does a log that cannot be deleted when
-# it is to be (see below). The services do not wait for the scrub, and the
-# update's health check does not look at it: a failed scrub stops nothing.
+# /var/lib/cloud/data are not rewritten, and their error messages stay as
+# they are on every such boot, while the logs are deleted and the unit fails
+# all the same. That is decided (#173): they are not replaced through an open
+# of their own that follows no link, since no search enters that directory and
+# nothing else in it is rewritten either. The next boot retries. A copy that
+# cannot be deleted is named, and the unit fails, and so does a log that cannot
+# be deleted when it is to be (see below). The services do not wait for the
+# scrub, and the update's health check does not look at it: a failed scrub
+# stops nothing.
 #
 # When an instance has copies but none of them can be read, its secrets are
 # not known; so when it holds only an obj.pkl, which is not read here, or
@@ -237,7 +238,7 @@ foreign() {
 # a PATH that cannot be looked at for another reason, such as a file system
 # that refuses root, is not gone. PATH is looked at without a trailing slash:
 # with one, a symbolic link at PATH would be followed, and one that leads
-# nowhere would pass for gone (#184).
+# nowhere would pass for gone (#184). PATH is never "/".
 gone() {
     python3 -I -c '
 import os, sys
@@ -992,9 +993,10 @@ main() {
         # again, and named here only when it is not named yet, so that one
         # cause has one message (#170). Which of the two file systems cannot
         # be told is a cause each: /var/lib/cloud named above does not cover
-        # /var/lib/cloud/data here, nor the other way round (#184). A cause
-        # that is named above says nothing of the status and result: what
-        # follows from it here is said without naming it again.
+        # /var/lib/cloud/data here, nor the other way round (#184). A file
+        # system that cannot be told and is named above (told) says nothing
+        # of the status and result: what follows from it here is said
+        # without naming it again.
         unreplaced="the error messages in cloud-init's status and result in ${cloud_lib}data are not replaced: whether it is on another file system is not known (see above)"
         rc=0
         list got status_files || rc=$?
