@@ -299,22 +299,70 @@ if [ "$(id -u)" != 0 ]; then
     locked_held "pins that cannot be read are not taken for none" "mkdir -p var/lib/kamerplanter/pinned && touch var/lib/kamerplanter/pinned/FERNET_KEY" var/lib/kamerplanter/pinned
     locked_held "database data that cannot be read is not taken for none" "mkdir -p $vol/arangodb_data/_data && touch $vol/arangodb_data/_data/ENGINE" "$vol/arangodb_data/_data"
 fi
-# Baselines, which #185 will change: lsblk -p prints KNAME as a path, so
-# in_use and roots look for /sys/class/block//dev/NAME/..., which never
-# exists. Today in_use sees no holder, and roots prints every row. These
-# passed before #169 as well: its change keeps the results as they were.
-no_device() {  # no_device FUNCTION: FUNCTION of a device, with lsblk answering as lsblk -p does
+# in_use and roots read sysfs by the kernel name (#185). The lsblk stub
+# answers as lsblk does: paths for a listing with paths (-nrpo NAME, -nrspo
+# NAME), where the kernel name would be a path as well, and the bare kernel
+# name for one device asked without paths (-nrdo KNAME, what kname asks).
+# sysfs is a directory here: a disk, a partition on it, a mapped device built
+# on the partition, and another disk; /dev/kp-none is listed but not there,
+# and /dev/kp-gone has no kernel name any more.
+blk=$(mktemp -d "$work/sys-block.XXXXXX")
+mkdir -p "$blk/kp-disk/holders" "$blk/kp-disk/slaves" "$blk/kp-disk1/holders" \
+    "$blk/kp-dm/holders" "$blk/kp-dm/slaves" "$blk/kp-other/holders" "$blk/kp-other/slaves"
+touch "$blk/kp-disk1/partition" "$blk/kp-dm/slaves/kp-disk1"
+echo "Filename Type Size Used Priority" >"$blk/swaps"
+with_devices() {  # with_devices FUNCTION ROWS [MOUNTED]: FUNCTION of /dev/kp-disk, with lsblk listing ROWS (failing without any), sysfs and the swap areas in $blk, MOUNTED mounted at /mnt, and the running system on /dev/kp-disk. The names kp_* differ from the locals of the functions under test.
     (
+        kp_rows=$2 kp_mounted=${3-}
+        # shellcheck disable=SC2034 # read by the function under test
+        sys_block=$blk swaps=$blk/swaps
         # shellcheck disable=SC2329 # called by the function under test
-        lsblk() { echo "/dev/kp-none /dev/kp-none"; }
+        lsblk() {
+            local kp_dev=${*: -1}
+            case $1 in
+                -nrdo) [ "$kp_dev" != /dev/kp-gone ] || return 32; echo "${kp_dev##*/}" ;;
+                -nrpo | -nrspo) [ -n "$kp_rows" ] || return 32; printf '%s\n' "$kp_rows" ;;
+                *) return 1 ;;
+            esac
+        }
         # shellcheck disable=SC2329 # called by the function under test
-        findmnt() { :; }
-        out=$("$1" /dev/kp-none 2>/dev/null); rc=$?
+        findmnt() { if [ -n "$kp_mounted" ] && [ "${*: -1}" = "$kp_mounted" ]; then echo /mnt; fi; }
+        # shellcheck disable=SC2329 # called by the function under test
+        system_disks() { echo /dev/kp-disk; }
+        out=$("$1" /dev/kp-disk 2>/dev/null); rc=$?
         printf '%s|%s' "$out" "$rc"
     )
 }
-expect "in_use, baseline until #185: a device not mounted and no swap is not in use, no holder is looked up" "|1" "$(no_device in_use)"
-expect "roots, baseline until #185: every row lsblk lists is printed" "/dev/kp-none|0" "$(no_device roots)"
+on_disk=$'/dev/kp-disk\n/dev/kp-disk1'
+expect "in_use: a disk and its partition that nothing holds are not in use" "|1" "$(with_devices in_use "$on_disk")"
+touch "$blk/kp-disk1/holders/kp-dm"
+expect "in_use: a partition held by a mapped device is in use" "/dev/kp-disk1 is in use by kp-dm|0" "$(with_devices in_use "$on_disk")"
+expect "in_use: a held device whose holder is mounted is reported by the mount" "/dev/mapper/kp-dm is mounted at /mnt|0" \
+    "$(with_devices in_use "$on_disk"$'\n/dev/mapper/kp-dm' /dev/mapper/kp-dm)"
+rm "$blk/kp-disk1/holders/kp-dm"
+expect "in_use: once the mapped device is closed, the partition is not in use" "|1" "$(with_devices in_use "$on_disk")"
+echo "/dev/kp-disk1 partition 1024 0 -2" >>"$blk/swaps"
+expect "in_use: a partition used as swap is in use" "/dev/kp-disk1 is used as swap|0" "$(with_devices in_use "$on_disk")"
+echo "Filename Type Size Used Priority" >"$blk/swaps"
+expect "in_use: holders that cannot be read count as in use" \
+    "whether anything holds /dev/kp-none cannot be read ($blk/kp-none/holders)|0" \
+    "$(with_devices in_use "$on_disk"$'\n/dev/kp-none')"
+expect "in_use: a device without a kernel name counts as in use" \
+    "whether anything holds /dev/kp-gone cannot be read: it has no kernel name|0" \
+    "$(with_devices in_use "$on_disk"$'\n/dev/kp-gone')"
+expect "in_use: devices that cannot be listed count as in use" \
+    "the devices on /dev/kp-disk cannot be listed, so whether it is in use is not known|0" "$(with_devices in_use "")"
+below=$'/dev/mapper/kp-dm\n/dev/kp-disk1\n/dev/kp-disk'
+expect "roots: of a mapped device on a partition, only the whole disk" "/dev/kp-disk|0" "$(with_devices roots "$below")"
+expect "roots: a device whose slaves cannot be read is printed as well" $'/dev/kp-disk\n/dev/kp-none|0' \
+    "$(with_devices roots "$below"$'\n/dev/kp-none')"
+expect "roots: a device without a kernel name is printed as well" $'/dev/kp-disk\n/dev/kp-gone|0' \
+    "$(with_devices roots "$below"$'\n/dev/kp-gone')"
+expect "system_device: a device built on the disk of the running system belongs to it" \
+    "it is on /dev/kp-disk, the disk holding the running system|0" "$(with_devices system_device "$below")"
+expect "system_device: another whole disk does not" "|1" "$(with_devices system_device /dev/kp-other)"
+expect "system_device: a disk whose devices cannot be listed counts as the system" \
+    "the disk it lies on cannot be determined|0" "$(with_devices system_device "")"
 
 # Key files (E14): metadata only; owned by root and readable by root only.
 keydir=$(mktemp -d "$work/keys.XXXXXX")

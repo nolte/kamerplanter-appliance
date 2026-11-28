@@ -187,6 +187,9 @@ update_state=/var/lib/kamerplanter/update
 update_backups=$update_state/backups
 # The kernel command line, which must not carry a key: every user reads it.
 cmdline=/proc/cmdline
+# Where the kernel lists the block devices and the swap areas.
+sys_block=/sys/class/block
+swaps=/proc/swaps
 # Disk naming on the system disk (see Naming); the keys read from it.
 naming_file=$records/naming.env
 naming_keys=(DATA_DISK DATA_DISK_FORCE BACKUP_DISK BACKUP_DISK_FORCE)
@@ -842,21 +845,28 @@ not_local() {
 }
 
 # roots DEVICE: the devices DEVICE is built on that are built on nothing
-# themselves: its whole disk, not a partition or a mapped device.
+# themselves: its whole disk, not a partition or a mapped device. sysfs is
+# read by the kernel name, which kname asks for row by row: in a listing
+# with paths the kernel name is a path as well (/dev/sdb, util-linux 2.41),
+# and a sysfs path built from that never exists (#185; the pre-commit hook
+# no-kernel-name-from-lsblk-paths refuses it). A device whose kernel name or
+# slaves cannot be read is printed as well: system_device compares these
+# names for the disk and for the running system, and a device both are built
+# on is one more name they share, so a name too many never hides a shared
+# disk.
 roots() {
-    local path kname below
-    while read -r path kname; do
-        [ -n "$kname" ] && [ ! -e "/sys/class/block/$kname/partition" ] || continue
-        # This search fails on every device today, and the test for a
-        # partition above never finds one: with -p lsblk prints KNAME as a
-        # path (/dev/sdb), so neither path exists in sysfs, and every row of
-        # the tree is printed (#185). The status of the search says nothing
-        # here, so it is dropped and the result kept as it was (what the
-        # search did print decides, as before) until #185 decides it.
-        list below find "/sys/class/block/$kname/slaves" -mindepth 1 -maxdepth 1 -print0 2>/dev/null || true
-        [ ${#below[@]} -eq 0 ] || continue
+    local path k below
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        k=$(kname "$path")
+        if [ -n "$k" ]; then
+            [ ! -e "$sys_block/$k/partition" ] || continue
+            if list below find "$sys_block/$k/slaves" -mindepth 1 -maxdepth 1 -print0 2>/dev/null; then
+                [ ${#below[@]} -eq 0 ] || continue
+            fi
+        fi
         echo "$path"
-    done < <(lsblk -nrspo NAME,KNAME -- "$1") | sort -u
+    done < <(lsblk -nrspo NAME -- "$1") | sort -u
 }
 
 # The whole disks that hold the running system: below the mounted system
@@ -867,7 +877,7 @@ system_disks() {
         for mp in / /sysroot /boot /boot/efi /usr /etc /var; do
             findmnt -rnvo SOURCE -T "$mp" 2>/dev/null || true
         done
-        awk 'NR > 1 {print $1}' /proc/swaps
+        awk 'NR > 1 {print $1}' "$swaps"
     } | sort -u | while IFS= read -r src; do
         [ -b "$src" ] || continue
         roots "$src"
@@ -888,22 +898,34 @@ system_device() {
     return 1
 }
 
-# in_use DEVICE: prints why DEVICE or a partition on it is in use (mounted,
-# swap, or held by a device mapper or RAID device); fails when it is not.
+# in_use DEVICE: prints why DEVICE, a partition on it or a device built on
+# it is in use (mounted, swap, or held by a device mapper or RAID device);
+# fails when it is not. A listing of the devices, a kernel name or holders
+# that cannot be read count as in use: the caller formats the device only
+# when nothing is known to hold it. (A mount table or swap areas that cannot
+# be read show no mount and no swap, as before.) Mounts and swap are looked
+# at on every device first, so a held device that is mounted is reported by
+# its mount. The holders are read from sysfs by the kernel name, which kname
+# asks for row by row (see roots, #185). Called in a condition, where set -e
+# does not apply, so the listing and the search of the holders are checked.
 in_use() {
-    local d k at holders=()
-    while read -r d k; do
+    local rows d k at holders=()
+    rows=$(tree "$1" 2>/dev/null) && [ -n "$rows" ] ||
+        { echo "the devices on $1 cannot be listed, so whether it is in use is not known"; return 0; }
+    while IFS= read -r d; do
         at=$(findmnt -rno TARGET -S "$d" 2>/dev/null | head -n1 || true)
         if [ -n "$at" ]; then echo "$d is mounted at $at"; return 0; fi
-        if awk 'NR > 1 {print $1}' /proc/swaps | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
-        # This search fails on every device today: with -p lsblk prints
-        # KNAME as a path (/dev/sdb), so the path does not exist in sysfs and
-        # no holder is ever seen (#185). The status of the search says
-        # nothing here, so it is dropped and the result kept as it was (what
-        # the search did print decides, as before) until #185 decides it.
-        list holders find "/sys/class/block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null || true
+        if awk 'NR > 1 {print $1}' "$swaps" | grep -Fqx -- "$d"; then echo "$d is used as swap"; return 0; fi
+    done <<<"$rows"
+    while IFS= read -r d; do
+        k=$(kname "$d")
+        if [ -z "$k" ]; then echo "whether anything holds $d cannot be read: it has no kernel name"; return 0; fi
+        if ! list holders find "$sys_block/$k/holders" -mindepth 1 -maxdepth 1 -printf '%f\0' 2>/dev/null; then
+            echo "whether anything holds $d cannot be read ($sys_block/$k/holders)"
+            return 0
+        fi
         if [ ${#holders[@]} -gt 0 ]; then echo "$d is in use by ${holders[*]}"; return 0; fi
-    done < <(lsblk -nrpo NAME,KNAME -- "$1")
+    done <<<"$rows"
     return 1
 }
 
@@ -1053,7 +1075,9 @@ signatures() {
 # content goes from file to file (cmp, cat into a new file) and to cryptsetup
 # as --key-file, never into a variable, an argument or a message.
 
-# kname DEVICE: the kernel name of DEVICE (dm-3 for /dev/mapper/NAME).
+# kname DEVICE: the kernel name of DEVICE (dm-3 for /dev/mapper/NAME), as
+# sysfs lists it: asked for without paths, so it is never a path. Empty when
+# it cannot be read.
 kname() { lsblk -nrdo KNAME -- "$1" 2>/dev/null || true; }
 
 # mapping_uuid: the UUID of the LUKS2 container open as this role's mapper;
