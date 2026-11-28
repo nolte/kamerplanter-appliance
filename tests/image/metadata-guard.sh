@@ -414,7 +414,16 @@ generated() {
     python3 -c "$QUADLET_CHECK" "$network" <<<"$out"
 }
 refused() { sed -nE "s/^refused ([^:]*)\.service: .*/\1/p" | LC_ALL=C sort -u | paste -sd ";" | grep . || echo none; }
-shipped=$(find "$quadlets" -maxdepth 1 -name "kamerplanter-*.container" | wc -l)
+# The shipped units are counted as list reads a search in the image'"'"'s
+# scripts (/usr/lib/kamerplanter/env.sh): into an array, and the status of find
+# is read. Counted with wc -l in a command substitution, a search that failed
+# only counted fewer units, and the check below compared the generator'"'"'s
+# output with that number (#189; the pre-commit hook
+# no-find-in-command-substitution refuses that form in this file).
+mapfile -d "" -t units < <(find "$quadlets" -maxdepth 1 -name "kamerplanter-*.container" -print0)
+wait "$!"
+expect "quadlets: the search for the shipped container units succeeds" 0 $?
+shipped=${#units[@]}
 found=$(generated)
 expect "quadlets: the generator translates the shipped units, and every container unit is checked" "kamerplanter|exit 0|yes|$shipped" \
     "$network|$(grep "^exit " <<<"$found")|$([ "$shipped" -gt 0 ] && echo yes)|$(grep -c "^container " <<<"$found")"
