@@ -32,7 +32,9 @@ name: vm-tests
 # rewrite this file. What protects the result is vm-gate-finalize.yml, which
 # counts none of a commit vm-gate did not accept. The job also fails, before
 # the build, on a run whose commit is not the head of the pull request any
-# more, which a new attempt of an old run is (#180).
+# more, which a new attempt of an old run is (#180), and it ends the run of
+# a pull request that is closed or merged, which a new attempt on its last
+# head is (#195).
 #
 # consent decides once, before the build, so every job of the three suites
 # reads the label once more in its first step and fails there when the
@@ -118,6 +120,16 @@ jobs:
   #     commit has no tests to run: the head has a run of its own. One
   #     answer that names another head is enough, as it is for vm-gate.yml,
   #     which reads the same and does not ask twice;
+  #   - whether the pull request is open, from the same answer (#195): a
+  #     new attempt of a run on the last head of a pull request that was
+  #     closed or merged since can still find the label and, with a status
+  #     newer than the event, vm-gate's word. The run ends as it does for
+  #     a label that is gone, before the label is read: nobody waits for
+  #     the tests of a pull request that is not open, and no label is to
+  #     be set again. vm-gate-finalize.yml writes nothing for such a run,
+  #     green or red: it looks among the open pull requests only, and
+  #     reads the skipped build if the pull request was reopened
+  #     meanwhile. A state that is neither open nor closed is no answer;
   #   - the label vm-tests, from the API;
   #   - whether it was removed after this run's event (the pull request's
   #     events): the run of a push whose label vm-gate.yml withdrew ends
@@ -147,9 +159,10 @@ jobs:
   # this event; its other refusals can be followed by pending (another
   # label's run before the run of vm-tests' own event), so the job waits.
   #
-  # The job ends green when the consent is gone, and every later job is
-  # skipped: vm-gate-finalize.yml reads a skipped build as a run that tested
-  # nothing and leaves vm-gate as vm-gate.yml set it. The token only reads
+  # The job ends green when the consent is gone or the pull request is not
+  # open, and every later job is skipped: vm-gate-finalize.yml reads a
+  # skipped build as a run that tested nothing and leaves vm-gate as
+  # vm-gate.yml set it. The token only reads
   # (the pull request with its labels and events, the statuses of the head),
   # as it does for a pull request from a fork; no code is checked out. The
   # head is compared as text and never run; for a head in a fork it is the
@@ -197,11 +210,23 @@ jobs:
           for try in $(seq "${VM_TESTS_TRIES:-60}"); do
             [ "$try" = 1 ] || sleep "${VM_TESTS_PAUSE:-10}"
             # Whether this run's commit is still the head (#180): a new
-            # attempt of an old run has the event of its first attempt.
-            head=$(gh api "repos/$REPO/pulls/$NUMBER" --jq '.head.sha') || continue
+            # attempt of an old run has the event of its first attempt. And
+            # whether the pull request is open (#195), from the same answer:
+            # three words, none of them empty.
+            pull=$(gh api "repos/$REPO/pulls/$NUMBER" \
+              --jq '"\(.head.sha // "none") \(.state // "unknown") \(.merged == true)"') || continue
+            read -r head state merged <<<"$pull"
             if [ "$head" != "$SHA" ]; then
               echo "::error::this commit is not the head of #$NUMBER any more: the VM tests do not run. The head has a run of its own."
               exit 1
+            fi
+            if [ "$state" != open ]; then
+              if [ "$state" != closed ]; then
+                waited="the state of #$NUMBER could not be read"
+                continue
+              fi
+              [ "$merged" != true ] || state=merged
+              decide false "#$NUMBER is $state: a pull request that is not open has no VM tests to run"
             fi
             # Whether the pull request has the label right now.
             has=$(gh api "repos/$REPO/issues/$NUMBER/labels?per_page=100" \
