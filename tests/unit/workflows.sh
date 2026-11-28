@@ -493,7 +493,7 @@ else:
 # label (#195): one read of the pull request, not two.
 state_read = consent_script.find('[ "$state" != open ]')
 if consent_script.count('gh api "repos/$REPO/pulls/$NUMBER"') == 1 and head_read < state_read < label_read and \
-        ".state" in consent_script and ".merged" in consent_script:
+        '(.state // "unknown")' in consent_script and ".merged" in consent_script:
     print("ok vm-tests.yml: the job consent reads whether the pull request is open, with the head and before the label")
 else:
     print("FAIL vm-tests.yml: the job consent does not read whether the pull request is open from its one "

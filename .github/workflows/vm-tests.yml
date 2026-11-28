@@ -125,11 +125,13 @@ jobs:
   #     closed or merged since can still find the label and, with a status
   #     newer than the event, vm-gate's word. The run ends as it does for
   #     a label that is gone, before the label is read: nobody waits for
-  #     the tests of a pull request that is not open, and no label is to
-  #     be set again. vm-gate-finalize.yml writes nothing for such a run,
-  #     green or red: it looks among the open pull requests only, and
-  #     reads the skipped build if the pull request was reopened
-  #     meanwhile. A state that is neither open nor closed is no answer;
+  #     the tests of a pull request that is not open. vm-gate-finalize.yml
+  #     writes nothing for such a run, green or red: it looks among the
+  #     open pull requests only, and reads the skipped build if the pull
+  #     request was reopened meanwhile. A state that is neither open nor
+  #     closed is no answer. Like the head above, this is read only by an
+  #     attempt that runs this job: running only the failed jobs of a run
+  #     whose consent passed does not ask again (not measured);
   #   - the label vm-tests, from the API;
   #   - whether it was removed after this run's event (the pull request's
   #     events): the run of a push whose label vm-gate.yml withdrew ends
