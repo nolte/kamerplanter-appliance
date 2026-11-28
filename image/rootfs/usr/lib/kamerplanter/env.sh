@@ -607,7 +607,7 @@ backup_create() {
 # and link counts, which differ, are not part of them.
 backup_checksums() (
     export LC_ALL=C
-    # Whatever the caller's options: a find that fails in a pipe below fails it (#189).
+    # Whatever the caller's options: a find that fails makes its pipe below fail (#189).
     set -o pipefail
     which=$1
     shift

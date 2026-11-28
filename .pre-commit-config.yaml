@@ -70,7 +70,9 @@ repos:
       # substitution is not seen. Nor is a find in a quoted string, so that a
       # message may hold the word ($(echo "cannot find it"), #189): that lets
       # through sh -c "find ..." too, and a find after a quote that is not
-      # closed on the line (an apostrophe in a comment, an escaped quote).
+      # closed on the line (an apostrophe in a comment, an escaped quote, or
+      # the one apostrophe that metadata-guard.sh writes inside its quoted
+      # script).
       # Refused although it searches nothing: the word in a message that is
       # not quoted. Outside the image, tests/image/metadata-guard.sh is
       # checked, which runs in the image and counts the shipped units; the
