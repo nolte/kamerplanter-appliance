@@ -123,13 +123,14 @@ repos:
       # The shipped scripts list paths with the column NAME and ask for the
       # kernel name of one device without paths (kname in
       # /usr/libexec/kamerplanter/disks). This refuses an lsblk call with a p
-      # among its short options, or --paths, that names KNAME or PKNAME, on
-      # one line, also in a comment. Not seen: columns named on another line
-      # or held in a variable, and a kernel name cut out of the column NAME.
+      # among its short options, or --paths, that names KNAME or PKNAME
+      # before or after it, on one line, also in a comment. Not seen: columns
+      # named on another line or held in a variable, and a kernel name cut
+      # out of the column NAME.
       - id: no-kernel-name-from-lsblk-paths
         name: No KNAME or PKNAME from an lsblk listing with paths in the image's scripts
         language: pygrep
-        entry: '\blsblk\b[^|;)]*\s(-[A-Za-z]*p[A-Za-z]*|--paths)\b[^|;)]*\bP?KNAME\b'
+        entry: '\blsblk\b[^|;)]*(\s(-[A-Za-z]*p[A-Za-z]*|--paths)\b[^|;)]*\bP?KNAME\b|\bP?KNAME\b[^|;)]*\s(-[A-Za-z]*p[A-Za-z]*|--paths)\b)'
         files: '^image/rootfs/usr/(libexec/kamerplanter/.*|lib/kamerplanter/.*\.sh|bin/kamerplanter-.*|lib/systemd/system-generators/kamerplanter-.*)$'
         types: [file]
 

@@ -900,12 +900,14 @@ system_device() {
 
 # in_use DEVICE: prints why DEVICE, a partition on it or a device built on
 # it is in use (mounted, swap, or held by a device mapper or RAID device);
-# fails when it is not. What cannot be read counts as in use: the caller
-# formats the device only when nothing is known to hold it. Mounts and swap
-# are looked at on every device first, so a held device that is mounted is
-# reported by its mount. The holders are read from sysfs by the kernel name,
-# which kname asks for row by row (see roots, #185). Called in a condition,
-# where set -e does not apply, so every step is checked.
+# fails when it is not. A listing of the devices, a kernel name or holders
+# that cannot be read count as in use: the caller formats the device only
+# when nothing is known to hold it. (A mount table or swap areas that cannot
+# be read show no mount and no swap, as before.) Mounts and swap are looked
+# at on every device first, so a held device that is mounted is reported by
+# its mount. The holders are read from sysfs by the kernel name, which kname
+# asks for row by row (see roots, #185). Called in a condition, where set -e
+# does not apply, so the listing and the search of the holders are checked.
 in_use() {
     local rows d k at holders=()
     rows=$(tree "$1" 2>/dev/null) && [ -n "$rows" ] ||
