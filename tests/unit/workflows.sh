@@ -489,6 +489,16 @@ else:
     print("FAIL vm-tests.yml: the job consent does not compare the run's commit with the head of the pull "
           "request (pulls/$NUMBER) before it reads the label")
 
+# And whether the pull request is open, from the same answer and before the
+# label (#195): one read of the pull request, not two.
+state_read = consent_script.find('[ "$state" != open ]')
+if consent_script.count('gh api "repos/$REPO/pulls/$NUMBER"') == 1 and head_read < state_read < label_read and \
+        '(.state // "unknown")' in consent_script and ".merged" in consent_script:
+    print("ok vm-tests.yml: the job consent reads whether the pull request is open, with the head and before the label")
+else:
+    print("FAIL vm-tests.yml: the job consent does not read whether the pull request is open from its one "
+          "read of the pull request, before the label")
+
 # #180: consent decides before the build, so each suite job reads the label
 # again in its first step and fails when it is gone. The step is the same
 # text in the three jobs, runs on a pull request only, and the steps that

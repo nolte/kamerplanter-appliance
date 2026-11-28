@@ -213,12 +213,18 @@ case "$method $path" in
         answer <"$STATE/pulls" ;;
     "GET pulls/7")
         # The head of #7 right now: `new`, unless a test moved it on, in
-        # this repository (10) unless a test says another one, or none.
+        # this repository (10) unless a test says another one, or none. The
+        # pull request is open unless a test says closed (or nothing, for an
+        # answer without a state), and merged if a test says so: a merged
+        # pull request is closed and merged, as the API has it.
         [ ! -e "$STATE/pull-gone" ] || exit 1
         jq -n --arg sha "$(cat "$STATE/head" 2>/dev/null || echo new)" \
             --arg repo "$(cat "$STATE/head-repo" 2>/dev/null || echo 10)" \
+            --arg state "$(cat "$STATE/pull-state" 2>/dev/null || echo open)" \
+            --argjson merged "$([ -e "$STATE/pull-merged" ] && echo true || echo false)" \
             '{head: {sha: $sha, repo: (if $repo == "" then null else {id: ($repo | tonumber)} end)},
-              base: {repo: {id: 10}}}' | answer ;;
+              base: {repo: {id: 10}},
+              state: (if $state == "" then null else $state end), merged: $merged}' | answer ;;
     "GET actions/runs/"*)
         answer <"$STATE/jobs" ;;
     *)
@@ -1591,6 +1597,71 @@ consent labeled
 expect "the pull request cannot be read: the tests do not run" "1 " "$(ran)"
 expect "the pull request cannot be read: the run says so" \
     "::error::vm-gate has not accepted this commit for the VM tests (no answer from the API): the VM tests do not run. Remove the label vm-tests and set it again, or run the failed jobs again once vm-gate has accepted the commit." \
+    "$(tail -n1 "$work/out")"
+
+echo "# vm-tests.yml: a run on a pull request that is not open builds nothing (#195)"
+# A new attempt of a run on the last head of a pull request that was closed
+# since: the label is there, and vm-gate accepted the head after the event.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+echo closed >"$work/state/pull-state"
+rm -f "$work/summary"
+consent labeled
+expect "a new attempt on a closed pull request: the run ends, green" "0 run=false" "$(ran)"
+expect "a new attempt on a closed pull request: the summary says why" \
+    "The VM tests did not run: #7 is closed: a pull request that is not open has no VM tests to run." \
+    "$(cat "$work/summary")"
+rm -f "$work/summary"
+# The script without the look at the state must come out differently, or the
+# case above would pass on something else.
+# shellcheck disable=SC2016  # the script's own variables, not this one's
+sed 's|\[ "$state" != open \]|[ "$state" != "$state" ]|' "$work/vm-tests-consent.sh" >"$work/changed.sh"
+consent_script=$work/changed.sh
+consent labeled
+expect "the script without the look at the state: the tests run" "0 run=true" "$(ran)"
+consent_script=$work/vm-tests-consent.sh
+rm -f "$work/summary"
+
+# Merged: closed and merged in the API's answer.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+had_at new 13:30:00 success "the VM tests of this commit passed"
+echo closed >"$work/state/pull-state"
+touch "$work/state/pull-merged"
+consent labeled
+expect "a new attempt on a merged pull request: the run ends, green" "0 run=false" "$(ran)"
+expect "a new attempt on a merged pull request: the summary says why" \
+    "The VM tests did not run: #7 is merged: a pull request that is not open has no VM tests to run." \
+    "$(cat "$work/summary")"
+rm -f "$work/summary"
+
+# The state comes before the label and before vm-gate's status: the job does
+# not wait 10 minutes for a decision nobody takes about a closed pull request.
+reset vm-tests
+echo closed >"$work/state/pull-state"
+consent labeled
+expect "a closed pull request without a status since the event: the run ends, the job does not wait" \
+    "0 run=false" "$(ran)"
+rm -f "$work/summary"
+
+# The head comes first here as well: a head that was pushed while the pull
+# request was closed is another commit than this run's.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+echo closed >"$work/state/pull-state"
+echo newer >"$work/state/head"
+consent labeled
+expect "a closed pull request whose head moved on: the job fails as for any old commit" \
+    "$moved_on" "$code $(tail -n1 "$work/out")"
+
+# What cannot be read is no consent, and no reason to end green either.
+reset vm-tests
+had_at new 13:00:08 pending "waiting"
+: >"$work/state/pull-state"
+consent labeled
+expect "an answer without a state: the tests do not run" "1 " "$(ran)"
+expect "an answer without a state: the run says so" \
+    "::error::vm-gate has not accepted this commit for the VM tests (the state of #7 could not be read): the VM tests do not run. Remove the label vm-tests and set it again, or run the failed jobs again once vm-gate has accepted the commit." \
     "$(tail -n1 "$work/out")"
 
 # --- vm-tests.yml, the first step of the suite jobs ---
